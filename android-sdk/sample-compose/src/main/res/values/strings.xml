@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ModelHitch Android</string>
+    <string name="app_tagline">Hitch any provider on device</string>
+    <string name="provider">Provider</string>
+    <string name="api_key">%1$s API key</string>
+    <string name="model">Model</string>
+    <string name="saved_on_device">%1$s key saved on this device</string>
+    <string name="key_not_saved">No %1$s key saved</string>
+    <string name="save_key">Save key</string>
+    <string name="delete_key">Delete key</string>
+    <string name="prompt">Message</string>
+    <string name="send">Send</string>
+    <string name="stop">Stop</string>
+    <string name="empty_transcript">Your streamed response will appear here.</string>
+    <string name="missing_key">Enter or save an API key before sending.</string>
+    <string name="missing_prompt">Enter a message.</string>
+    <string name="ready">Ready</string>
+    <string name="streaming">Streaming</string>
+    <string name="stopped">Stopped</string>
+    <string name="key_saved">Key saved securely</string>
+    <string name="key_deleted">Saved key deleted</string>
+    <string name="assistant">MODEL</string>
+    <string name="you">YOU</string>
+</resources>

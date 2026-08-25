@@ -8,6 +8,7 @@ The root [README](../README.md) is the storefront. This is the operations manual
 - [Library API](#library-api)
 - [Credentials and BYOK](#credentials-and-byok)
 - [Web apps (browser)](#web-apps-browser)
+- [Android SDK](#android-sdk)
 - [Tools and React](#tools-and-react)
 - [Local agent bridge](#local-agent-bridge)
 - [Auto-mode failover](#auto-mode-failover)
@@ -124,6 +125,49 @@ offline and needs no key, which makes it handy for demos.
 The React hooks (`useChat`, `useStream`) and `createBridgeClient` from `modelhitch/react` work
 unchanged in browsers. The bridge server and SQLite usage storage are Node-only and are never
 included in the browser bundle.
+
+## Android SDK
+
+The native Kotlin SDK lives in [`android-sdk`](../android-sdk). It uses OkHttp, coroutines, Kotlin
+serialization, and Android Keystore directly; it does not embed the npm package or a JavaScript
+runtime. Applications can register every built-in provider or an approved subset:
+
+```kotlin
+val keys = AndroidKeyStoreCredentialStore(applicationContext)
+keys.set(selectedProviderId, keyEnteredByUser)
+
+val hitch = ModelHitch(
+  providers = DefaultProviders.all,
+  keyStore = keys,
+)
+
+hitch.stream(
+  ChatRequest(
+    provider = selectedProviderId,
+    model = selectedModelId,
+    messages = listOf(ModelMessage.User(text("Hello from Android"))),
+  ),
+).collect { event ->
+  if (event is StreamChunk.TextDelta) render(event.text)
+}
+```
+
+Credentials are encrypted independently by provider ID, so changing providers does not overwrite
+another provider's key. Explicit request credentials override the Keystore. Cancel the collecting
+coroutine to cancel the underlying network call.
+
+Use direct BYOK only for keys owned and supplied by the device user. Application-owned credentials
+belong behind an HTTPS backend or the ModelHitch bridge. An emulator reaches a bridge on its host
+machine through `10.0.2.2`; `127.0.0.1` points back to the emulator itself.
+
+The Android implementation currently covers OpenAI-compatible providers, normalized chat and SSE
+streaming, tools, multimodal request content, typed errors, model listing, and secure credentials.
+Native Anthropic/Gemini protocol adapters, policy routing, automatic failover, catalog routing,
+usage persistence, and the automated tool loop remain TypeScript-only. The Kotlin contracts are
+designed so those capabilities can be added without changing application call sites.
+
+See the [Android guide](../android-sdk/README.md) for build commands, Maven Local consumption,
+backup exclusions, custom providers, the multi-provider Compose sample, and the complete scope.
 
 ## Tools and React
 

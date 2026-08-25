@@ -1,0 +1,1 @@
+# ModelHitch uses no reflection. Consumer applications need no keep rules.

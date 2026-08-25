@@ -83,6 +83,7 @@ or `--force` to update an existing install.
 | --- | --- |
 | **Library** | `chat`, `stream`, tools, model discovery, typed errors, custom providers |
 | **Web apps** | Browser bundler support via `modelhitch/browser` — no Node polyfills |
+| **Android** | Native Kotlin SDK, coroutine streaming, Compose sample, Android Keystore BYOK storage |
 | **BYOK** | Request keys, memory storage, browser local storage, environment fallback |
 | **React** | `useChat`, `useStream`, and a bridge client via `modelhitch/react` |
 | **Bridge** | OpenAI Chat/Responses/Images, Anthropic Messages, and Gemini GenerateContent wires |
@@ -93,6 +94,41 @@ or `--force` to update an existing install.
 
 `OpenCode Zen` · `OpenCode Go` · `OpenAI` · `Anthropic` · `Groq` · `OpenRouter` ·
 `Together AI` · `HuggingFace` · `Google Gemini` · `DeepSeek` · `xAI` · `Mistral` · `Moonshot` · `Z.ai (GLM)` · `LM Studio` · `Ollama` · `vLLM` · `llama.cpp` · `KoboldCpp` · `mock`
+
+## Android SDK
+
+The [`android-sdk`](./android-sdk) subtree is a native Kotlin implementation for Android 6.0 and
+later. It provides provider-neutral chat types, `Flow` streaming, tool-call events, built-in
+OpenAI-compatible providers, typed errors, model listing, and AES-GCM credential storage backed by
+Android Keystore. It does not embed Node.js or a JavaScript runtime.
+
+```kotlin
+dependencies {
+  implementation("io.github.bobbybacklogs.modelhitch:modelhitch-android:0.1.0")
+}
+```
+
+```kotlin
+val keys = AndroidKeyStoreCredentialStore(applicationContext)
+keys.set(selectedProviderId, userProvidedKey)
+
+val hitch = ModelHitch(
+  providers = DefaultProviders.all,
+  keyStore = keys,
+)
+
+hitch.stream(
+  ChatRequest(
+    provider = selectedProviderId,
+    model = selectedModelId,
+    messages = listOf(ModelMessage.User(text("Hello from Android"))),
+  ),
+).collect { chunk ->
+  if (chunk is StreamChunk.TextDelta) append(chunk.text)
+}
+```
+
+[Android setup, architecture, security, sample, and build guide →](./android-sdk/README.md)
 
 ## Local agent bridge
 
