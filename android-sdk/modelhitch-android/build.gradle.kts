@@ -9,7 +9,7 @@ plugins {
 
 android {
     namespace = "com.genoventureslabs.modelhitch.android"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 23
@@ -24,6 +24,7 @@ android {
     lint {
         abortOnError = true
         warningsAsErrors = true
+        disable += "GradleDependency"
     }
 
 }

@@ -18,7 +18,7 @@ Central, publish it locally while integrating or depend on the modules directly.
 ## Requirements
 
 - Android `minSdk 23`
-- Consumer `compileSdk 37` or later (required by OkHttp 5.5 metadata)
+- Consumer `compileSdk 36` or later
 - Kotlin 2.2 or later
 - JDK 17 or later; the pinned Gradle wrapper runs correctly on JDK 21
 - HTTPS provider endpoint, or an explicit app-owned network security policy for development HTTP
