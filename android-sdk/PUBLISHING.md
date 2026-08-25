@@ -35,7 +35,7 @@ Android versions and tags are independent of the npm package. Version `0.1.0` us
 | `MAVEN_CENTRAL_USERNAME` | Central Portal token username |
 | `MAVEN_CENTRAL_PASSWORD` | Central Portal token password |
 | `SIGNING_KEY` | Complete ASCII-armored private key, including BEGIN/END lines |
-| `SIGNING_KEY_ID` | Long public key ID; optional but recommended |
+| `SIGNING_KEY_ID` | Long public key ID; optional. Omit it when the armored key contains one unambiguous signing key. |
 | `SIGNING_PASSWORD` | Signing key passphrase |
 
 Never put Central credentials, a private key, or its passphrase in `gradle.properties`, repository
