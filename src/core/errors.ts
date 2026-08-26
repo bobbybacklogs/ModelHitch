@@ -7,7 +7,8 @@ export type ModelHitchErrorCode =
   | 'provider-not-found'
   | 'provider-error'
   | 'network-error'
-  | 'bad-request';
+  | 'bad-request'
+  | 'capability-unavailable';
 
 export interface ModelHitchErrorOptions {
   status?: number;

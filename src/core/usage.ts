@@ -215,7 +215,19 @@ export function usageDashboardHtml(): string {
   th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #21262d; }
   th { color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
   tr:last-child td { border-bottom: none; }
-  .fail { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; }
+  .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 24px 0 8px; }
+  .section-head h1 { margin: 0; }
+  .btn { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 6px 12px; font: inherit; font-size: 12px; cursor: pointer; }
+  .btn:hover { background: #30363d; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .fail { display: flex; align-items: baseline; gap: 10px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; flex-wrap: wrap; }
+  .fail.stale { opacity: .55; }
+  .fail-when { color: #8b949e; font-size: 12px; white-space: nowrap; min-width: 84px; }
+  .fail-lane { flex: 1; min-width: 200px; }
+  .pill { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid #30363d; white-space: nowrap; }
+  .pill.rate-limited { color: #d29922; border-color: #d29922; }
+  .pill.provider-error, .pill.network-error { color: #f85149; border-color: #f85149; }
+  .pill.other { color: #8b949e; }
   .muted { color: #8b949e; }
   #err { color: #f85149; margin-bottom: 12px; display: none; }
 </style>
@@ -229,6 +241,29 @@ export function usageDashboardHtml(): string {
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = (n) => '$' + Number(n).toFixed(2);
 const fmtI = (n) => Math.round(n).toLocaleString('en-US');
+function timeAgo(iso) {
+  const ms = Date.now() - new Date(iso).getTime();
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.round(s / 60);
+  if (m < 60) return m + 'm ago';
+  const h = Math.round(m / 60);
+  if (h < 24) return h + 'h ago';
+  const d = Math.round(h / 24);
+  if (d < 30) return d + 'd ago';
+  return Math.round(d / 30) + 'mo ago';
+}
+async function clearHistory() {
+  if (!confirm('Clear all usage stats and failover history? This cannot be undone.')) return;
+  const btn = document.getElementById('clear-history');
+  if (btn) btn.disabled = true;
+  try {
+    await fetch('/v1/usage/reset', { method: 'POST' });
+  } finally {
+    if (btn) btn.disabled = false;
+    tick();
+  }
+}
 async function tick() {
   try {
     const t = await (await fetch('/v1/usage')).json();
@@ -250,9 +285,19 @@ async function tick() {
     const mrow = Object.entries(t.perModel).sort((a,b) => b[1].costUsd - a[1].costUsd).slice(0,15)
       .map(([id,v]) => '<tr><td>' + esc(id) + '</td><td>' + fmtI(v.requests) + '</td><td>' + fmtI(v.totalTokens) + '</td><td>' + fmt(v.costUsd) + '</td></tr>').join('') ||
       '<tr><td colspan="4" class="muted">no requests yet</td></tr>';
+    const STALE_MS = 60 * 60 * 1000; // failovers older than an hour fade out — they're history, not live routing
     const fails = t.failovers.recent.length === 0
-      ? '<div class="muted">no failovers yet — auto-mode is standing by</div>'
-      : t.failovers.recent.map((f) => '<div class="fail">' + esc(f.from.providerId) + '/' + esc(f.from.model) + ' → <b>' + esc(f.to.providerId) + '/' + esc(f.to.model) + '</b> <span class="muted">(' + esc(f.error.code) + (f.error.status ? ' HTTP ' + f.error.status : '') + ')</span></div>').join('');
+      ? '<div class="muted">no failovers yet — routing is standing by</div>'
+      : t.failovers.recent.map((f) => {
+          const code = f.error.code || 'other';
+          const pillClass = ['rate-limited', 'provider-error', 'network-error'].includes(code) ? code : 'other';
+          const stale = Date.now() - new Date(f.at).getTime() > STALE_MS;
+          return '<div class="fail' + (stale ? ' stale' : '') + '">' +
+            '<span class="fail-when" title="' + esc(new Date(f.at).toLocaleString()) + '">' + esc(timeAgo(f.at)) + '</span>' +
+            '<span class="fail-lane">' + esc(f.from.providerId) + '/' + esc(f.from.model) + ' → <b>' + esc(f.to.providerId) + '/' + esc(f.to.model) + '</b></span>' +
+            '<span class="pill ' + pillClass + '">' + esc(code) + (f.error.status ? ' ' + f.error.status : '') + '</span>' +
+            '</div>';
+        }).join('');
     document.getElementById('app').innerHTML =
       '<div class="cards">' +
         '<div class="card"><div class="k">Requests</div><div class="v">' + fmtI(t.totals.requests) + '</div></div>' +
@@ -263,7 +308,9 @@ async function tick() {
       '<div class="wins">' + wins + '</div>' +
       '<table><thead><tr><th>Provider</th><th>Requests</th><th>Tokens (in/out)</th><th>Cost</th></tr></thead><tbody>' + prow + '</tbody></table>' +
       '<table><thead><tr><th>Model</th><th>Requests</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>' + mrow + '</tbody></table>' +
-      '<h1>Recent failovers</h1><div style="margin-top:8px">' + fails + '</div>';
+      '<div class="section-head"><h1>Recent failovers</h1><button class="btn" id="clear-history" onclick="clearHistory()">Clear history</button></div>' +
+      '<div class="sub" style="margin:-4px 0 8px">newest first · faded rows are over an hour old</div>' +
+      fails;
   } catch (e) {
     document.getElementById('err').style.display = 'block';
     document.getElementById('err').textContent = 'bridge unreachable: ' + e;

@@ -79,9 +79,20 @@ export function settingsPageHtml(): string {
 
   .pill { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--line2); border-radius: 4px; padding: 3px 8px; background: var(--panel2); }
 
-  .lane-list .lane { display: grid; grid-template-columns: 1fr 2fr auto; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .lane-list .lane { display: grid; grid-template-columns: 1fr 2fr auto; gap: 10px; align-items: start; padding: 8px 0; border-bottom: 1px solid var(--line); }
   .lane-list .lane:last-child { border-bottom: 0; }
+  .lane-list .lane > select.lane-provider, .lane-list .lane > button.lane-remove { margin-top: 1px; }
   .lane-list .lbl { font-family: var(--mono); font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+
+  .lane-models { min-width: 0; }
+  .lane-models .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .lane-models .chips:empty { display: none; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 12px; background: var(--panel2); border: 1px solid var(--line2); border-radius: 999px; padding: 3px 6px 3px 10px; }
+  .chip-x { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; }
+  .chip-x:hover { color: var(--bad); }
+  .model-add-row { display: flex; gap: 8px; }
+  .model-add-row select, .model-add-row input { font-size: 12px; padding: 6px 8px; }
+  .no-models-hint { font-size: 11px; color: var(--muted); font-style: italic; margin-top: 4px; }
 
   .status { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
@@ -405,12 +416,65 @@ function providerSelect(group, value) {
   return sel + '</select>';
 }
 
+/* Bare (provider-scoped) model ids the bridge currently advertises for a
+   provider, sourced from GET /v1/models — the same ids a policy lane's
+   models array expects (no providerId/ prefix). */
+function modelsForProvider(providerId) {
+  var prefix = providerId + '/';
+  var seen = {};
+  var out = [];
+  (state.models || []).forEach(function (m) {
+    if (m.owned_by !== providerId) return;
+    var bare = m.id.indexOf(prefix) === 0 ? m.id.slice(prefix.length) : m.id;
+    if (!bare || seen[bare]) return;
+    seen[bare] = true;
+    out.push(bare);
+  });
+  return out.sort();
+}
+
+function modelChipHtml(model) {
+  return '<span class="chip" data-model="' + esc(model) + '">' + esc(model) + '<button type="button" class="chip-x" title="remove">\u00d7</button></span>';
+}
+
+function modelsEditorHtml(models, group, providerId) {
+  var chosen = models || [];
+  var available = modelsForProvider(providerId).filter(function (m) { return chosen.indexOf(m) === -1; });
+  var options = '<option value="">' + (available.length ? '+ add a known model…' : '(no catalog models for this provider)') + '</option>' +
+    available.map(function (m) { return '<option value="' + esc(m) + '">' + esc(m) + '</option>'; }).join('');
+  return '<div class="lane-models" data-group="' + group + '">' +
+    '<div class="chips">' + chosen.map(modelChipHtml).join('') + '</div>' +
+    '<div class="model-add-row">' +
+      '<select class="model-add">' + options + '</select>' +
+      '<input type="text" class="model-add-custom" placeholder="or type an id + Enter" />' +
+    '</div>' +
+    '<div class="no-models-hint">empty = the provider\'s default model</div>' +
+  '</div>';
+}
+
+function addModelChip(originEl, model) {
+  var modelsDiv = originEl.closest('.lane-models');
+  var chips = modelsDiv.querySelector('.chips');
+  var dup = Array.prototype.some.call(chips.children, function (c) { return c.dataset.model === model; });
+  if (dup) return;
+  var span = document.createElement('span');
+  span.className = 'chip';
+  span.dataset.model = model;
+  span.innerHTML = esc(model) + '<button type="button" class="chip-x" title="remove">\u00d7</button>';
+  chips.appendChild(span);
+  var addSel = modelsDiv.querySelector('.model-add');
+  Array.prototype.slice.call(addSel.options).forEach(function (opt) {
+    if (opt.value === model) addSel.removeChild(opt);
+  });
+}
+
 function laneRow(lane, group) {
   var row = document.createElement('div');
   row.className = 'lane';
+  var providerId = lane.providerId || knownProviderIds()[0] || '';
   row.innerHTML =
-    providerSelect(group, lane.providerId || '') +
-    '<input type="text" class="lane-models" placeholder="models, comma-separated (empty = provider default)" value="' + esc((lane.models || []).join(', ')) + '" data-group="' + group + '" />' +
+    providerSelect(group, providerId) +
+    modelsEditorHtml(lane.models, group, providerId) +
     '<button class="btn danger lane-remove">remove</button>';
   return row;
 }
@@ -480,7 +544,7 @@ function collectPolicy() {
   document.querySelectorAll('#trusted-lanes .lane, #fallback-lanes .lane').forEach(function (row) {
     var isTrusted = row.parentNode.id === 'trusted-lanes';
     var providerId = row.querySelector('.lane-provider').value.trim();
-    var models = row.querySelector('.lane-models').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+    var models = Array.prototype.map.call(row.querySelectorAll('.lane-models .chips .chip'), function (c) { return c.dataset.model; });
     if (!providerId) return;
     var entry = { providerId: providerId };
     if (models.length) entry.models = models;
@@ -561,6 +625,8 @@ async function loadAll() {
     var cat = await api('/v1/catalog');
     state.catalog = cat.providers || [];
     state.builtin = cat.builtin || [];
+    var models = await api('/v1/models');
+    state.models = models.data || [];
     renderImageGeneration(); renderProviders(); renderCatalog(); renderPolicy(); renderReliability();
     refreshHealth();
   } catch (err) {
@@ -614,6 +680,44 @@ document.addEventListener('click', function (ev) {
     box.querySelector('.empty') && box.removeChild(box.querySelector('.empty'));
     box.appendChild(laneRow({}, group));
     return;
+  }
+  if (t.classList && t.classList.contains('chip-x')) {
+    var chip = t.closest('.chip');
+    var modelsDiv = chip.closest('.lane-models');
+    var model = chip.dataset.model;
+    chip.remove();
+    var addSel = modelsDiv.querySelector('.model-add');
+    if (!Array.prototype.some.call(addSel.options, function (o) { return o.value === model; })) {
+      var opt = document.createElement('option');
+      opt.value = model; opt.textContent = model;
+      addSel.appendChild(opt);
+    }
+    return;
+  }
+});
+document.addEventListener('change', function (ev) {
+  var t = ev.target;
+  if (t.classList && t.classList.contains('lane-provider')) {
+    var laneEl = t.closest('.lane');
+    var group = t.dataset.group;
+    var modelsDiv = laneEl.querySelector('.lane-models');
+    modelsDiv.outerHTML = modelsEditorHtml([], group, t.value);
+    return;
+  }
+  if (t.classList && t.classList.contains('model-add') && t.value) {
+    addModelChip(t, t.value);
+    t.value = '';
+    return;
+  }
+});
+document.addEventListener('keydown', function (ev) {
+  var t = ev.target;
+  if (t.classList && t.classList.contains('model-add-custom') && ev.key === 'Enter') {
+    ev.preventDefault();
+    var val = t.value.trim();
+    if (!val) return;
+    addModelChip(t, val);
+    t.value = '';
   }
 });
 setInterval(refreshHealth, 5000);

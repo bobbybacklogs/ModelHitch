@@ -116,3 +116,81 @@ describe('ModelHitch client', () => {
     expect(seenModel).toBe('default-model-42');
   });
 });
+
+describe('capability-aware routing', () => {
+  let incapableCalls = 0;
+  const incapable: Provider = {
+    id: 'no-tools',
+    name: 'no-tools',
+    defaultModel: 'no-tools-model',
+    capabilities: { streaming: true, toolCalling: false, vision: false, embeddings: false },
+    async chat() {
+      incapableCalls++;
+      return { message: { role: 'assistant', content: 'served by no-tools' }, finishReason: 'stop' };
+    },
+    async *stream(): AsyncGenerator<StreamChunk> {
+      incapableCalls++;
+      yield { type: 'text-delta', text: 'served by no-tools' };
+      yield { type: 'finish', finishReason: 'stop' };
+    },
+  };
+  const capable: Provider = {
+    id: 'has-tools',
+    name: 'has-tools',
+    defaultModel: 'has-tools-model',
+    capabilities: { streaming: true, toolCalling: true, vision: false, embeddings: false },
+    async chat() {
+      return { message: { role: 'assistant', content: 'served by has-tools' }, finishReason: 'stop' };
+    },
+    async *stream(): AsyncGenerator<StreamChunk> {
+      yield { type: 'text-delta', text: 'served by has-tools' };
+      yield { type: 'finish', finishReason: 'stop' };
+    },
+  };
+  const TOOLS = [{ name: 'get_weather', description: 'weather', parameters: { type: 'object' } }];
+
+  it('skips a tool-incapable primary straight to a capable fallback lane — never attempts the primary', async () => {
+    incapableCalls = 0;
+    const mh = new ModelHitch({
+      providers: [incapable, capable],
+      autoMode: { lanes: [{ providerId: 'has-tools', model: 'has-tools-model' }] },
+    });
+    const result = await mh.chat({
+      provider: 'no-tools',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: TOOLS,
+    });
+    expect(result.message).toMatchObject({ content: 'served by has-tools' });
+    expect(incapableCalls).toBe(0);
+  });
+
+  it('skips a tool-incapable primary for streaming too', async () => {
+    incapableCalls = 0;
+    const mh = new ModelHitch({
+      providers: [incapable, capable],
+      autoMode: { lanes: [{ providerId: 'has-tools', model: 'has-tools-model' }] },
+    });
+    const stream = await mh.stream({
+      provider: 'no-tools',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: TOOLS,
+    });
+    const events = [];
+    for await (const e of stream) events.push(e);
+    expect(events[0]).toEqual({ type: 'text-delta', text: 'served by has-tools' });
+    expect(incapableCalls).toBe(0);
+  });
+
+  it('throws CapabilityUnavailableError when no configured lane can serve the request', async () => {
+    const mh = new ModelHitch({ providers: [incapable] });
+    await expect(
+      mh.chat({ provider: 'no-tools', messages: [{ role: 'user', content: 'hi' }], tools: TOOLS }),
+    ).rejects.toMatchObject({ code: 'capability-unavailable' });
+  });
+
+  it('does not affect requests that need no special capability', async () => {
+    const mh = new ModelHitch({ providers: [incapable] });
+    const result = await mh.chat({ provider: 'no-tools', messages: [{ role: 'user', content: 'hi' }] });
+    expect(result.finishReason).toBe('stop');
+  });
+});

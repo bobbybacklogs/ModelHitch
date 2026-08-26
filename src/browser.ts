@@ -54,6 +54,17 @@ export {
 export { MemoryLaneCooldown, type MemoryLaneCooldownOptions } from './core/cooldown.js';
 export { parseRetryAfter } from './core/headers.js';
 
+// capability-aware routing — skip lanes that can't meet a request's needs
+export {
+  inferRequirements,
+  satisfiesRequirements,
+  filterEligibleLanes,
+  CapabilityUnavailableError,
+  isCapabilityUnavailableError,
+  type CapabilityRequirements,
+  type SkippedCapabilityLane,
+} from './core/capabilities.js';
+
 // models.dev catalog integration (Milestone 2) — browser-safe (fetch + mdev-sdk)
 export { createCatalogSource, isCallableProvider } from './catalog/source.js';
 export type {

@@ -13,6 +13,7 @@ The root [README](../README.md) is the storefront. This is the operations manual
 - [Tools and React](#tools-and-react)
 - [Local agent bridge](#local-agent-bridge)
 - [Auto-mode failover](#auto-mode-failover)
+- [Capability-aware routing](#capability-aware-routing)
 - [Usage and persistence](#usage-and-persistence)
 - [Errors and custom providers](#errors-and-custom-providers)
 
@@ -317,6 +318,31 @@ when data routing matters.
 - Mid-stream failures propagate to avoid duplicated output.
 - If all lanes fail, the original error remains actionable.
 
+## Capability-aware routing
+
+A request that carries `tools` needs a tool-calling-capable lane — ModelHitch checks every resolved
+lane (primary included) against its provider's `capabilities` before attempting it. Lanes that can't
+meet a requirement are skipped entirely: no call is made, so nothing cools down and nothing counts
+as a provider failure. If every configured lane lacks the capability, the call rejects with a
+`CapabilityUnavailableError` (`code: 'capability-unavailable'`) carrying `requirements` and the
+skipped lanes instead of quietly forwarding tools to a provider that will ignore or reject them.
+
+```ts
+import { isCapabilityUnavailableError } from 'modelhitch';
+
+try {
+  await mh.chat({ provider: 'ollama', messages, tools });
+} catch (err) {
+  if (isCapabilityUnavailableError(err)) {
+    console.error(err.requirements, err.skipped); // { toolCalling: true }, [{ target, reason }]
+  }
+}
+```
+
+`toolCalling` is inferred automatically from `tools`; `vision`/`streaming`/`embeddings` are
+recognized requirement keys you can pass explicitly (matching `Provider.capabilities`) as more
+requirement classes come up.
+
 ## Usage and persistence
 
 The bridge tracks requests, tokens, estimated cost, latency, wire, model, provider, and failovers.
@@ -335,7 +361,7 @@ free or unknown pricing reports zero and is not proof that billing cannot occur.
 
 Handle `ModelHitchError.code` instead of parsing provider strings. Stable codes include
 `missing-api-key`, `invalid-api-key`, `rate-limited`, `model-not-found`, `provider-not-found`,
-`provider-error`, `network-error`, and `bad-request`.
+`provider-error`, `network-error`, `bad-request`, and `capability-unavailable`.
 
 Create an OpenAI-compatible integration with `createOpenAICompatibleProvider`. For another wire
 protocol, implement the `Provider` interface with `chat`, `stream`, `capabilities`, and optionally

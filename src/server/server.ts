@@ -29,6 +29,7 @@ import {
 } from '../core/policy.js';
 import { CircuitBreaker, type LaneHealth } from '../core/circuit-breaker.js';
 import { MemoryLaneCooldown } from '../core/cooldown.js';
+import { inferRequirements, filterEligibleLanes, CapabilityUnavailableError, type CapabilityRequirements } from '../core/capabilities.js';
 import type { CatalogSource } from '../catalog/source.js';
 import { settingsPageHtml } from '../settings-page.js';
 import { UsageTracker, usageDashboardHtml, type UsageEvent } from '../core/usage.js';
@@ -691,7 +692,7 @@ export class OpenAICompatibleServer {
     this.log(`  -> ${provider.id}/${model}`);
     const startedAt = Date.now();
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
     );
@@ -729,7 +730,7 @@ export class OpenAICompatibleServer {
     });
 
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params, { streaming: true });
     const usageInfo = { providerId: provider.id, model, wire: 'chat-completions' as const, streamed: true };
     const stream = this.trackStream(
       withFailoverStream(
@@ -893,7 +894,7 @@ export class OpenAICompatibleServer {
     this.log(`  -> ${provider.id}/${model} (responses)`);
     const startedAt = Date.now();
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
     );
@@ -923,7 +924,7 @@ export class OpenAICompatibleServer {
     });
 
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params, { streaming: true });
     const usageInfo = { providerId: provider.id, model, wire: 'responses' as const, streamed: true };
     const stream = this.trackStream(
       withFailoverStream(
@@ -1007,7 +1008,7 @@ export class OpenAICompatibleServer {
     this.log(`  -> ${provider.id}/${model} (anthropic)`);
     const startedAt = Date.now();
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
     );
@@ -1035,7 +1036,7 @@ export class OpenAICompatibleServer {
     });
 
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params, { streaming: true });
     const usageInfo = { providerId: provider.id, model, wire: 'messages' as const, streamed: true };
     const stream = this.trackStream(
       withFailoverStream(
@@ -1134,7 +1135,7 @@ export class OpenAICompatibleServer {
     this.log(`  -> ${provider.id}/${model} (gemini)`);
     const startedAt = Date.now();
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
     );
@@ -1162,7 +1163,7 @@ export class OpenAICompatibleServer {
     });
 
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = [primary, ...(await this.resolveLaneTargets(provider.id, model))];
+    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params, { streaming: true });
     const usageInfo = { providerId: provider.id, model, wire: 'gemini' as const, streamed: true };
     const stream = this.trackStream(
       withFailoverStream(
@@ -1298,6 +1299,26 @@ export class OpenAICompatibleServer {
       });
     }
     return lanes;
+  }
+
+  /**
+   * Drop lanes whose provider can't meet the request's inferred requirements
+   * (tool calling, vision, ...) before failover attempts them. A capability
+   * mismatch is a routing decision, not a runtime failure: skipped lanes are
+   * logged but never cooled and never counted against a provider.
+   */
+  private requireCapableTargets(
+    targets: ResolvedLane[],
+    params: ChatParams,
+    extra: CapabilityRequirements = {},
+  ): ResolvedLane[] {
+    const requirements = inferRequirements(params, extra);
+    const { eligible, skipped } = filterEligibleLanes(targets, requirements, (t) => t.provider.capabilities);
+    for (const s of skipped) {
+      this.log(`  ~~ skipped ${s.target.providerId}/${s.target.model} (${s.reason})`);
+    }
+    if (eligible.length === 0) throw new CapabilityUnavailableError(requirements, skipped);
+    return eligible;
   }
 
   private laneTargetsFromSource(providerId: string, model: string): FailoverTarget[] {

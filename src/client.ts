@@ -20,6 +20,12 @@ import { createCatalogSource, type CatalogSource, type CatalogSourceOptions } fr
 import { CircuitBreaker, type LaneHealth } from './core/circuit-breaker.js';
 import { ModelHitchError, type ModelHitchErrorCode } from './core/errors.js';
 import { aggregateStream } from './core/stream.js';
+import {
+  inferRequirements,
+  filterEligibleLanes,
+  CapabilityUnavailableError,
+  type CapabilityRequirements,
+} from './core/capabilities.js';
 import { defaultProviders } from './registry.js';
 import {
   DEFAULT_RETRYABLE_CODES,
@@ -278,6 +284,21 @@ export class ModelHitch {
   }
 
   /**
+   * Drop lanes whose provider can't meet the request's inferred requirements
+   * (tool calling, vision, ...) before failover ever attempts them — a
+   * capability mismatch is a routing decision, not a runtime failure, so
+   * skipped lanes never cool down and never count against a provider.
+   */
+  private capableTargets(
+    targets: FailoverTarget[],
+    req: CapabilityRequirements,
+  ): FailoverTarget[] {
+    const { eligible, skipped } = filterEligibleLanes(targets, req, (t) => this.source.lookup(t.providerId)?.capabilities);
+    if (eligible.length === 0) throw new CapabilityUnavailableError(req, skipped);
+    return eligible;
+  }
+
+  /**
    * Opt-in delay before a lane switch (policy.backoff). Returns ms to wait or
    * undefined for instant. Waiting is bounded politeness: Retry-After is used
    * as the floor up to the user's `maxMs` cap — the cap wins, because opting
@@ -331,8 +352,11 @@ export class ModelHitch {
     const primaryModel = this.resolveModel(provider, input);
     const params = this.buildParams(input, provider);
     const credentials = credentialsOverride ?? (await this.resolveCredentials(provider, input));
-    const targets = this.failoverTargets(provider.id, primaryModel);
-    if (targets.length <= 1) return provider.chat(params, credentials);
+    const requirements = inferRequirements(params);
+    const targets = this.capableTargets(this.failoverTargets(provider.id, primaryModel), requirements);
+    if (targets.length <= 1 && targets[0]?.providerId === provider.id && targets[0]?.model === primaryModel) {
+      return provider.chat(params, credentials);
+    }
 
     const opts = this.autoMode;
     const { value } = await withFailover(
@@ -360,14 +384,20 @@ export class ModelHitch {
     const primaryModel = this.resolveModel(provider, input);
     const params = this.buildParams(input, provider);
     const credentials = credentialsOverride ?? (await this.resolveCredentials(provider, input));
-    const targets = this.failoverTargets(provider.id, primaryModel);
-    if (targets.length <= 1) return provider.stream(params, credentials);
+    const requirements = inferRequirements(params, { streaming: true });
+    const targets = this.capableTargets(this.failoverTargets(provider.id, primaryModel), requirements);
+    if (targets.length <= 1 && targets[0]?.providerId === provider.id && targets[0]?.model === primaryModel) {
+      return provider.stream(params, credentials);
+    }
 
     const opts = this.autoMode;
     // Resolve fallback-lane credentials eagerly (they are static per lane and
-    // the failover generator needs a synchronous attempt callback).
+    // the failover generator needs a synchronous attempt callback). Filter by
+    // identity rather than index — capability filtering may have dropped the
+    // primary lane itself, so it isn't necessarily at index 0 anymore.
     const laneCreds = new Map<string, ProviderCredentials>();
-    for (const target of targets.slice(1)) {
+    for (const target of targets) {
+      if (target.providerId === provider.id && target.model === primaryModel) continue;
       if (!laneCreds.has(target.providerId)) {
         laneCreds.set(target.providerId, await this.laneCredentials(target.providerId));
       }

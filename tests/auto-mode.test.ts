@@ -183,3 +183,101 @@ const alwaysRated2: Provider = {
   },
 };
 const secondFailovers: any[] = [];
+
+describe('bridge capability-aware routing', () => {
+  let noToolsCalls = 0;
+  const noTools: Provider = {
+    id: 'no-tools',
+    name: 'No tool calling',
+    defaultModel: 'no-tools-model',
+    capabilities: { streaming: true, toolCalling: false, vision: false, embeddings: false },
+    async chat(): Promise<ChatResult> {
+      noToolsCalls++;
+      return { message: { role: 'assistant', content: 'served by no-tools' }, finishReason: 'stop' };
+    },
+    async *stream(): AsyncGenerator<StreamChunk> {
+      noToolsCalls++;
+      yield { type: 'text-delta', text: 'served by no-tools' };
+      yield { type: 'finish', finishReason: 'stop' };
+    },
+  };
+  const withTools: Provider = {
+    id: 'with-tools',
+    name: 'Tool calling',
+    defaultModel: 'with-tools-model',
+    capabilities: { streaming: true, toolCalling: true, vision: false, embeddings: false },
+    async chat(): Promise<ChatResult> {
+      return { message: { role: 'assistant', content: 'served by with-tools' }, finishReason: 'stop' };
+    },
+    async *stream(): AsyncGenerator<StreamChunk> {
+      yield { type: 'text-delta', text: 'served by with-tools' };
+      yield { type: 'finish', finishReason: 'stop' };
+    },
+  };
+  const TOOLS = [{ type: 'function', function: { name: 'get_weather', description: 'x', parameters: { type: 'object', properties: {} } } }];
+
+  let capServer: OpenAICompatibleServer;
+  let capBase: string;
+
+  beforeAll(async () => {
+    capServer = createModelHitchServer({
+      providers: [noTools, withTools],
+      defaultProviderId: 'no-tools',
+      autoMode: { lanes: [{ providerId: 'with-tools', model: 'with-tools-model' }] },
+    });
+    const info = await capServer.listen(0, '127.0.0.1');
+    capBase = info.url;
+  });
+
+  afterAll(async () => {
+    await capServer.close();
+  });
+
+  it('skips a tool-incapable primary lane and serves from the capable fallback, without attempting the primary', async () => {
+    noToolsCalls = 0;
+    const res = await fetch(`${capBase}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'no-tools-model',
+        tools: TOOLS,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { choices: Array<{ message: { content: string } }> };
+    expect(body.choices[0]!.message.content).toContain('with-tools');
+    expect(noToolsCalls).toBe(0);
+  });
+
+  it('returns a capability-unavailable error when no lane can serve the request', async () => {
+    const soloServer = createModelHitchServer({ providers: [noTools], defaultProviderId: 'no-tools' });
+    const info = await soloServer.listen(0, '127.0.0.1');
+    const res = await fetch(`${info.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'no-tools-model',
+        tools: TOOLS,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('capability-unavailable');
+    await soloServer.close();
+  });
+
+  it('does not affect requests that need no special capability', async () => {
+    noToolsCalls = 0;
+    const res = await fetch(`${capBase}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'no-tools-model', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { choices: Array<{ message: { content: string } }> };
+    expect(body.choices[0]!.message.content).toContain('no-tools');
+    expect(noToolsCalls).toBe(1);
+  });
+});

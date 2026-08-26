@@ -112,4 +112,31 @@ describe('runToolLoop', () => {
       }
     }).rejects.toThrowError('boom');
   });
+
+  it('surfaces a capability-unavailable error when tools are forwarded to a tool-incapable provider', async () => {
+    const noTools = {
+      id: 'no-tools',
+      name: 'no-tools',
+      defaultModel: 'no-tools-model',
+      capabilities: { streaming: true, toolCalling: false, vision: false, embeddings: false },
+      async chat() {
+        throw new Error('should never be called — capability check must reject first');
+      },
+      async *stream(): AsyncGenerator<never> {
+        throw new Error('should never be called — capability check must reject first');
+      },
+    };
+    const mhNoTools = new ModelHitch({ providers: [noTools] });
+    const gen = runToolLoop(
+      mhNoTools,
+      { provider: 'no-tools', messages: [{ role: 'user', content: 'hi' }], tools: TOOLS },
+      async () => '',
+    );
+
+    await expect(async () => {
+      for await (const _ of gen) {
+        // consume
+      }
+    }).rejects.toMatchObject({ code: 'capability-unavailable' });
+  });
 });
