@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "protocol": "openai-chat-completions",
+  "request": {
+    "path": "/v1/chat/completions",
+    "model": "test-model",
+    "messages": [
+      {"role": "user", "content": "Hello"}
+    ]
+  },
+  "chatResponse": {
+    "choices": [
+      {
+        "message": {"role": "assistant", "content": "Hello ModelHitch"},
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
+  },
+  "streamFrames": [
+    {"choices": [{"delta": {"content": "Hel"}, "finish_reason": null}]},
+    {"choices": [{"delta": {"content": "lo"}, "finish_reason": "stop"}]},
+    {"choices": [], "usage": {"total_tokens": 7}},
+    "[DONE]"
+  ],
+  "expectedStream": [
+    {"type": "text-delta", "text": "Hel"},
+    {"type": "text-delta", "text": "lo"},
+    {"type": "finish", "finishReason": "stop", "usage": {"totalTokens": 7}}
+  ]
+}

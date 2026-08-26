@@ -1,0 +1,33 @@
+name: modelhitch_flutter
+description: Provider-neutral BYOK chat and streaming for Flutter and Dart applications.
+version: 0.1.0
+homepage: https://github.com/genoventures-labs/ModelHitch
+repository: https://github.com/genoventures-labs/ModelHitch
+issue_tracker: https://github.com/genoventures-labs/ModelHitch/issues
+topics:
+  - ai
+  - llm
+  - flutter
+  - byok
+  - openai
+
+environment:
+  sdk: ^3.4.0
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_secure_storage: ^9.2.4
+  modelhitch_dart: ^0.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+
+dependency_overrides:
+  modelhitch_dart:
+    path: ../modelhitch_dart

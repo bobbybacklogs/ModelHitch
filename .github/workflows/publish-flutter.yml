@@ -1,0 +1,34 @@
+name: Publish Flutter SDK
+
+on:
+  push:
+    tags:
+      - "flutter-v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-flutter-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pub-dev
+    defaults:
+      run:
+        working-directory: flutter-sdk/modelhitch_flutter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.22.0
+          cache: true
+      - run: flutter pub get
+      - run: dart format --set-exit-if-changed .
+      - run: flutter analyze
+      - run: flutter test
+      - run: dart pub publish --dry-run
+      - run: dart pub publish --force

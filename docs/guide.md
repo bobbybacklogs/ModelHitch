@@ -9,6 +9,7 @@ The root [README](../README.md) is the storefront. This is the operations manual
 - [Credentials and BYOK](#credentials-and-byok)
 - [Web apps (browser)](#web-apps-browser)
 - [Android SDK](#android-sdk)
+- [Dart and Flutter SDKs](#dart-and-flutter-sdks)
 - [Tools and React](#tools-and-react)
 - [Local agent bridge](#local-agent-bridge)
 - [Auto-mode failover](#auto-mode-failover)
@@ -168,6 +169,36 @@ designed so those capabilities can be added without changing application call si
 
 See the [Android guide](../android-sdk/README.md) for build commands, Maven Local consumption,
 backup exclusions, custom providers, the multi-provider Compose sample, and the complete scope.
+
+## Dart and Flutter SDKs
+
+The [`flutter-sdk`](../flutter-sdk) subtree separates the reusable Dart client from Flutter-only
+platform storage. `modelhitch_dart` provides the normalized types, `ModelHitch`, `Provider`,
+OpenAI-compatible HTTP/SSE adapter, `KeyStore`, and typed error contract. External Dart extensions
+implement `Provider` for a new protocol or `KeyStore` for a credential mechanism. The Flutter
+adapter re-exports the core and provides `FlutterSecureKeyStore` through `flutter_secure_storage`.
+
+```dart
+import 'package:modelhitch_dart/modelhitch_dart.dart';
+
+final hitch = ModelHitch(keyStore: MemoryKeyStore());
+await hitch.keyStore!.set('openai', userProvidedKey);
+final result = await hitch.chat(
+  ChatRequest(
+    provider: 'openai',
+    messages: [ModelMessage.user(MessageContent.text('Hello from Dart'))],
+  ),
+);
+```
+
+Use `package:modelhitch_flutter/modelhitch_flutter.dart` and `FlutterSecureKeyStore` in a Flutter
+application. Do not put an application-owned key in either package; connect to a trusted backend or
+ModelHitch bridge instead.
+
+Cross-SDK OpenAI-compatible behavior is specified by the repository's
+[conformance fixtures](../conformance). The Dart core must release before a Flutter adapter that
+depends on it. See the [Dart/Flutter publishing guide](../flutter-sdk/PUBLISHING.md) for the
+trusted-publishing setup and release order.
 
 ## Tools and React
 

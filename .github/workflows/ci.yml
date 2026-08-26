@@ -20,6 +20,39 @@ jobs:
       - run: npm ci
       - run: npm run prepublishOnly
 
+  dart:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flutter-sdk/modelhitch_dart
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.4.0
+      - run: dart pub get
+      - run: dart format --set-exit-if-changed .
+      - run: dart analyze
+      - run: dart test
+      - run: dart pub publish --dry-run
+
+  flutter:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flutter-sdk/modelhitch_flutter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.22.0
+          cache: true
+      - run: flutter pub get
+      - run: dart format --set-exit-if-changed .
+      - run: flutter analyze
+      - run: flutter test
+      - run: dart pub publish --dry-run
+
   android:
     runs-on: ubuntu-latest
     steps:

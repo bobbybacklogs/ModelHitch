@@ -84,6 +84,7 @@ or `--force` to update an existing install.
 | **Library** | `chat`, `stream`, tools, model discovery, typed errors, custom providers |
 | **Web apps** | Browser bundler support via `modelhitch/browser` — no Node polyfills |
 | **Android** | Native Kotlin SDK, coroutine streaming, Compose sample, Android Keystore BYOK storage |
+| **Flutter** | Dart SDK, SSE streaming, secure BYOK storage, OpenAI-compatible providers and bridges |
 | **BYOK** | Request keys, memory storage, browser local storage, environment fallback |
 | **React** | `useChat`, `useStream`, and a bridge client via `modelhitch/react` |
 | **Bridge** | OpenAI Chat/Responses/Images, Anthropic Messages, and Gemini GenerateContent wires |
@@ -129,6 +130,37 @@ hitch.stream(
 ```
 
 [Android setup, architecture, security, sample, and build guide →](./android-sdk/README.md)
+
+## Dart and Flutter SDKs
+
+The [`flutter-sdk`](./flutter-sdk) subtree contains a Dart 3.4 core and a Flutter 3.22 adapter.
+`modelhitch_dart` owns the provider-neutral types, OpenAI-compatible transport, `Stream`-based SSE
+events, typed errors, model listing, and extension contracts. `modelhitch_flutter` re-exports that
+core and adds encrypted per-provider credential storage through `flutter_secure_storage`.
+
+```yaml
+dependencies:
+  modelhitch_flutter: ^0.1.0
+```
+
+```dart
+final hitch = ModelHitch(keyStore: FlutterSecureKeyStore());
+
+hitch.stream(
+  ChatRequest(
+    provider: 'openai',
+    model: 'gpt-4o-mini',
+    messages: [ModelMessage.user(MessageContent.text('Hello from Flutter'))],
+  ),
+).listen((chunk) {
+  if (chunk case TextDelta(:final text)) append(text);
+});
+```
+
+Store only keys provided by a device user. For an application-owned credential, point an
+`OpenAICompatibleProvider` at a backend or ModelHitch bridge instead.
+
+[Dart/Flutter setup, security, extension contract, and publishing guide →](./flutter-sdk/README.md)
 
 ## Local agent bridge
 

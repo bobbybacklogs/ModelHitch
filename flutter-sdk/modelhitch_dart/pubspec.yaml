@@ -1,0 +1,22 @@
+name: modelhitch_dart
+description: Provider-neutral BYOK chat and streaming for Dart applications.
+version: 0.1.0
+homepage: https://github.com/genoventures-labs/ModelHitch
+repository: https://github.com/genoventures-labs/ModelHitch
+issue_tracker: https://github.com/genoventures-labs/ModelHitch/issues
+topics:
+  - ai
+  - llm
+  - dart
+  - byok
+  - openai
+
+environment:
+  sdk: ^3.4.0
+
+dependencies:
+  http: ^1.2.2
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.25.8

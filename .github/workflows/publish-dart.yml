@@ -1,0 +1,33 @@
+name: Publish Dart SDK
+
+on:
+  push:
+    tags:
+      - "dart-v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-dart-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pub-dev
+    defaults:
+      run:
+        working-directory: flutter-sdk/modelhitch_dart
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.4.0
+      - run: dart pub get
+      - run: dart format --set-exit-if-changed .
+      - run: dart analyze
+      - run: dart test
+      - run: dart pub publish --dry-run
+      - run: dart pub publish --force
