@@ -1,6 +1,6 @@
 {
   "name": "modelhitch-expo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Expo / React Native adapter for ModelHitch — streaming BYOK AI on iOS, Android, and web.",
   "type": "module",
   "main": "./dist/index.cjs",
