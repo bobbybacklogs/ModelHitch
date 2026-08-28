@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <PackageId>ModelHitch</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Geno Ventures Labs</Authors>
+    <Company>Geno Ventures Labs</Company>
+    <Description>Provider-neutral BYOK chat and streaming for .NET applications.</Description>
+    <PackageTags>ai;llm;byok;openai;windows</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/genoventures-labs/ModelHitch</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/genoventures-labs/ModelHitch</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="..\..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>

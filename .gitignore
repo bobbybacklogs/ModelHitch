@@ -5,6 +5,9 @@ android-sdk/.gradle/
 android-sdk/**/.gradle/
 android-sdk/**/build/
 android-sdk/local.properties
+modelhitch-dotnet/**/bin/
+modelhitch-dotnet/**/obj/
+modelhitch-dotnet/artifacts/
 *.log
 .DS_Store
 .env

@@ -171,6 +171,31 @@ designed so those capabilities can be added without changing application call si
 See the [Android guide](../android-sdk/README.md) for build commands, Maven Local consumption,
 backup exclusions, custom providers, the multi-provider Compose sample, and the complete scope.
 
+## .NET and Windows SDK
+
+The [`modelhitch-dotnet`](../modelhitch-dotnet) subtree provides the pure `net8.0` NuGet package
+for WPF, WinUI 3, MAUI Windows, console, and service applications. It does not embed Node.js or the
+npm package. It provides provider-neutral chat types, OpenAI-compatible HTTP and SSE streaming, tool
+calls, model listing, typed errors, and a convenience client for the local ModelHitch bridge.
+
+```csharp
+using ModelHitch;
+
+using var httpClient = new HttpClient();
+var hitch = ModelHitchClient.ForBridge(
+  httpClient,
+  new Uri("http://127.0.0.1:3939/v1"),
+  "mock/mock-model");
+var reply = await hitch.ChatAsync(new ChatRequest([
+  ModelMessage.User("Hello from a Windows app."),
+]));
+```
+
+Use `OpenAICompatibleProvider` for a direct BYOK OpenAI-compatible provider. Application-owned
+secrets do not belong in a Windows binary; connect those applications to a trusted backend or the
+local bridge instead. See the [.NET README](../modelhitch-dotnet/README.md) and
+[NuGet publishing guide](../modelhitch-dotnet/PUBLISHING.md) for build, package, and release steps.
+
 ## Dart and Flutter SDKs
 
 The [`flutter-sdk`](../flutter-sdk) subtree separates the reusable Dart client from Flutter-only
