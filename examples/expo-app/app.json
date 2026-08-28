@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "ModelHitch Expo",
+    "slug": "modelhitch-expo-example",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "dev.modelhitch.example"
+    },
+    "android": {
+      "package": "dev.modelhitch.example",
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": true,
+          "faceIDPermission": "Allow ModelHitch to access your Face ID to unlock your API keys."
+        }
+      ]
+    ]
+  }
+}

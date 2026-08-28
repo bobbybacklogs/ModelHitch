@@ -1,0 +1,28 @@
+{
+  "name": "modelhitch-expo-example",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "web": "expo start --web",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "export:web": "expo export --platform web"
+  },
+  "dependencies": {
+    "expo": "~57.0.17",
+    "expo-secure-store": "~57.0.2",
+    "modelhitch": "^0.15.0",
+    "modelhitch-expo": "file:../../expo-sdk",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-web": "~0.21.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.0",
+    "@types/react": "~19.2.0",
+    "typescript": "^5.6.0"
+  }
+}

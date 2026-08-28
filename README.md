@@ -162,6 +162,39 @@ Store only keys provided by a device user. For an application-owned credential, 
 
 [Dart/Flutter setup, security, extension contract, and publishing guide →](./flutter-sdk/README.md)
 
+## Expo / React Native SDK
+
+The [`expo-sdk`](./expo-sdk) package is a thin adapter over the published `modelhitch` npm package
+for Expo (SDK 52+) and React Native. It uses `expo/fetch` for streaming `ReadableStream` support,
+`expo-secure-store` for device-encrypted BYOK credentials, and a Metro-safe entry point that avoids
+pulling in Node-only modules.
+
+```bash
+npx expo install expo-secure-store
+npm install modelhitch modelhitch-expo
+```
+
+```ts
+import { createExpoModelHitch } from 'modelhitch-expo';
+
+const mh = createExpoModelHitch({ defaultProviderId: 'openai' });
+await mh.keystore?.set('openai', keyPastedByUser);
+
+const stream = await mh.stream({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Hello from Expo' }],
+});
+
+for await (const chunk of stream) {
+  if (chunk.type === 'text-delta') appendText(chunk.text);
+}
+```
+
+Keys are stored per provider and encrypted on the device — the same BYOK contract as the Dart and
+Android SDKs. Runs on iOS, Android, and Expo web from the same codebase.
+
+[Expo setup, streaming, SecureStore, hooks, and publishing guide →](./expo-sdk/README.md)
+
 ## Local agent bridge
 
 ```bash
@@ -194,9 +227,10 @@ npm test
 npm run build
 ```
 
-The [quickstart](./examples/quickstart.ts) and [BYOK UI](./examples/byok-ui) use the deterministic
-mock provider without an API key. Public contributions are currently closed, but the project is
-MIT licensed—clone it, inspect it, and remix your own.
+The [quickstart](./examples/quickstart.ts), [BYOK UI](./examples/byok-ui), and
+[Expo app](./examples/expo-app) use the deterministic mock provider without an API key. Public
+contributions are currently closed, but the project is MIT licensed—clone it, inspect it, and remix
+your own.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/footer_repo.png" alt="ModelHitch — We route. You build." width="90%"/>

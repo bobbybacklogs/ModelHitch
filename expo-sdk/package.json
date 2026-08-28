@@ -1,0 +1,80 @@
+{
+  "name": "modelhitch-expo",
+  "version": "0.1.0",
+  "description": "Expo / React Native adapter for ModelHitch — streaming BYOK AI on iOS, Android, and web.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "react-native": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js",
+      "require": "./dist/react.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc -p tsconfig.dev.json",
+    "typecheck:pkg": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck:pkg && npm test && npm run build"
+  },
+  "peerDependencies": {
+    "expo": ">=52",
+    "expo-secure-store": ">=13",
+    "modelhitch": ">=0.15.0",
+    "react": ">=18",
+    "react-native": ">=0.76"
+  },
+  "peerDependenciesMeta": {
+    "expo-secure-store": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "expo",
+    "react-native",
+    "ai",
+    "llm",
+    "byok",
+    "bring-your-own-key",
+    "streaming",
+    "modelhitch"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/genoventures-labs/ModelHitch.git",
+    "directory": "expo-sdk"
+  },
+  "homepage": "https://github.com/genoventures-labs/ModelHitch/tree/main/expo-sdk#readme",
+  "devDependencies": {
+    "@types/react": "^19.1.1",
+    "expo": "~57.0.17",
+    "expo-secure-store": "~57.0.2",
+    "modelhitch": "^0.15.0",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-web": "~0.21.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

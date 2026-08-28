@@ -1,10 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "lib": ["ES2022", "DOM"],
-    "types": ["node"],
+    "types": [],
+    "jsx": "react-jsx",
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "forceConsistentCasingInFileNames": true,
@@ -14,6 +15,5 @@
     "sourceMap": true,
     "outDir": "dist"
   },
-  "include": ["src", "examples", "tests"],
-  "exclude": ["examples/byok-ui", "examples/expo-app", "expo-sdk"]
+  "include": ["src"]
 }

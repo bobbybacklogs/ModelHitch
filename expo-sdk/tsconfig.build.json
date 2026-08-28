@@ -1,0 +1,20 @@
+{
+  // Build-time config for tsup's DTS step. The published tsconfig.json stays
+  // clean; this one only resolves the external peers to in-repo stubs so the
+  // declaration emit can run without an Expo app's dependency tree. The
+  // emitted .d.ts files still reference the real peer module names
+  // ('expo/fetch', 'expo-secure-store', 'modelhitch/browser', ...), which
+  // consumers resolve against their own installed peers.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "expo/fetch": ["./stubs/expo-fetch.ts"],
+      "expo-secure-store": ["./stubs/expo-secure-store.ts"],
+      "react-native": ["./stubs/react-native.ts"],
+      "modelhitch/browser": ["../src/browser.ts"],
+      "modelhitch/react": ["../src/react/index.ts"]
+    }
+  },
+  "include": ["src"]
+}

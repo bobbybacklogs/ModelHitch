@@ -1,0 +1,19 @@
+{
+  // Local development/verification config: resolves the Expo, React Native, and
+  // modelhitch peers to in-repo stubs/sources so the adapter can be typechecked
+  // and tested without installing an Expo app's dependency tree. Publishing
+  // uses the real peers via `tsconfig.json`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "expo/fetch": ["./stubs/expo-fetch.ts"],
+      "expo-secure-store": ["./stubs/expo-secure-store.ts"],
+      "react-native": ["./stubs/react-native.ts"],
+      "modelhitch/browser": ["../src/browser.ts"],
+      "modelhitch/react": ["../src/react/index.ts"]
+    }
+  },
+  "include": ["src", "tests", "stubs"]
+}

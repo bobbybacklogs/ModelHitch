@@ -226,6 +226,41 @@ Cross-SDK OpenAI-compatible behavior is specified by the repository's
 depends on it. See the [Dart/Flutter publishing guide](../flutter-sdk/PUBLISHING.md) for the
 trusted-publishing setup and release order.
 
+## Expo and React Native SDK
+
+The [`expo-sdk`](../expo-sdk) package adapts the published `modelhitch` npm package for Expo
+(SDK 52+) and React Native. It is a thin layer, not a reimplementation: the same `ModelHitch`
+client, providers, failover, and usage tracking run on iOS, Android, and Expo web.
+
+Two things make it necessary:
+
+- **Streaming.** React Native's built-in `fetch` buffers the whole response, so SSE token deltas
+  arrive in one burst. The adapter uses `expo/fetch`, which exposes `response.body` as a real
+  `ReadableStream`, and installs it globally so the built-in providers stream.
+- **Metro.** Metro does not resolve the `browser` export condition, so a bare `modelhitch` import
+  in an Expo app would pull in the Node bridge server and `node:sqlite`. `modelhitch-expo`
+  re-exports the browser-safe surface instead.
+
+```ts
+import { createExpoModelHitch } from 'modelhitch-expo';
+
+const mh = createExpoModelHitch({ defaultProviderId: 'openai' });
+await mh.keystore?.set('openai', keyPastedByUser); // device keychain
+
+const stream = await mh.stream({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Hello from Expo' }],
+});
+for await (const chunk of stream) {
+  if (chunk.type === 'text-delta') appendText(chunk.text);
+}
+```
+
+`SecureStoreKeyStore` stores each provider's key with `expo-secure-store` (Android Keystore / iOS
+keychain) and falls back to `localStorage` on web. The React hooks (`useChat`, `useStream`) are
+re-exported from `modelhitch-expo/react` for bridge-backed apps. See the
+[Expo README](../expo-sdk/README.md) for the full setup, security notes, and publishing guide.
+
 ## Tools and React
 
 Use `runToolLoop` when the application must execute model tool calls and submit results. It handles
