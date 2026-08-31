@@ -58,6 +58,8 @@ interface OpenAIMessage {
   name?: string;
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
+  /** Chain-of-thought emitted by reasoning models (e.g. DeepSeek thinking mode). */
+  reasoning_content?: string;
 }
 
 interface OpenAIUsage {
@@ -101,8 +103,8 @@ function toOpenAIMessages(messages: ModelMessage[]): OpenAIMessage[] {
       case 'system':
       case 'user':
         return { role: m.role, content: toOpenAIContent(m.content), name: m.name };
-      case 'assistant':
-        return {
+      case 'assistant': {
+        const openai: OpenAIMessage = {
           role: 'assistant',
           content: toOpenAIContent(m.content),
           tool_calls: m.toolCalls?.map((tc) => ({
@@ -111,6 +113,12 @@ function toOpenAIMessages(messages: ModelMessage[]): OpenAIMessage[] {
             function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
           })),
         };
+        // Thinking-mode providers (e.g. DeepSeek) require the prior
+        // `reasoning_content` to be echoed verbatim on every assistant message
+        // in later requests; omitting it makes them reject the conversation.
+        if (m.reasoningContent) openai.reasoning_content = m.reasoningContent;
+        return openai;
+      }
       case 'tool':
         // Tool content must be a plain string for chat-completions providers
         // (e.g. GLM's pydantic backend rejects anything else with
@@ -402,10 +410,11 @@ export class OpenAICompatibleProvider implements Provider {
     }
     const toolCalls = toToolCalls(message.tool_calls);
     const content = typeof message.content === 'string' ? message.content : '';
+    const reasoningContent = typeof message.reasoning_content === 'string' ? message.reasoning_content : undefined;
     const result: ModelMessage =
       toolCalls && toolCalls.length > 0
-        ? { role: 'assistant', content, toolCalls }
-        : { role: 'assistant', content: String(content ?? '') };
+        ? { role: 'assistant', content, toolCalls, ...(reasoningContent ? { reasoningContent } : {}) }
+        : { role: 'assistant', content: String(content ?? ''), ...(reasoningContent ? { reasoningContent } : {}) };
     return {
       message: result,
       finishReason: mapFinishReason(choice?.finish_reason),
@@ -441,6 +450,13 @@ export class OpenAICompatibleProvider implements Provider {
 
       if (typeof delta.content === 'string' && delta.content) {
         yield { type: 'text-delta', text: delta.content };
+      }
+
+      // DeepSeek thinking mode streams the chain-of-thought under
+      // `delta.reasoning_content`. Surface it as a first-class chunk so
+      // clients can render — and, critically, round-trip — it.
+      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+        yield { type: 'reasoning-delta', text: delta.reasoning_content };
       }
 
       for (const tc of delta.tool_calls ?? []) {

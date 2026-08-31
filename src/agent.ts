@@ -46,6 +46,7 @@ async function streamTurn(
   const stream = await client.stream({ ...input, messages });
   const chunks: StreamChunk[] = [];
   let text = '';
+  let reasoning = '';
   const calls = new Map<string, { id: string; name: string; argsJson: string }>();
   let finishReason = 'stop';
   let usage: Usage | undefined;
@@ -55,6 +56,9 @@ async function streamTurn(
     switch (chunk.type) {
       case 'text-delta':
         text += chunk.text;
+        break;
+      case 'reasoning-delta':
+        reasoning += chunk.text;
         break;
       case 'tool-call-start':
         calls.set(chunk.id, { id: chunk.id, name: chunk.name, argsJson: '' });
@@ -80,8 +84,8 @@ async function streamTurn(
   }));
   const message: ModelMessage =
     toolCalls.length > 0
-      ? { role: 'assistant', content: text, toolCalls }
-      : { role: 'assistant', content: text };
+      ? { role: 'assistant', content: text, toolCalls, ...(reasoning ? { reasoningContent: reasoning } : {}) }
+      : { role: 'assistant', content: text, ...(reasoning ? { reasoningContent: reasoning } : {}) };
   return { result: { message, finishReason, usage }, chunks };
 }
 

@@ -90,6 +90,7 @@ function findEventBoundary(buf: string): { index: number; length: number } | nul
  */
 export async function aggregateStream(chunks: AsyncIterable<StreamChunk>): Promise<ChatResult> {
   let text = '';
+  let reasoning = '';
   const toolCalls = new Map<string, { id: string; name: string; argsJson: string }>();
   let finishReason: string = 'stop';
   let usage: Usage | undefined;
@@ -98,6 +99,9 @@ export async function aggregateStream(chunks: AsyncIterable<StreamChunk>): Promi
     switch (chunk.type) {
       case 'text-delta':
         text += chunk.text;
+        break;
+      case 'reasoning-delta':
+        reasoning += chunk.text;
         break;
       case 'tool-call-start':
         toolCalls.set(chunk.id, { id: chunk.id, name: chunk.name, argsJson: '' });
@@ -124,8 +128,8 @@ export async function aggregateStream(chunks: AsyncIterable<StreamChunk>): Promi
 
   const message: ModelMessage =
     calls.length > 0
-      ? { role: 'assistant', content: text, toolCalls: calls }
-      : { role: 'assistant', content: text };
+      ? { role: 'assistant', content: text, toolCalls: calls, ...(reasoning ? { reasoningContent: reasoning } : {}) }
+      : { role: 'assistant', content: text, ...(reasoning ? { reasoningContent: reasoning } : {}) };
 
   return { message, finishReason, usage };
 }

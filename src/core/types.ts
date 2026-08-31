@@ -4,7 +4,18 @@
  */
 export type ModelMessage =
   | { role: 'system' | 'user'; content: string | ContentPart[]; name?: string }
-  | { role: 'assistant'; content: string | ContentPart[]; toolCalls?: ToolCall[] }
+  | {
+      role: 'assistant';
+      content: string | ContentPart[];
+      toolCalls?: ToolCall[];
+      /**
+       * Chain-of-thought text emitted by reasoning models (e.g. DeepSeek's
+       * `reasoning_content` in thinking mode). Thinking-mode APIs REQUIRE this
+       * to be passed back verbatim on the assistant message in every later
+       * request — dropping it makes them reject the conversation.
+       */
+      reasoningContent?: string;
+    }
   | { role: 'tool'; content: string; toolCallId: string };
 
 /** A content part for multimodal messages. */
@@ -89,6 +100,7 @@ export interface ChatResult {
 /** A single normalized streaming event. */
 export type StreamChunk =
   | { type: 'text-delta'; text: string }
+  | { type: 'reasoning-delta'; text: string }
   | { type: 'tool-call-start'; id: string; name: string; thoughtSignature?: string }
   | { type: 'tool-call-args-delta'; id: string; argsDelta: string }
   | { type: 'tool-call-end'; id: string }

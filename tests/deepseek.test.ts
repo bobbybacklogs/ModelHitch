@@ -198,3 +198,110 @@ describe('response_format rejection fallback', () => {
     expect(calls).toHaveLength(1);
   });
 });
+
+describe('thinking mode: reasoning_content round-trip', () => {
+  function providerWith(fetchImpl: typeof fetch) {
+    return createOpenAICompatibleProvider({
+      id: 'deepseek',
+      name: 'DeepSeek',
+      baseUrl: 'https://api.deepseek.com',
+      defaultModel: 'deepseek-v4-flash',
+      apiKeyEnvVar: 'DEEPSEEK_API_KEY',
+      fetchImpl,
+    });
+  }
+
+  const thinkingParams: ChatParams = {
+    model: 'deepseek-v4-flash',
+    messages: [
+      // A prior assistant turn that produced reasoning content — DeepSeek
+      // requires this exact string to be echoed back on every later request.
+      {
+        role: 'assistant',
+        content: 'answer',
+        reasoningContent: 'think it through',
+      },
+      { role: 'user', content: 'continue' },
+    ],
+  };
+
+  it('echoes reasoning_content back on assistant messages in the request body', async () => {
+    const calls: CapturedRequest[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof Request ? input.url : input.href;
+      calls.push({ url, init: init ?? {}, body: JSON.parse(String(init?.body ?? '{}')) });
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    };
+    await providerWith(fetchImpl).chat(thinkingParams, { apiKey: 'k' });
+    const wire = calls[0]!.body.messages as Array<Record<string, unknown>>;
+    expect(wire[0]).toMatchObject({
+      role: 'assistant',
+      content: 'answer',
+      reasoning_content: 'think it through',
+    });
+  });
+
+  it('captures reasoning_content from a non-streaming response', async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: { role: 'assistant', content: 'answer', reasoning_content: 'deep thoughts' },
+              finish_reason: 'stop',
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    const result = await providerWith(fetchImpl).chat(
+      { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }] },
+      { apiKey: 'k' },
+    );
+    expect(result.message).toMatchObject({
+      role: 'assistant',
+      content: 'answer',
+      reasoningContent: 'deep thoughts',
+    });
+  });
+
+  it('streams reasoning_content as reasoning-delta chunks', async () => {
+    const events = [
+      { choices: [{ delta: { reasoning_content: 'chain ' }, finish_reason: null }] },
+      { choices: [{ delta: { reasoning_content: 'of thought', content: '' }, finish_reason: null }] },
+      { choices: [{ delta: { content: 'answer' }, finish_reason: null }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+    ];
+    const fetchImpl: typeof fetch = async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            for (const obj of events) {
+              controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(obj)}\n\n`));
+            }
+            controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      );
+    const chunks: Array<{ type: string; text?: string }> = [];
+    for await (const c of providerWith(fetchImpl).stream(
+      { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }] },
+      { apiKey: 'k' },
+    )) {
+      chunks.push(c);
+    }
+    const reasoning = chunks
+      .filter((c) => c.type === 'reasoning-delta')
+      .map((c) => c.text)
+      .join('');
+    expect(reasoning).toBe('chain of thought');
+    expect(chunks.some((c) => c.type === 'text-delta' && c.text === 'answer')).toBe(true);
+  });
+});

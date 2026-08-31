@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ModelHitch, runToolLoop } from '../src/index.js';
+import type { ChatParams, StreamChunk } from '../src/index.js';
 
 const mh = new ModelHitch();
 const TOOLS = [{ name: 'get_weather', description: 'weather lookup', parameters: { type: 'object' } }];
@@ -111,6 +112,63 @@ describe('runToolLoop', () => {
         // consume
       }
     }).rejects.toThrowError('boom');
+  });
+
+  it('carries reasoning_content across tool-loop turns', async () => {
+    // A reasoning model streams chain-of-thought, then calls a tool. The tool
+    // result feeds a second turn — and the re-sent conversation must include
+    // the prior assistant reasoning so the API doesn't reject it.
+    const secondTurnMessages: unknown[] = [];
+    const reasoningProvider = {
+      id: 'reasoner',
+      name: 'reasoner',
+      defaultModel: 'reasoner-model',
+      capabilities: { streaming: true, toolCalling: true, vision: false, embeddings: false },
+      async chat() {
+        throw new Error('unused');
+      },
+      async *stream(params: ChatParams): AsyncGenerator<StreamChunk> {
+        const turn = params.messages.filter((m) => m.role === 'assistant').length;
+        if (turn > 0) secondTurnMessages.push(...params.messages);
+        if (turn === 0) {
+          yield { type: 'reasoning-delta', text: 'one ' };
+          yield { type: 'reasoning-delta', text: 'two' };
+          yield { type: 'tool-call-start', id: 'call_r', name: 'get_weather' };
+          yield { type: 'tool-call-args-delta', id: 'call_r', argsDelta: '{"q":"x"}' };
+          yield { type: 'tool-call-end', id: 'call_r' };
+          yield { type: 'finish', finishReason: 'tool-calls' };
+        } else {
+          yield { type: 'text-delta', text: 'answered' };
+          yield { type: 'finish', finishReason: 'stop' };
+        }
+      },
+    };
+    const mhR = new ModelHitch({ providers: [reasoningProvider] });
+    const done = await (async () => {
+      let done: any;
+      for await (const ev of runToolLoop(
+        mhR,
+        {
+          provider: 'reasoner',
+          messages: [{ role: 'user', content: 'check weather' }],
+          tools: TOOLS,
+        },
+        async () => '{"temp":18}',
+      )) {
+        if (ev.type === 'done') done = ev;
+      }
+      return done;
+    })();
+
+    // Turn 1's assistant message kept the reasoning; the second request
+    // carried it back to the wire.
+    expect(done.messages[1]).toMatchObject({
+      role: 'assistant',
+      reasoningContent: 'one two',
+    });
+    const resent = secondTurnMessages.find((m) => (m as { role?: string }).role === 'assistant');
+    expect(resent).toMatchObject({ role: 'assistant', reasoningContent: 'one two' });
+    expect(done.messages.at(-1)).toEqual({ role: 'assistant', content: 'answered' });
   });
 
   it('surfaces a capability-unavailable error when tools are forwarded to a tool-incapable provider', async () => {
