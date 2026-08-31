@@ -19,6 +19,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { currentModuleUrl } from './core/import-meta.js';
 
 function daemonDir(): string {
   return process.env.MODELHITCH_HOME ?? join(homedir(), '.modelhitch');
@@ -97,7 +98,7 @@ export async function probeBridge(port: number, host: string): Promise<BridgePro
 
 /** Path to the script we're currently running as. */
 function currentScript(): string {
-  return fileURLToPath(import.meta.url);
+  return fileURLToPath(currentModuleUrl());
 }
 
 /**
@@ -106,7 +107,7 @@ function currentScript(): string {
  */
 function runnerFor(script: string): [string, string[]] {
   if (!script.endsWith('.ts')) return [process.execPath, [script]];
-  const require = createRequire(import.meta.url);
+  const require = createRequire(currentModuleUrl());
   const tsxPkg = require.resolve('tsx/package.json');
   return [process.execPath, [join(dirname(tsxPkg), 'dist', 'cli.mjs'), script]];
 }

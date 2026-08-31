@@ -25,6 +25,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { currentModuleUrl } from './core/import-meta.js';
 import { printAsciiLogo } from './ascii.js';
 import { createModelHitchServer } from './server/server.js';
 import { OPENCODE_GO_MODELS, OPENCODE_ZEN_MODELS } from './providers/opencode.js';
@@ -132,7 +133,7 @@ function keysFromEnv(existing: Record<string, string> = {}): Record<string, stri
 }
 
 const VERSION = JSON.parse(
-  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+  readFileSync(new URL('../package.json', currentModuleUrl()), 'utf8'),
 ).version as string;
 
 /** Read the value of `--flag` from the process args, or undefined. */
@@ -532,8 +533,9 @@ function runSettings(args: string[]): void {
     throw new Error('The settings TUI requires an interactive terminal.');
   }
   const configPath = argValue(args, '--config') ?? argValue(args, '--path') ?? defaultConfigPath();
-  const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js';
-  const tuiPath = fileURLToPath(new URL(`./settings-tui.${extension}`, import.meta.url));
+  const moduleUrl = currentModuleUrl();
+  const extension = moduleUrl.endsWith('.ts') ? 'ts' : 'js';
+  const tuiPath = fileURLToPath(new URL(`./settings-tui.${extension}`, moduleUrl));
   const result = spawnSync('bun', [tuiPath, '--config', configPath], { stdio: 'inherit' });
   if (result.error && (result.error as NodeJS.ErrnoException).code === 'ENOENT') {
     throw new Error('OpenTUI requires Bun for this Node version. Install Bun from https://bun.sh, then run `modelhitch settings` again.');

@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { createRequire } from 'node:module';
+import { currentModuleUrl } from './import-meta.js';
 import type { FailoverEvent } from './failover.js';
 import type { UsageEvent } from './usage.js';
 
@@ -39,13 +40,15 @@ const DEFAULT_FILE = 'modelhitch-usage.db';
 
 function loadSqlite(): SqliteModule {
   // `node:sqlite` must be required lazily — a top-level import would crash the
-  // whole package on Node < 22.5. `createRequire(import.meta.url)` works in
-  // both the ESM and CJS builds (esbuild rewrites `import.meta.url` to
-  // `pathToFileURL(__filename).href` in CJS output). Unlike a bare `require`
-  // reference, it is never intercepted by esbuild's `__require` Proxy shim,
-  // which throws "Dynamic require of ... is not supported" in ESM output.
+  // whole package on Node < 22.5. `createRequire(currentModuleUrl())` resolves
+  // the current module's file URL in both the ESM and CJS builds (esbuild
+  // leaves `import.meta` as an empty `{}` shim in CJS output, so `import.meta.url`
+  // is `undefined` there; `currentModuleUrl()` falls back to `__filename`).
+  // Unlike a bare `require` reference, it is never intercepted by esbuild's
+  // `__require` Proxy shim, which throws "Dynamic require of ... is not
+  // supported" in ESM output.
   try {
-    return createRequire(import.meta.url)('node:sqlite') as SqliteModule;
+    return createRequire(currentModuleUrl())('node:sqlite') as SqliteModule;
   } catch {
     throw new Error(
       `SQLite usage persistence requires Node >= 22.5 (found ${process.version}). ` +
