@@ -49,6 +49,24 @@ export const openrouter: Provider = createOpenAICompatibleProvider({
   },
 });
 
+/** Vercel AI Gateway — one OpenAI-compatible endpoint for its live model catalog. */
+export const vercelAiGateway: Provider = createOpenAICompatibleProvider({
+  id: 'vercel-ai-gateway',
+  name: 'Vercel AI Gateway',
+  baseUrl: 'https://ai-gateway.vercel.sh/v1',
+  defaultModel: 'openai/gpt-5.4',
+  apiKeyEnvVar: 'AI_GATEWAY_API_KEY',
+  apiKeyEnvFallbacks: ['VERCEL_OIDC_TOKEN'],
+  modelsRequireKey: false,
+  modelTypes: ['language'],
+  capabilities: {
+    streaming: true,
+    toolCalling: true,
+    vision: true,
+    embeddings: false,
+  },
+});
+
 export const together: Provider = createOpenAICompatibleProvider({
   id: 'together',
   name: 'Together AI',

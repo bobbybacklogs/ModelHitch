@@ -74,7 +74,8 @@
     "mistral",
     "moonshot",
     "zai",
-    "openrouter"
+    "openrouter",
+    "vercel-ai-gateway"
   ],
   "license": "MIT",
   "repository": {

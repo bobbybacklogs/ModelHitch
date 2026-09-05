@@ -32,6 +32,10 @@ export interface OpenAICompatibleConfig {
   apiKeyEnvFallbacks?: string[];
   /** Set false for local endpoints that don't need a key (e.g. LM Studio). */
   requiresKey?: boolean;
+  /** Set false when model discovery is public even though inference requires a key. */
+  modelsRequireKey?: boolean;
+  /** Optional `/models` type allowlist for gateways that expose mixed media catalogs. */
+  modelTypes?: string[];
   capabilities?: Partial<Capabilities>;
   /** Extra headers to send with every request. */
   headers?: Record<string, string>;
@@ -318,19 +322,28 @@ export class OpenAICompatibleProvider implements Provider {
     this.fetchImpl = config.fetchImpl ?? ((...args) => fetch(...args));
   }
 
-  resolveApiKey(credentials: ProviderCredentials): string | undefined {
-    if (credentials.apiKey) return credentials.apiKey;
-    const envVars = [this.config.apiKeyEnvVar, ...(this.config.apiKeyEnvFallbacks ?? [])].filter(
-      (v): v is string => !!v,
+  private apiKeyEnvVars(): string[] {
+    return [this.config.apiKeyEnvVar, ...(this.config.apiKeyEnvFallbacks ?? [])].filter(
+      (value): value is string => !!value,
     );
-    for (const name of envVars) {
+  }
+
+  private findApiKey(credentials: ProviderCredentials): string | undefined {
+    if (credentials.apiKey) return credentials.apiKey;
+    for (const name of this.apiKeyEnvVars()) {
       const value = (typeof process !== 'undefined' && process.env?.[name]) as string | undefined;
       if (value) return value;
     }
+    return undefined;
+  }
+
+  resolveApiKey(credentials: ProviderCredentials): string | undefined {
+    const apiKey = this.findApiKey(credentials);
+    if (apiKey) return apiKey;
     if (this.config.requiresKey !== false) {
       throw new ModelHitchError(
         'missing-api-key',
-        `Provider "${this.id}" requires an API key. Pass one in the client options or set ${envVars[0] ?? 'the provider env var'}.`,
+        `Provider "${this.id}" requires an API key. Pass one in the client options or set ${this.apiKeyEnvVars()[0] ?? 'the provider env var'}.`,
         { providerId: this.id },
       );
     }
@@ -490,7 +503,9 @@ export class OpenAICompatibleProvider implements Provider {
   }
 
   async listModels(credentials: ProviderCredentials): Promise<ModelInfo[]> {
-    const apiKey = this.resolveApiKey(credentials);
+    const apiKey = this.config.modelsRequireKey === false
+      ? this.findApiKey(credentials)
+      : this.resolveApiKey(credentials);
     const base = (credentials.baseUrl ?? this.config.baseUrl).replace(/\/+$/, '');
     const headers: Record<string, string> = { ...this.config.headers };
     if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
@@ -505,11 +520,22 @@ export class OpenAICompatibleProvider implements Provider {
     }
     const text = await res.text();
     if (!res.ok) throw mapHTTPError(res.status, this.id, text, parseRetryAfter(res.headers.get('retry-after')));
-    const data = safeJsonParse<{ data?: Array<{ id: string; name?: string; context_length?: number }> }>(text, {});
-    return (data.data ?? []).map((m) => ({
+    const data = safeJsonParse<{
+      data?: Array<{
+        id: string;
+        name?: string;
+        type?: string;
+        context_length?: number;
+        context_window?: number;
+      }>;
+    }>(text, {});
+    const models = this.config.modelTypes?.length
+      ? (data.data ?? []).filter((model) => !!model.type && this.config.modelTypes!.includes(model.type))
+      : (data.data ?? []);
+    return models.map((m) => ({
       id: m.id,
       name: m.name,
-      contextLength: m.context_length,
+      contextLength: m.context_length ?? m.context_window,
     }));
   }
 }

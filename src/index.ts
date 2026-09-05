@@ -142,6 +142,7 @@ export {
   anthropic,
   groq,
   openrouter,
+  vercelAiGateway,
   together,
   huggingface,
   gemini,

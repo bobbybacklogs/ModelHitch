@@ -11,6 +11,7 @@ describe('defaultProviders registry', () => {
       'anthropic',
       'groq',
       'openrouter',
+      'vercel-ai-gateway',
       'together',
       'huggingface',
       'gemini',

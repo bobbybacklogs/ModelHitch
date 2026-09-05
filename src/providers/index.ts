@@ -1,4 +1,4 @@
-export { openai, groq, huggingface, openrouter, together, gemini, deepseek, xai, mistral, moonshot, zai, lmstudio, vllm, llamacpp, koboldcpp } from './defaults.js';
+export { openai, groq, huggingface, openrouter, vercelAiGateway, together, gemini, deepseek, xai, mistral, moonshot, zai, lmstudio, vllm, llamacpp, koboldcpp } from './defaults.js';
 export {
   opencodeZen,
   opencodeGo,

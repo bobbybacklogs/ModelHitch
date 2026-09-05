@@ -61,6 +61,7 @@ the server. Never put a server credential in a browser bundle.
 | Anthropic | `ANTHROPIC_API_KEY` |
 | Groq | `GROQ_API_KEY` |
 | OpenRouter | `OPENROUTER_API_KEY` |
+| Vercel AI Gateway | `AI_GATEWAY_API_KEY`, fallback `VERCEL_OIDC_TOKEN` on Vercel |
 | Together | `TOGETHER_API_KEY` |
 | HuggingFace | `HF_TOKEN` |
 | Google Gemini | `GEMINI_API_KEY` |
@@ -71,6 +72,11 @@ the server. Never put a server credential in a browser bundle.
 | Z.ai (GLM) | `ZAI_API_KEY` |
 
 Local providers and `mock` require no key by default.
+
+Vercel AI Gateway uses provider-qualified model IDs such as `openai/gpt-5.4` and
+`anthropic/claude-sonnet-4.6`. Its public model catalog is loaded dynamically by `listModels`, so
+the settings model picker stays current without a hard-coded inventory; inference still requires
+an AI Gateway API key or Vercel OIDC token.
 
 ## Web apps (browser)
 
