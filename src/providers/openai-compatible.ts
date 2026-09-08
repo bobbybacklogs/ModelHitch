@@ -15,6 +15,7 @@ import type {
 } from '../core/types.js';
 import { safeJsonParse } from '../core/json.js';
 import { bodyToAsyncIterable, parseSSE, requireBody } from '../core/stream.js';
+import { deriveSessionId } from '../core/session.js';
 import type { ModelInfo, Provider } from './types.js';
 
 export interface OpenAICompatibleConfig {
@@ -381,6 +382,15 @@ export class OpenAICompatibleProvider implements Provider {
     const base = (credentials.baseUrl ?? this.config.baseUrl).replace(/\/+$/, '');
     const headers: Record<string, string> = { 'Content-Type': 'application/json', ...this.config.headers };
     if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+
+    const sessionId = params.sessionId ?? (this.id.startsWith('opencode') || base.includes('opencode.ai') ? deriveSessionId(params.messages) : undefined);
+    if (sessionId) {
+      if (!headers['x-opencode-session']) headers['x-opencode-session'] = sessionId;
+      if (!headers['x-session-id']) headers['x-session-id'] = sessionId;
+    }
+    if (!headers['User-Agent'] && !headers['user-agent']) {
+      headers['User-Agent'] = 'ModelHitch/0.15';
+    }
     try {
       return await this.fetchImpl(`${base}${path}`, {
         method: 'POST',

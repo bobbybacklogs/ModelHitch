@@ -61,6 +61,13 @@ describe('bridge GET /v1/models', () => {
     const body = (await missing.json()) as { error: { code: string } };
     expect(body.error.code).toBe('model-not-found');
   });
+
+  it('includes session headers in Access-Control-Allow-Headers on OPTIONS', async () => {
+    const res = await fetch(`${base}/v1/chat/completions`, { method: 'OPTIONS' });
+    expect(res.status).toBe(204);
+    const allowHeaders = res.headers.get('access-control-allow-headers') ?? '';
+    expect(allowHeaders).toContain('x-opencode-session');
+  });
 });
 
 describe('bridge POST /v1/chat/completions (non-streaming)', () => {

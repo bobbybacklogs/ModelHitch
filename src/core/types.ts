@@ -78,6 +78,11 @@ export interface ChatParams {
    * function_call_output deltas (see responses.ts).
    */
   previousResponseId?: string;
+  /**
+   * Session/conversation identifier forwarded to providers that optimize prompt
+   * caching and gateway routing by session (e.g. OpenCode Go's `x-opencode-session`).
+   */
+  sessionId?: string;
   signal?: AbortSignal;
 }
 

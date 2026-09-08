@@ -63,6 +63,7 @@ import {
 } from './responses.js';
 import { clearConversations, findConversationWithToolCall, rememberConversation } from './conversation-state.js';
 import { normalizeBodyImages } from './local-images.js';
+import { extractSessionId } from '../core/session.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
 import type { ImageGenerationConfig } from '../config.js';
 import { safeJsonParse } from '../core/json.js';
@@ -681,6 +682,8 @@ export class OpenAICompatibleServer {
     const { provider, model } = routeModel(body.model, this.providers, this.options.defaultProviderId);
     const credentials = await this.resolveCredentials(provider.id);
     const params = mapRequest(body, model);
+    const incomingSession = extractSessionId(req.headers);
+    if (incomingSession) params.sessionId = incomingSession;
     if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
 
     if (body.stream === true) {
@@ -854,6 +857,8 @@ export class OpenAICompatibleServer {
     const { provider, model } = routeModel(body.model, this.providers, this.options.defaultProviderId);
     const credentials = await this.resolveCredentials(provider.id);
     const params = mapResponsesRequest(body, model);
+    const incomingSession = extractSessionId(req.headers);
+    if (incomingSession) params.sessionId = incomingSession;
     if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
 
     // Stateful continuation: the client sliced prior turns out and references
@@ -997,6 +1002,8 @@ export class OpenAICompatibleServer {
     const { provider, model } = routeModel(body.model, this.providers, this.options.defaultProviderId);
     const credentials = await this.resolveCredentials(provider.id);
     const params = mapAnthropicRequest(body, model);
+    const incomingSession = extractSessionId(req.headers);
+    if (incomingSession) params.sessionId = incomingSession;
     if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
 
     if (body.stream === true) {
@@ -1124,6 +1131,8 @@ export class OpenAICompatibleServer {
     const { provider, model } = routeModel(modelFromPath || body.model, this.providers, this.options.defaultProviderId);
     const credentials = await this.resolveCredentials(provider.id);
     const params = mapGeminiRequest(body, model);
+    const incomingSession = extractSessionId(req.headers);
+    if (incomingSession) params.sessionId = incomingSession;
     if (this.options.defaultModel && !modelFromPath && !body.model) params.model = this.options.defaultModel;
 
     if (stream) {
@@ -1444,7 +1453,7 @@ export class OpenAICompatibleServer {
   private cors(res: ServerResponse): void {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-opencode-session, x-session-id, session-id, x-conversation-id');
   }
 
   private log(line: string): void {

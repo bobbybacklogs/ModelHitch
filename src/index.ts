@@ -172,6 +172,12 @@ export {
   bodyToAsyncIterable,
 } from './core/stream.js';
 
+export {
+  deriveSessionId,
+  extractSessionId,
+  SESSION_HEADER_CANDIDATES,
+} from './core/session.js';
+
 export type {
   ModelMessage,
   ContentPart,

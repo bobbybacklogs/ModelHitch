@@ -15,6 +15,7 @@ import type {
 import { safeJsonParse } from '../core/json.js';
 import { bodyToAsyncIterable, parseSSE, requireBody } from '../core/stream.js';
 import { mapHTTPError } from './openai-compatible.js';
+import { deriveSessionId } from '../core/session.js';
 import type { ModelInfo, Provider } from './types.js';
 
 /**
@@ -283,13 +284,20 @@ export class ZenResponsesProvider implements Provider {
   ): Promise<Response> {
     const apiKey = this.resolveApiKey(credentials);
     this.debugLog('-> POST', `${this.baseUrl}/responses`, JSON.stringify(body));
+    const sessionId = params.sessionId ?? deriveSessionId(params.messages);
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      'User-Agent': 'ModelHitch/0.15',
+    };
+    if (sessionId) {
+      headers['x-opencode-session'] = sessionId;
+      headers['x-session-id'] = sessionId;
+    }
     try {
       return await this.fetchImpl(`${this.baseUrl}/responses`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
+        headers,
         body: JSON.stringify(body),
         signal: params.signal,
       });

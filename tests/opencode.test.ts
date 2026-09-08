@@ -186,11 +186,23 @@ describe('OpenCode Go provider', () => {
     expect(go.defaultModel).toBe('deepseek-v4-flash');
   });
 
-  it('sends chat completions to https://opencode.ai/zen/go/v1', async () => {
+  it('sends chat completions to https://opencode.ai/zen/go/v1 with session header and user agent', async () => {
     const { fetchImpl, calls } = mockFetch({});
     const go = createOpenCodeGoProvider({ fetchImpl });
     await go.chat({ model: 'kimi-k3', messages: [{ role: 'user', content: 'yo' }] }, CREDENTIALS);
     expect(calls[0]!.url).toBe('https://opencode.ai/zen/go/v1/chat/completions');
+    const headers = calls[0]!.init.headers as Record<string, string>;
+    expect(headers['x-opencode-session']).toMatch(/^mh-sess-/);
+    expect(headers['User-Agent']).toBe('ModelHitch/0.15');
+  });
+
+  it('forwards caller session ID when provided in ChatParams', async () => {
+    const { fetchImpl, calls } = mockFetch({});
+    const go = createOpenCodeGoProvider({ fetchImpl });
+    await go.chat({ model: 'kimi-k3', messages: [{ role: 'user', content: 'yo' }], sessionId: 'sess-custom-999' }, CREDENTIALS);
+    const headers = calls[0]!.init.headers as Record<string, string>;
+    expect(headers['x-opencode-session']).toBe('sess-custom-999');
+    expect(headers['x-session-id']).toBe('sess-custom-999');
   });
 
   it('normalizes streaming tool calls from Go', async () => {

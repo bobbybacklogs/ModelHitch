@@ -14,6 +14,7 @@ import { bytesToBase64 } from '../core/base64.js';
 import { safeJsonParse } from '../core/json.js';
 import { parseRetryAfter } from '../core/headers.js';
 import { bodyToAsyncIterable, parseSSE, requireBody } from '../core/stream.js';
+import { deriveSessionId } from '../core/session.js';
 import type { ModelInfo, Provider } from './types.js';
 
 interface AnthropicContentBlock {
@@ -260,6 +261,14 @@ export class AnthropicProvider implements Provider {
       'anthropic-version': '2023-06-01',
       ...this.headers,
     };
+    const sessionId = params.sessionId ?? (this.id.includes('zen') || this.baseUrl.includes('opencode.ai') ? deriveSessionId(params.messages) : undefined);
+    if (sessionId) {
+      if (!headers['x-opencode-session']) headers['x-opencode-session'] = sessionId;
+      if (!headers['x-session-id']) headers['x-session-id'] = sessionId;
+    }
+    if (!headers['User-Agent'] && !headers['user-agent']) {
+      headers['User-Agent'] = 'ModelHitch/0.15';
+    }
     if (this.dangerouslyAllowBrowser) {
       // Explicit opt-in wins over any user-supplied value.
       headers['anthropic-dangerous-direct-browser-access'] = 'true';
