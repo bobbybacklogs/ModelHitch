@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/repo_banner.png" alt="ModelHitch — LLM temp agency" width="100%"/>
+  <img src="./repo_assets/V2/Lockup.png" alt="ModelHitch — LLM temp agency" width="45%"/>
 </p>
 
 <p align="center">
   <strong>Hitch any model to your app.</strong><br/>
-  One TypeScript API. Your keys. Hosted or local models. No runtime dependencies.
+  One TypeScript API. Your keys. Hosted or local. No runtime dependencies.
 </p>
 
 <p align="center">
@@ -25,9 +25,11 @@
 
 > Provider harness by day. Temp agency for LLMs by accident.
 
-ModelHitch normalizes chat, streaming, tools, BYOK credentials, model discovery, failover, and
-usage across **Vercel AI Gateway** (default), OpenAI, Anthropic, OpenRouter, Groq, Together, and local
-runtimes. It can also expose them through one local multi-wire bridge for coding agents and IDEs.
+<p align="center">
+  <img src="./repo_assets/V2/explainer.png" alt="One bridge. Every model. Chat, streaming, tools, BYOK, discovery, failover, usage." width="650" height="600" border="1px solid #008000" style="border-radius: 10px;" padding="10px"/>
+</p>
+
+Chat, stream, tools, BYOK, discovery, failover, and usage — one API across hosted and local models, plus a local multi-wire bridge for agents and IDEs.
 
 ## Install
 
@@ -48,23 +50,20 @@ const result = await mh.chat({
 console.log(result.message.content);
 ```
 
-Chat, streaming, tools, custom providers, and React hooks use the same provider-neutral types.
-[Open the technical guide →](./docs/guide.md)
+Same provider-neutral types for chat, streaming, tools, custom providers, and React hooks.  
+[Technical guide →](./docs/guide.md)
 
 ## Agent skills + plugins
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/All4.png" alt="ModelHitch plugins and skills for Codex, Cursor, VS Code, and Claude" width="100%"/>
+  <img src="./repo_assets/V2/Skills.png" alt="ModelHitch plugins and skills for Codex, Cursor, VS Code, and Claude" width="45%" style="border: 1px solid #008000; padding: 2px; border-radius: 10px;"/>
 </p>
-
-Give your agent the ModelHitch playbook in one command:
 
 ```bash
 npx modelhitch setup codex    # claude | cursor | vscode | all
 ```
 
-Personal installs are the default. Add `--project` for the current repo, `--dry-run` to preview,
-or `--force` to update an existing install.
+Defaults to a personal install. Add `--project`, `--dry-run`, or `--force` as needed.
 
 | Agent | Skill command | Full package |
 | --- | --- | --- |
@@ -76,18 +75,18 @@ or `--force` to update an existing install.
 ## What you get
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/own_section.png" alt="One interface. BYOK. Any model, any time." width="85%"/>
+  <img src="./repo_assets/V2/Main.png" alt="One interface. BYOK. Any model, any time." width="600" height="500" style="border: 1px solid #008000; padding: 3px; border-radius: 10px;"/>
 </p>
 
 | Surface | Included |
 | --- | --- |
 | **Library** | `chat`, `stream`, tools, model discovery, typed errors, custom providers |
 | **Web apps** | Browser bundler support via `modelhitch/browser` — no Node polyfills |
-| **Android** | Native Kotlin SDK, coroutine streaming, Compose sample, Android Keystore BYOK storage |
-| **Flutter** | Dart SDK, SSE streaming, secure BYOK storage, OpenAI-compatible providers and bridges |
-| **BYOK** | Request keys, memory storage, browser local storage, environment fallback |
-| **React** | `useChat`, `useStream`, and a bridge client via `modelhitch/react` |
-| **Bridge** | OpenAI Chat/Responses/Images, Anthropic Messages, and Gemini GenerateContent wires |
+| **Android** | Native Kotlin SDK, coroutine streaming, Compose sample, Keystore BYOK |
+| **Flutter** | Dart SDK, SSE streaming, secure BYOK, OpenAI-compatible providers |
+| **BYOK** | Request keys, memory store, browser local storage, env fallback |
+| **React** | `useChat`, `useStream`, bridge client via `modelhitch/react` |
+| **Bridge** | OpenAI Chat/Responses/Images, Anthropic Messages, Gemini GenerateContent |
 | **Reliability** | Automatic 429/5xx/network failover across models and providers |
 | **Usage** | Tokens, estimated spend, latency, failovers, dashboard, optional SQLite |
 
@@ -100,10 +99,11 @@ or `--force` to update an existing install.
 
 ## Android SDK
 
-The [`android-sdk`](./android-sdk) subtree is a native Kotlin implementation for Android 6.0 and
-later. It provides provider-neutral chat types, `Flow` streaming, tool-call events, built-in
-OpenAI-compatible providers, typed errors, model listing, and AES-GCM credential storage backed by
-Android Keystore. It does not embed Node.js or a JavaScript runtime.
+Native Kotlin for Android 6.0+ — no Node/JS runtime embedded.
+
+- Provider-neutral chat types + `Flow` streaming + tool-call events
+- Built-in OpenAI-compatible providers, typed errors, model listing
+- AES-GCM credentials via Android Keystore
 
 ```kotlin
 dependencies {
@@ -131,14 +131,15 @@ hitch.stream(
 }
 ```
 
-[Android setup, architecture, security, sample, and build guide →](./android-sdk/README.md)
+[Android guide →](./android-sdk/README.md)
 
 ## Dart and Flutter SDKs
 
-The [`flutter-sdk`](./flutter-sdk) subtree contains a Dart 3.4 core and a Flutter 3.22 adapter.
-`modelhitch_dart` owns the provider-neutral types, OpenAI-compatible transport, `Stream`-based SSE
-events, typed errors, model listing, and extension contracts. `modelhitch_flutter` re-exports that
-core and adds encrypted per-provider credential storage through `flutter_secure_storage`.
+Dart 3.4 core + Flutter 3.22 adapter in [`flutter-sdk`](./flutter-sdk).
+
+- `modelhitch_dart` — types, OpenAI-compatible transport, SSE streams, errors, listing
+- `modelhitch_flutter` — same core + encrypted BYOK via `flutter_secure_storage`
+- Device-user keys only; app-owned credentials should hit a backend or bridge
 
 ```yaml
 dependencies:
@@ -159,17 +160,15 @@ hitch.stream(
 });
 ```
 
-Store only keys provided by a device user. For an application-owned credential, point an
-`OpenAICompatibleProvider` at a backend or ModelHitch bridge instead.
-
-[Dart/Flutter setup, security, extension contract, and publishing guide →](./flutter-sdk/README.md)
+[Dart/Flutter guide →](./flutter-sdk/README.md)
 
 ## Expo / React Native SDK
 
-The [`expo-sdk`](./expo-sdk) package is a thin adapter over the published `modelhitch` npm package
-for Expo (SDK 52+) and React Native. It uses `expo/fetch` for streaming `ReadableStream` support,
-`expo-secure-store` for device-encrypted BYOK credentials, and a Metro-safe entry point that avoids
-pulling in Node-only modules.
+Thin adapter over `modelhitch` for Expo SDK 52+ and React Native.
+
+- `expo/fetch` streaming + `expo-secure-store` BYOK
+- Metro-safe entry (no Node-only modules)
+- Same BYOK contract as Android/Dart — iOS, Android, and Expo web
 
 ```bash
 npx expo install expo-secure-store
@@ -192,10 +191,7 @@ for await (const chunk of stream) {
 }
 ```
 
-Keys are stored per provider and encrypted on the device — the same BYOK contract as the Dart and
-Android SDKs. Runs on iOS, Android, and Expo web from the same codebase.
-
-[Expo setup, streaming, SecureStore, hooks, and publishing guide →](./expo-sdk/README.md)
+[Expo guide →](./expo-sdk/README.md)
 
 ## Local agent bridge
 
@@ -205,20 +201,15 @@ npx modelhitch status
 npx modelhitch settings
 ```
 
-Point compatible clients at `http://127.0.0.1:3939/v1`, then route models as
-`providerId/modelId`. The bridge includes automatic failover and a local usage dashboard at
-`http://127.0.0.1:3939/usage`. Its OpenAI-compatible image lane is disabled by default and can be
-enabled from `http://127.0.0.1:3939/settings` or with `--image-lane`.
+| | |
+| --- | --- |
+| **Endpoint** | `http://127.0.0.1:3939/v1` — route as `providerId/modelId` |
+| **Usage** | `http://127.0.0.1:3939/usage` |
+| **Settings** | Web UI or `modelhitch settings` (OpenTUI; Bun required for the TUI) |
+| **Image lane** | Off by default — enable in settings or with `--image-lane` |
+| **Runtime** | Bridge needs Node 22.5+ (SQLite); library supports Node 18+ |
 
-`modelhitch settings` opens an OpenTUI editor for routing, image-generation, and reliability
-settings without requiring the bridge or web UI. It edits the same local config file and preserves
-policy lanes, catalog choices, and API keys. The TUI currently requires Bun; all other ModelHitch
-commands retain their existing Node.js runtime support.
-
-> The packaged bridge uses SQLite persistence and requires Node.js 22.5+. The application library
-> supports Node.js 18+.
-
-[Bridge setup, client configs, routing, security, and operations →](./docs/guide.md#local-agent-bridge)
+[Bridge guide →](./docs/guide.md#local-agent-bridge)
 
 ## Development
 
@@ -229,11 +220,8 @@ npm test
 npm run build
 ```
 
-The [quickstart](./examples/quickstart.ts), [BYOK UI](./examples/byok-ui), and
-[Expo app](./examples/expo-app) use the deterministic mock provider without an API key. Public
-contributions are currently closed, but the project is MIT licensed—clone it, inspect it, and remix
-your own.
+Try without a key: [quickstart](./examples/quickstart.ts), [BYOK UI](./examples/byok-ui), [Expo app](./examples/expo-app) (mock provider). MIT licensed — public contributions are currently closed.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/genoventures-labs/ModelHitch/main/repo_assets/footer_repo.png" alt="ModelHitch — We route. You build." width="90%"/>
+  <img src="./repo_assets/V2/footer.png" alt="ModelHitch — One bridge. Every model." width="60%"/>
 </p>
