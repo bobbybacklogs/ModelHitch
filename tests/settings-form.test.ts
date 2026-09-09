@@ -29,16 +29,16 @@ describe('settings TUI form mapping', () => {
 
   it('edits trusted and fallback rotation lanes with compact route syntax', () => {
     const next = applySettingsForm(config, form({
-      trustedLanes: 'openai/gpt-5,gpt-4.1; opencode-zen/big-pickle',
-      fallbackLanes: 'opencode-go/deepseek-v4-flash; ollama',
+      trustedLanes: 'openai/gpt-5,gpt-4.1; vercel-ai-gateway/openai/gpt-5.4',
+      fallbackLanes: 'vercel-ai-gateway/anthropic/claude-sonnet-4.6; ollama',
     }));
     expect(next.policy).toEqual({
       trusted: [
         { providerId: 'openai', models: ['gpt-5', 'gpt-4.1'] },
-        { providerId: 'opencode-zen', models: ['big-pickle'] },
+        { providerId: 'vercel-ai-gateway', models: ['openai/gpt-5.4'] },
       ],
       fallback: [
-        { providerId: 'opencode-go', models: ['deepseek-v4-flash'] },
+        { providerId: 'vercel-ai-gateway', models: ['anthropic/claude-sonnet-4.6'] },
         { providerId: 'ollama' },
       ],
     });

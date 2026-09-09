@@ -1,7 +1,18 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ModelHitchError } from '../src/core/errors.js';
 import type { ChatParams } from '../src/core/types.js';
-import { createOpenAICompatibleProvider, vercelAiGateway } from '../src/providers/index.js';
+import {
+  createVercelAiGatewayProvider,
+  vercelAiGateway,
+} from '../src/providers/index.js';
+import {
+  readVercelCliAuthToken,
+  resolveVercelGatewayCredential,
+  vercelCliAuthPaths,
+} from '../src/core/vercel-auth.js';
 
 interface CapturedRequest {
   url: string;
@@ -15,26 +26,28 @@ const params: ChatParams = {
 
 const originalGatewayKey = process.env.AI_GATEWAY_API_KEY;
 const originalOidcToken = process.env.VERCEL_OIDC_TOKEN;
+const originalVercelToken = process.env.VERCEL_TOKEN;
+const originalSkipCli = process.env.MODELHITCH_SKIP_VERCEL_CLI_AUTH;
+const originalAppData = process.env.APPDATA;
+const originalXdg = process.env.XDG_DATA_HOME;
 
 afterEach(() => {
   if (originalGatewayKey === undefined) delete process.env.AI_GATEWAY_API_KEY;
   else process.env.AI_GATEWAY_API_KEY = originalGatewayKey;
   if (originalOidcToken === undefined) delete process.env.VERCEL_OIDC_TOKEN;
   else process.env.VERCEL_OIDC_TOKEN = originalOidcToken;
+  if (originalVercelToken === undefined) delete process.env.VERCEL_TOKEN;
+  else process.env.VERCEL_TOKEN = originalVercelToken;
+  if (originalSkipCli === undefined) delete process.env.MODELHITCH_SKIP_VERCEL_CLI_AUTH;
+  else process.env.MODELHITCH_SKIP_VERCEL_CLI_AUTH = originalSkipCli;
+  if (originalAppData === undefined) delete process.env.APPDATA;
+  else process.env.APPDATA = originalAppData;
+  if (originalXdg === undefined) delete process.env.XDG_DATA_HOME;
+  else process.env.XDG_DATA_HOME = originalXdg;
 });
 
 function gatewayWithFetch(fetchImpl: typeof fetch) {
-  return createOpenAICompatibleProvider({
-    id: 'vercel-ai-gateway',
-    name: 'Vercel AI Gateway',
-    baseUrl: 'https://ai-gateway.vercel.sh/v1',
-    defaultModel: 'openai/gpt-5.4',
-    apiKeyEnvVar: 'AI_GATEWAY_API_KEY',
-    apiKeyEnvFallbacks: ['VERCEL_OIDC_TOKEN'],
-    modelsRequireKey: false,
-    modelTypes: ['language'],
-    fetchImpl,
-  });
+  return createVercelAiGatewayProvider({ fetchImpl });
 }
 
 describe('Vercel AI Gateway provider', () => {
@@ -70,6 +83,8 @@ describe('Vercel AI Gateway provider', () => {
   it('populates language models from the public catalog without requiring a key', async () => {
     delete process.env.AI_GATEWAY_API_KEY;
     delete process.env.VERCEL_OIDC_TOKEN;
+    delete process.env.VERCEL_TOKEN;
+    process.env.MODELHITCH_SKIP_VERCEL_CLI_AUTH = '1';
     const calls: CapturedRequest[] = [];
     const provider = gatewayWithFetch(async (input, init) => {
       const url = typeof input === 'string' ? input : input instanceof Request ? input.url : input.href;
@@ -93,6 +108,8 @@ describe('Vercel AI Gateway provider', () => {
 
   it('falls back to Vercel OIDC for hosted inference', async () => {
     delete process.env.AI_GATEWAY_API_KEY;
+    delete process.env.VERCEL_TOKEN;
+    process.env.MODELHITCH_SKIP_VERCEL_CLI_AUTH = '1';
     process.env.VERCEL_OIDC_TOKEN = 'oidc-test-token';
     let authorization: string | undefined;
     const provider = gatewayWithFetch(async (_input, init) => {
@@ -108,10 +125,51 @@ describe('Vercel AI Gateway provider', () => {
     expect(authorization).toBe('Bearer oidc-test-token');
   });
 
+  it('reads a Vercel CLI auth.json token when env credentials are absent', async () => {
+    delete process.env.AI_GATEWAY_API_KEY;
+    delete process.env.VERCEL_OIDC_TOKEN;
+    delete process.env.VERCEL_TOKEN;
+    delete process.env.MODELHITCH_SKIP_VERCEL_CLI_AUTH;
+
+    const dir = mkdtempSync(join(tmpdir(), 'mh-vercel-auth-'));
+    process.env.XDG_DATA_HOME = dir;
+    const authDir = join(dir, 'com.vercel.cli');
+    mkdirSync(authDir, { recursive: true });
+    writeFileSync(join(authDir, 'auth.json'), JSON.stringify({ token: 'cli-auth-token' }), 'utf8');
+
+    try {
+      expect(readVercelCliAuthToken()).toBe('cli-auth-token');
+      expect(resolveVercelGatewayCredential()).toEqual({
+        apiKey: 'cli-auth-token',
+        source: 'vercel-cli',
+      });
+      expect(vercelCliAuthPaths().some((p) => p.includes('com.vercel.cli'))).toBe(true);
+
+      let authorization: string | undefined;
+      const provider = gatewayWithFetch(async (_input, init) => {
+        authorization = (init?.headers as Record<string, string> | undefined)?.Authorization;
+        return new Response(JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: 'cli' }, finish_reason: 'stop' }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+
+      await expect(provider.chat(params, {})).resolves.toMatchObject({
+        message: { role: 'assistant', content: 'cli' },
+      });
+      expect(authorization).toBe('Bearer cli-auth-token');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('still requires credentials for inference', async () => {
     delete process.env.AI_GATEWAY_API_KEY;
     delete process.env.VERCEL_OIDC_TOKEN;
-    const err = await vercelAiGateway.chat(params, {}).then(
+    delete process.env.VERCEL_TOKEN;
+    process.env.MODELHITCH_SKIP_VERCEL_CLI_AUTH = '1';
+
+    const provider = createVercelAiGatewayProvider();
+    const err = await provider.chat(params, {}).then(
       () => null,
       (error: unknown) => error,
     );

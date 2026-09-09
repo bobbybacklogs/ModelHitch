@@ -13,8 +13,6 @@ import {
   moonshot,
   ollama,
   openai,
-  opencodeGo,
-  opencodeZen,
   openrouter,
   vercelAiGateway,
   together,
@@ -25,13 +23,11 @@ import {
 
 /** The providers that ship with ModelHitch out of the box. */
 export const defaultProviders: Provider[] = [
-  opencodeZen,
-  opencodeGo,
+  vercelAiGateway,
   openai,
   anthropic,
   groq,
   openrouter,
-  vercelAiGateway,
   together,
   huggingface,
   gemini,

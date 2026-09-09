@@ -18,11 +18,10 @@ function recordingProvider(id: string, onCredentials: (c: ProviderCredentials) =
 }
 
 describe('ModelHitch client', () => {
-  it('registers OpenCode Zen and Go by default', () => {
+  it('registers Vercel AI Gateway by default', () => {
     const mh = new ModelHitch();
-    expect(mh.provider('opencode-zen').name).toBe('OpenCode Zen');
-    expect(mh.provider('opencode-go').name).toBe('OpenCode Go');
-    expect(mh.capabilities('opencode-zen').streaming).toBe(true);
+    expect(mh.provider('vercel-ai-gateway').name).toBe('Vercel AI Gateway');
+    expect(mh.capabilities('vercel-ai-gateway').streaming).toBe(true);
   });
 
   it('throws provider-not-found for unknown ids', () => {

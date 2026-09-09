@@ -2,8 +2,8 @@ import type { Provider } from './types.js';
 import { createOpenAICompatibleProvider } from './openai-compatible.js';
 
 /**
- * Default OpenAI-compatible providers (including the OpenCode gateway above,
- * these all share one adapter — that's the point of the hitch).
+ * Default OpenAI-compatible providers — one shared adapter for remote and
+ * local OpenAI-compatible endpoints.
  */
 export const openai: Provider = createOpenAICompatibleProvider({
   id: 'openai',
@@ -41,24 +41,6 @@ export const openrouter: Provider = createOpenAICompatibleProvider({
   baseUrl: 'https://openrouter.ai/api/v1',
   defaultModel: 'meta-llama/llama-3.1-8b-instruct:free',
   apiKeyEnvVar: 'OPENROUTER_API_KEY',
-  capabilities: {
-    streaming: true,
-    toolCalling: true,
-    vision: true,
-    embeddings: false,
-  },
-});
-
-/** Vercel AI Gateway — one OpenAI-compatible endpoint for its live model catalog. */
-export const vercelAiGateway: Provider = createOpenAICompatibleProvider({
-  id: 'vercel-ai-gateway',
-  name: 'Vercel AI Gateway',
-  baseUrl: 'https://ai-gateway.vercel.sh/v1',
-  defaultModel: 'openai/gpt-5.4',
-  apiKeyEnvVar: 'AI_GATEWAY_API_KEY',
-  apiKeyEnvFallbacks: ['VERCEL_OIDC_TOKEN'],
-  modelsRequireKey: false,
-  modelTypes: ['language'],
   capabilities: {
     streaming: true,
     toolCalling: true,

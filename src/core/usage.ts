@@ -6,14 +6,13 @@ import type { UsageStorage } from './usage-storage.js';
  *
  * The server records every completed inference request (via `onUsage`) and
  * every auto-mode failover into a `UsageTracker`. Snapshots aggregate totals,
- * per-provider/model/wire breakdowns, and rolling windows aligned with the
- * OpenCode Go usage limits (5h = $12, 7d = $30, 30d = $60) so you can see how
- * close a bridge is to the next 429.
+ * per-provider/model/wire breakdowns, and rolling spend windows (5h / 7d / 30d)
+ * for operational visibility.
  */
 
 /** One completed inference request, as reported to the `onUsage` hook. */
 export interface UsageEvent {
-  /** Provider id, e.g. "opencode-zen". */
+  /** Provider id, e.g. "vercel-ai-gateway". */
   providerId: string;
   /** Routed model id. */
   model: string;
@@ -43,7 +42,7 @@ export interface UsageTotals {
 }
 
 export interface UsageWindow extends UsageTotals {
-  /** Dollar limit for the window — the OpenCode Go usage limits. */
+  /** Soft dollar budget for the window (operational guidance, not a hard billing cap). */
   capUsd: number;
   /** Fraction of the cap consumed (0..1+; >1 means the limit is passed). */
   fraction: number;
@@ -62,7 +61,7 @@ export interface UsageSnapshot {
   /** Most recent events, newest first. */
   recent: UsageEvent[];
   failovers: { total: number; recent: FailoverEvent[] };
-  /** Rolling windows aligned with the OpenCode Go usage limits. */
+  /** Rolling spend windows (5h / 7d / 30d). */
   windows: { '5h': UsageWindow; '7d': UsageWindow; '30d': UsageWindow };
 }
 

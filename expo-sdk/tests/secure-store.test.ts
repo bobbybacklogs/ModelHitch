@@ -38,8 +38,8 @@ describe('SecureStoreKeyStore', () => {
   });
 
   it('namespaces entries and keeps keys inside the SecureStore charset', async () => {
-    await new SecureStoreKeyStore().set('opencode-zen', 'k');
-    expect([...store.__store.keys()]).toEqual(['modelhitch_opencode-zen']);
+    await new SecureStoreKeyStore().set('vercel-ai-gateway', 'k');
+    expect([...store.__store.keys()]).toEqual(['modelhitch_vercel-ai-gateway']);
   });
 
   it('sanitizes characters SecureStore rejects', async () => {

@@ -100,25 +100,24 @@ describe('config validity + serialization', () => {
       const tpl = defaultConfigTemplate();
       expect(tpl.policy?.maxProviders).toBeUndefined();
       const fallbackModels = (tpl.policy?.fallback ?? []).flatMap((e) => e.models ?? []);
-      expect(fallbackModels).toContain('deepseek-v4-flash-free');
-      expect(fallbackModels).toContain('mimo-v2.5-free');
+      expect(fallbackModels).toContain('anthropic/claude-sonnet-4.6');
+      expect(fallbackModels).toContain('google/gemini-3-flash');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('default policy keeps free lanes when the request primary is a third provider', () => {
-    // Regression: maxProviders: 2 + openai primary used to drop the free-model
-    // safety net, so a 429 on openai/opencode-go exhausted without rotation.
+  it('default policy keeps gateway fallbacks when the request primary is a third provider', () => {
+    // Regression: maxProviders used to trim safety-net lanes for third-party primaries.
     const policy = defaultConfigTemplate().policy!;
     const source = createRegistrySource(defaultProviders);
     const targets = resolvePolicyLanes(policy, { providerId: 'openai', model: 'gpt-4o-mini' }, source);
     expect(targets.map((t) => `${t.providerId}/${t.model}`)).toEqual([
       'openai/gpt-4o-mini',
-      'opencode-zen/big-pickle',
-      'opencode-go/deepseek-v4-flash',
-      'opencode-zen/deepseek-v4-flash-free',
-      'opencode-zen/mimo-v2.5-free',
+      'vercel-ai-gateway/openai/gpt-5.4',
+      'vercel-ai-gateway/anthropic/claude-sonnet-4.6',
+      'vercel-ai-gateway/google/gemini-3-flash',
+      'openai/gpt-5.4',
     ]);
   });
 

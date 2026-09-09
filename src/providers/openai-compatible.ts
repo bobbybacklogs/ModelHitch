@@ -15,11 +15,10 @@ import type {
 } from '../core/types.js';
 import { safeJsonParse } from '../core/json.js';
 import { bodyToAsyncIterable, parseSSE, requireBody } from '../core/stream.js';
-import { deriveSessionId } from '../core/session.js';
 import type { ModelInfo, Provider } from './types.js';
 
 export interface OpenAICompatibleConfig {
-  /** Unique provider id, e.g. "opencode-zen". */
+  /** Unique provider id, e.g. "vercel-ai-gateway". */
   id: string;
   /** Human-readable name. */
   name: string;
@@ -31,6 +30,13 @@ export interface OpenAICompatibleConfig {
   apiKeyEnvVar?: string;
   /** Additional env vars checked when the primary one is unset. */
   apiKeyEnvFallbacks?: string[];
+  /**
+   * Extra credential sources tried after env vars (e.g. Vercel CLI auth.json).
+   * Return a non-empty string to use it as the bearer token.
+   */
+  extraApiKeySources?: Array<() => string | undefined | null>;
+  /** Optional guidance appended to the missing-api-key error. */
+  missingApiKeyHint?: string;
   /** Set false for local endpoints that don't need a key (e.g. LM Studio). */
   requiresKey?: boolean;
   /** Set false when model discovery is public even though inference requires a key. */
@@ -335,6 +341,14 @@ export class OpenAICompatibleProvider implements Provider {
       const value = (typeof process !== 'undefined' && process.env?.[name]) as string | undefined;
       if (value) return value;
     }
+    for (const source of this.config.extraApiKeySources ?? []) {
+      try {
+        const value = source();
+        if (value?.trim()) return value.trim();
+      } catch {
+        // Best-effort external resolvers (e.g. CLI auth files) must not break inference.
+      }
+    }
     return undefined;
   }
 
@@ -342,9 +356,13 @@ export class OpenAICompatibleProvider implements Provider {
     const apiKey = this.findApiKey(credentials);
     if (apiKey) return apiKey;
     if (this.config.requiresKey !== false) {
+      const envHint = this.apiKeyEnvVars()[0] ?? 'the provider env var';
+      const hint = this.config.missingApiKeyHint
+        ? ` ${this.config.missingApiKeyHint}`
+        : ` Pass one in the client options or set ${envHint}.`;
       throw new ModelHitchError(
         'missing-api-key',
-        `Provider "${this.id}" requires an API key. Pass one in the client options or set ${this.apiKeyEnvVars()[0] ?? 'the provider env var'}.`,
+        `Provider "${this.id}" requires an API key.${hint}`,
         { providerId: this.id },
       );
     }
@@ -383,13 +401,13 @@ export class OpenAICompatibleProvider implements Provider {
     const headers: Record<string, string> = { 'Content-Type': 'application/json', ...this.config.headers };
     if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
-    const sessionId = params.sessionId ?? (this.id.startsWith('opencode') || base.includes('opencode.ai') ? deriveSessionId(params.messages) : undefined);
+    const sessionId = params.sessionId ?? undefined;
     if (sessionId) {
-      if (!headers['x-opencode-session']) headers['x-opencode-session'] = sessionId;
       if (!headers['x-session-id']) headers['x-session-id'] = sessionId;
+      if (!headers['x-conversation-id']) headers['x-conversation-id'] = sessionId;
     }
     if (!headers['User-Agent'] && !headers['user-agent']) {
-      headers['User-Agent'] = 'ModelHitch/0.15';
+      headers['User-Agent'] = 'ModelHitch/2.0';
     }
     try {
       return await this.fetchImpl(`${base}${path}`, {

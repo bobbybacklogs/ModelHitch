@@ -4,7 +4,7 @@ import { ModelHitchError, type ModelHitchErrorCode } from './errors.js';
  * auto-mode — transparent failover when a provider lane errors.
  *
  * Detection matches both the normalized `code` and the raw HTTP status:
- * - `rate-limited` (HTTP 429 — OpenCode Zen/Go usage-limit blocks)
+ * - `rate-limited` (HTTP 429 — provider/gateway rate limits)
  * - `provider-error` (5xx gateway blips)
  * - `network-error` (transient connectivity failures)
  * - **any** error carrying `status === 429`, regardless of code — the
@@ -61,23 +61,17 @@ export const DEFAULT_RETRYABLE_CODES: ModelHitchErrorCode[] = [
 ];
 
 /**
- * The default fallback lineup, chosen to survive the OpenCode usage limits
- * documented at https://opencode.ai/docs/go:
- *
- * - `opencode-go/deepseek-v4-flash` — the cheapest Go subscription model with
- *   the largest included allowance (~31k requests/5h), still inside the
- *   $12/5h usage limit. Costs nothing beyond the Go subscription.
- * - Free Zen models keep working after the paid limits are exhausted, so they
- *   are the final safety net.
+ * The default fallback lineup for auto-mode. Prefers alternate models on
+ * Vercel AI Gateway (same credential), then a direct OpenAI lane when a
+ * dedicated `OPENAI_API_KEY` is available.
  *
  * Lanes without configured credentials (missing/invalid key) are skipped
  * automatically; lanes duplicate of the primary are deduped.
  */
 export const DEFAULT_FAILOVER_LANES: FailoverTarget[] = [
-  { providerId: 'opencode-go', model: 'deepseek-v4-flash' },
-  { providerId: 'opencode-zen', model: 'big-pickle' },
-  { providerId: 'opencode-zen', model: 'deepseek-v4-flash-free' },
-  { providerId: 'opencode-zen', model: 'mimo-v2.5-free' },
+  { providerId: 'vercel-ai-gateway', model: 'anthropic/claude-sonnet-4.6' },
+  { providerId: 'vercel-ai-gateway', model: 'google/gemini-3-flash' },
+  { providerId: 'openai', model: 'gpt-5.4' },
 ];
 
 /** True when the error should trigger a failover to the next lane. */

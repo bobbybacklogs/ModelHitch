@@ -41,7 +41,7 @@ describe('OpenAI-compatible error mapping', () => {
   it('retries an upstream model-unavailable failure wrapped in HTTP 400', () => {
     const body = JSON.stringify({
       error: {
-        message: 'Provider "opencode-zen" rejected the request. ({"error":{"type":"server_error","message":"Error from provider (Console): Upstream request failed: Model is unavailable."}})',
+        message: 'Provider "vercel-ai-gateway" rejected the request. ({"error":{"type":"server_error","message":"Error from provider (Console): Upstream request failed: Model is unavailable."}})',
         type: 'invalid_request_error',
         code: 'bad-request',
       },

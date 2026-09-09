@@ -53,10 +53,10 @@ export interface ModelHitchOptions {
   /**
    * auto-mode: transparent failover when the primary lane errors (429 rate
    * limits, 5xx, network blips). `true` uses the default fallback lineup
-   * (cheap Go model, then free Zen models); pass `AutoModeOptions` for custom
-   * lanes/models. Keys for fallback lanes resolve from the keystore (or the
-   * provider's own env fallback) — per-call `apiKey`/`baseUrl` stay with the
-   * primary provider.
+   * (alternate Vercel AI Gateway models, then OpenAI); pass `AutoModeOptions`
+   * for custom lanes/models. Keys for fallback lanes resolve from the keystore
+   * (or the provider's own env fallback) — per-call `apiKey`/`baseUrl` stay with
+   * the primary provider.
    */
   autoMode?: AutoModeOptions | boolean;
   /**
@@ -95,7 +95,7 @@ export interface ModelHitchOptions {
 export type ChatInput = Omit<ChatParams, 'model'> & {
   /** Model id; defaults to the client's `defaultModel` or the provider default. */
   model?: string;
-  /** Provider id, e.g. "opencode-zen" or "anthropic". */
+  /** Provider id, e.g. "vercel-ai-gateway" or "anthropic". */
   provider?: string;
   /** Explicit credentials for this call (overrides the keystore). */
   apiKey?: string;
@@ -128,7 +128,7 @@ function improvePolicyErrors(errors: string[], source: ProviderSource): string[]
  *
  * ```ts
  * const mh = new ModelHitch({ keystore: myKeyStore });
- * const result = await mh.chat({ provider: 'opencode-zen', messages: [{ role: 'user', content: 'hi' }] });
+ * const result = await mh.chat({ provider: 'vercel-ai-gateway', messages: [{ role: 'user', content: 'hi' }] });
  * ```
  *
  * Catalog mode (models.dev via mdev-sdk) is async — the catalog must be

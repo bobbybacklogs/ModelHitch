@@ -26,7 +26,7 @@
 > Provider harness by day. Temp agency for LLMs by accident.
 
 ModelHitch normalizes chat, streaming, tools, BYOK credentials, model discovery, failover, and
-usage across OpenAI, Anthropic, OpenRouter, Vercel AI Gateway, Groq, Together, OpenCode, and local
+usage across **Vercel AI Gateway** (default), OpenAI, Anthropic, OpenRouter, Groq, Together, and local
 runtimes. It can also expose them through one local multi-wire bridge for coding agents and IDEs.
 
 ## Install
@@ -40,8 +40,8 @@ import { ModelHitch } from 'modelhitch';
 
 const mh = new ModelHitch();
 const result = await mh.chat({
-  provider: 'opencode-zen',
-  model: 'big-pickle',
+  provider: 'vercel-ai-gateway',
+  model: 'openai/gpt-5.4',
   messages: [{ role: 'user', content: 'Clock in.' }],
 });
 
@@ -93,8 +93,8 @@ or `--force` to update an existing install.
 
 ### Providers
 
-`OpenCode Zen` · `OpenCode Go` · `OpenAI` · `Anthropic` · `Groq` · `OpenRouter` ·
-`Vercel AI Gateway` · `Together AI` · `HuggingFace` · `Google Gemini` · `DeepSeek` · `xAI` ·
+`Vercel AI Gateway` · `OpenAI` · `Anthropic` · `Groq` · `OpenRouter` ·
+`Together AI` · `HuggingFace` · `Google Gemini` · `DeepSeek` · `xAI` ·
 `Mistral` · `Moonshot` · `Z.ai (GLM)` · `LM Studio` · `Ollama` · `vLLM` · `llama.cpp` ·
 `KoboldCpp` · `mock`
 

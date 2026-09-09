@@ -7,17 +7,17 @@ import {
 } from '../src/index.js';
 import type { ChatParams, ChatResult, StreamChunk } from '../src/core/types.js';
 
-/** Provider that always 429s (simulates an exhausted OpenCode usage limit). */
+/** Provider that always 429s (simulates an exhausted rate limit). */
 const alwaysRated: Provider = {
   id: 'rated',
   name: 'Always 429',
   defaultModel: 'rated-model',
   capabilities: { streaming: true, toolCalling: false, vision: false, embeddings: false },
   async chat(): Promise<ChatResult> {
-    throw new ModelHitchError('rate-limited', 'opencode-zen failed: HTTP 429 rate-limited', { status: 429 });
+    throw new ModelHitchError('rate-limited', 'primary failed: HTTP 429 rate-limited', { status: 429 });
   },
   async *stream(): AsyncGenerator<StreamChunk> {
-    throw new ModelHitchError('rate-limited', 'opencode-zen failed: HTTP 429 rate-limited', { status: 429 });
+    throw new ModelHitchError('rate-limited', 'primary failed: HTTP 429 rate-limited', { status: 429 });
   },
 };
 

@@ -137,7 +137,7 @@ export function spawnBackground(args: string[]): SpawnedDaemon {
     detached: true, // new process group; survives the parent exiting
     windowsHide: true, // no console window pops up on Windows
     stdio: ['ignore', logFd, logFd],
-    env: process.env, // inherit keys (OPENCODE_*, OPENAI_*, …) from the launcher
+    env: process.env, // inherit keys (AI_GATEWAY_*, OPENAI_*, …) from the launcher
     cwd: process.cwd(),
   });
   child.unref();

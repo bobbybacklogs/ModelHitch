@@ -67,7 +67,7 @@ describe('errorInfo', () => {
 });
 
 describe('resolveLanes', () => {
-  const primary = lane('opencode-zen', 'big-pickle');
+  const primary = lane('vercel-ai-gateway', 'openai/gpt-5.4');
 
   it('returns [] when autoMode is off', () => {
     expect(resolveLanes(primary, undefined)).toEqual([]);
@@ -77,29 +77,34 @@ describe('resolveLanes', () => {
   it('uses the default lineup when autoMode is true', () => {
     // Use a primary that is not part of the default lanes, so dedup leaves
     // the full default lineup intact.
-    const primary = lane('opencode-zen', 'custom-primary');
+    const primary = lane('vercel-ai-gateway', 'custom-primary');
     const lanes = resolveLanes(primary, true);
     expect(lanes).toEqual(DEFAULT_FAILOVER_LANES);
   });
 
   it('dedupes lanes that match the primary', () => {
-    const lanes = resolveLanes(primary, { lanes: [lane('opencode-zen', 'big-pickle'), lane('opencode-go', 'deepseek-v4-flash')] });
-    expect(lanes).toEqual([lane('opencode-go', 'deepseek-v4-flash')]);
+    const lanes = resolveLanes(primary, {
+      lanes: [lane('vercel-ai-gateway', 'openai/gpt-5.4'), lane('openai', 'gpt-5.4')],
+    });
+    expect(lanes).toEqual([lane('openai', 'gpt-5.4')]);
   });
 
   it('dedupes repeated fallback lanes and honors order', () => {
     const lanes = resolveLanes(primary, {
-      lanes: [lane('opencode-go', 'a'), lane('opencode-go', 'b'), lane('opencode-go', 'a')],
+      lanes: [lane('openai', 'a'), lane('openai', 'b'), lane('openai', 'a')],
     });
-    expect(lanes).toEqual([lane('opencode-go', 'a'), lane('opencode-go', 'b')]);
+    expect(lanes).toEqual([lane('openai', 'a'), lane('openai', 'b')]);
   });
 
   it('tries same-provider models before cross-provider lanes', () => {
     const lanes = resolveLanes(primary, {
-      models: ['free-model'],
-      lanes: [lane('opencode-go', 'deepseek-v4-flash')],
+      models: ['anthropic/claude-sonnet-4.6'],
+      lanes: [lane('openai', 'gpt-5.4')],
     });
-    expect(lanes).toEqual([lane('opencode-zen', 'free-model'), lane('opencode-go', 'deepseek-v4-flash')]);
+    expect(lanes).toEqual([
+      lane('vercel-ai-gateway', 'anthropic/claude-sonnet-4.6'),
+      lane('openai', 'gpt-5.4'),
+    ]);
   });
 
   it('explicit lanes/models suppress the defaults', () => {

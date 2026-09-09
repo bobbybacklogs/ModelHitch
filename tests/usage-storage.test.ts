@@ -26,8 +26,8 @@ afterEach(() => {
 
 function event(overrides: Partial<UsageEvent> = {}): UsageEvent {
   return {
-    providerId: 'opencode-go',
-    model: 'deepseek-v4-flash',
+    providerId: 'vercel-ai-gateway',
+    model: 'openai/gpt-5.4',
     wire: 'chat-completions',
     streamed: false,
     inputTokens: 100,
@@ -52,7 +52,7 @@ describe('SqliteUsageStorage', () => {
       at: new Date().toISOString(),
       from: { providerId: 'rated', model: 'rated-model' },
       to: { providerId: 'fallback', model: 'fallback-model' },
-      error: { code: 'rate-limited', message: 'opencode-zen failed: HTTP 429 rate-limited', status: 429 },
+      error: { code: 'rate-limited', message: 'vercel-ai-gateway failed: HTTP 429 rate-limited', status: 429 },
       attempt: 1,
     });
     t1.close();

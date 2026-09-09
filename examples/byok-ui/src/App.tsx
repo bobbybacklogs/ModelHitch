@@ -20,7 +20,7 @@ import {
  *    with the `mock` provider.
  *
  * Swap `model` for any provider/model the bridge routes, e.g.
- * "opencode-zen/big-pickle" with a real bridge + keys.
+ * "vercel-ai-gateway/openai/gpt-5.4" with a real bridge + keys.
  */
 
 const BRIDGE_URL = import.meta.env.VITE_BRIDGE_URL ?? 'http://127.0.0.1:3939/v1';

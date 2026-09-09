@@ -86,7 +86,7 @@ final bridge = OpenAICompatibleProvider(
   const OpenAICompatibleConfig(
     id: 'company-bridge',
     name: 'Company bridge',
-    defaultModel: 'opencode-zen/big-pickle',
+    defaultModel: 'vercel-ai-gateway/openai/gpt-5.4',
     baseUrl: 'https://ai.example.com/v1',
     requiresKey: false,
   ),
@@ -102,7 +102,7 @@ Flutter app -> HTTPS -> ModelHitch bridge -> provider
 ```
 
 Set the bridge's `/v1` URL as an `OpenAICompatibleConfig.baseUrl`. Routed model IDs such as
-`opencode-zen/big-pickle` pass through as the request model. Set `requiresKey: false` only when
+`vercel-ai-gateway/openai/gpt-5.4` pass through as the request model. Set `requiresKey: false` only when
 the bridge does not itself require client authorization.
 
 For local Android development, an emulator reaches the host machine at `10.0.2.2`, not

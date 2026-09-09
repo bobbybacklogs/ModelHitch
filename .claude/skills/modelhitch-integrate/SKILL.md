@@ -27,7 +27,7 @@ Read [api-reference.md](references/api-reference.md) when exact imports, provide
 1. Inspect the package manager, runtime, framework, existing AI boundary, and installed ModelHitch version.
 2. Preserve the application's conventions. Add one long-lived `ModelHitch` instance at the appropriate boundary instead of scattering clients.
 3. Select the provider and model deliberately. Use `listModels(providerId)` when the current remote catalog matters.
-4. Resolve credentials in this order: request `apiKey` or `baseUrl`, configured keystore, provider environment variable.
+4. Resolve credentials in this order: request `apiKey` or `baseUrl`, configured keystore, provider environment variable, and for Vercel AI Gateway also the local Vercel CLI token.
 5. Keep browser-owned keys in `LocalStorageKeyStore`. Use `MemoryKeyStore` or environment variables server-side. Never print, commit, or accidentally bundle secrets.
 6. Use `chat()` for a completed response, `stream()` for normalized events, and `runToolLoop()` only when the application must execute tools and submit results.
 7. Handle failures through `ModelHitchError.code`; do not parse provider-specific message text.

@@ -28,8 +28,8 @@ import { fileURLToPath } from 'node:url';
 import { currentModuleUrl } from './core/import-meta.js';
 import { printAsciiLogo } from './ascii.js';
 import { createModelHitchServer } from './server/server.js';
-import { OPENCODE_GO_MODELS, OPENCODE_ZEN_MODELS } from './providers/opencode.js';
 import { installSkills, SETUP_TARGETS, type SetupTarget } from './skill-installer.js';
+import { readVercelCliAuthToken } from './core/vercel-auth.js';
 import {
   clearPid,
   daemonStatus,
@@ -69,13 +69,11 @@ import { defaultProviders } from './registry.js';
 
 /** Provider id → env vars checked (first hit wins) when seeding config.keys. */
 const PROVIDER_KEY_ENV: Record<string, string[]> = {
-  'opencode-zen': ['OPENCODE_ZEN_API_KEY', 'OPENCODE_API_KEY'],
-  'opencode-go': ['OPENCODE_GO_API_KEY', 'OPENCODE_API_KEY'],
   openai: ['OPENAI_API_KEY'],
   anthropic: ['ANTHROPIC_API_KEY'],
   groq: ['GROQ_API_KEY'],
   openrouter: ['OPENROUTER_API_KEY'],
-  'vercel-ai-gateway': ['AI_GATEWAY_API_KEY', 'VERCEL_OIDC_TOKEN'],
+  'vercel-ai-gateway': ['AI_GATEWAY_API_KEY', 'VERCEL_OIDC_TOKEN', 'VERCEL_TOKEN'],
   together: ['TOGETHER_API_KEY'],
   huggingface: ['HF_TOKEN'],
   gemini: ['GEMINI_API_KEY'],
@@ -129,6 +127,10 @@ function keysFromEnv(existing: Record<string, string> = {}): Record<string, stri
         break;
       }
     }
+  }
+  if (!keys['vercel-ai-gateway']) {
+    const cliToken = readVercelCliAuthToken();
+    if (cliToken) keys['vercel-ai-gateway'] = cliToken;
   }
   return keys;
 }
@@ -199,7 +201,7 @@ Bridge environment:
 
 async function runBridge(): Promise<void> {
   // Background daemons often start without a shell env. Load local dotenv files
-  // (cwd + ~/.modelhitch) so OPENCODE_*/OPENAI_* keys still resolve.
+  // (cwd + ~/.modelhitch) so AI_GATEWAY_*/OPENAI_* keys still resolve.
   loadEnvFile(join(process.cwd(), '.env'));
   loadEnvFile(join(modelhitchHome(), '.env'));
   loadEnvFile(join(homedir(), '.modelhitch', '.env'));
@@ -269,13 +271,9 @@ async function runBridge(): Promise<void> {
 
   const server = createModelHitchServer({
     providers,
-    defaultProviderId: config.defaultProviderId ?? 'opencode-zen',
+    defaultProviderId: config.defaultProviderId ?? 'vercel-ai-gateway',
     defaultModel: config.defaultModel,
     imageGeneration: config.imageGeneration,
-    staticModels: {
-      'opencode-zen': [...OPENCODE_ZEN_MODELS],
-      'opencode-go': [...OPENCODE_GO_MODELS],
-    },
     maxBodyBytes,
     policy: policyFromConfig(config),
     cooldown,

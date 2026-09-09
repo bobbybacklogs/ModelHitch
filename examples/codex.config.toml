@@ -1,4 +1,4 @@
-# Codex CLI -> ModelHitch bridge
+# Codex CLI -> ModelHitch bridge (V2 / Vercel AI Gateway)
 #
 # Codex custom model providers speak ONLY the OpenAI *Responses API*
 # (wire_api = "responses" is the only supported value, and the default), so the
@@ -10,7 +10,9 @@
 #        - macOS/Linux: ~/.codex/config.toml
 #        - Windows:     %USERPROFILE%\.codex\config.toml
 #      (Project-scoped .codex/config.toml files CANNOT set model_providers.)
-#   3. Run: codex
+#   3. Ensure AI_GATEWAY_API_KEY (or vercel login / vercel env pull) is available
+#      to the bridge process.
+#   4. Run: codex
 #
 # Tip: wrap everything in a profile file (~/.codex/modelhitch.config.toml) and
 # launch with `codex --profile modelhitch` so you can flip back to OpenAI models
@@ -19,11 +21,11 @@
 model_provider = "modelhitch"
 
 # Any model id advertised by GET /v1/models works. Bare ids go to the default
-# provider; provider-prefixed ids route explicitly (opencode-zen/..., opencode-go/...).
-model = "opencode-zen/gpt-5.6-luna"
+# provider; provider-prefixed ids route explicitly (vercel-ai-gateway/..., openai/...).
+model = "vercel-ai-gateway/openai/gpt-5.4"
 
 [model_providers.modelhitch]
-name = "ModelHitch (OpenCode Zen via local bridge)"
+name = "ModelHitch (Vercel AI Gateway via local bridge)"
 # Codex appends /responses and /models to this base URL.
 base_url = "http://127.0.0.1:3939/v1"
 
@@ -32,5 +34,5 @@ base_url = "http://127.0.0.1:3939/v1"
 # wire_api = "responses"
 
 # Do NOT set env_key: the bridge resolves provider keys locally (apiKeys ->
-# KeyStore -> env var) and never sends them anywhere. Without env_key Codex
-# simply sends no Authorization header.
+# KeyStore -> env var / Vercel CLI auth) and never sends them anywhere. Without
+# env_key Codex simply sends no Authorization header.

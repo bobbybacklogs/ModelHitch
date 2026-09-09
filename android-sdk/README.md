@@ -160,7 +160,7 @@ Android app -> HTTPS -> ModelHitch bridge -> provider
 
 Point an `OpenAICompatibleProvider` at the bridge's `/v1` URL and set `requiresKey = false` unless
 the bridge itself requires an authorization token. Routed model IDs such as
-`opencode-zen/big-pickle` pass through as the request model.
+`vercel-ai-gateway/openai/gpt-5.4` pass through as the request model.
 
 For local development:
 

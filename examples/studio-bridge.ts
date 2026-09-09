@@ -1,90 +1,44 @@
 /**
- * Android Studio bridge — ModelHitch as an OpenAI-compatible local endpoint.
+ * Local multi-wire bridge for coding agents / IDEs (ModelHitch V2).
  *
- * Run this, then point Android Studio's agentic tools (or any IDE that
- * accepts a custom model endpoint) at the printed URL:
+ * - Model routing: "providerId/modelId" (e.g. "vercel-ai-gateway/openai/gpt-5.4",
+ *   "anthropic/claude-sonnet-4.6"). Bare model ids route through the configured
+ *   default provider (vercel-ai-gateway here).
+ * - Keys resolve locally: AI_GATEWAY_API_KEY / VERCEL_OIDC_TOKEN / VERCEL_TOKEN /
+ *   Vercel CLI auth (`vercel login`), then other provider env vars.
+ * - auto-mode is ON: if a lane gets rate-limited (429) or returns a provider 5xx /
+ *   network error, the request rotates to the next configured lane.
  *
  *   npx tsx examples/studio-bridge.ts
- *
- * - Model routing: "providerId/modelId" (e.g. "opencode-zen/big-pickle",
- *   "anthropic/claude-sonnet-4-5", "ollama/llama3.2"); bare ids go to the
- *   default provider (opencode-zen here).
- * - Keys resolve locally: OPENCODE_ZEN_API_KEY / OPENCODE_GO_API_KEY env vars
- *   (or the server `apiKeys` map), then the keystore, then provider env vars.
- * - The /v1/models catalog advertises the curated OpenCode Zen/Go model lists
- *   so they show up in the IDE's model picker without a network round-trip.
- * - auto-mode is ON: if a lane gets rate-limited (429 — including OpenCode
- *   usage-limit blocks), 5xx, or a network blip, the bridge transparently
- *   fails over to the cheap Go model, then free Zen models. See
- *   https://opencode.ai/docs/go#usage-limits.
- * - Usage telemetry: GET /v1/usage (JSON) or open /usage in a browser for a
- *   live dashboard — tokens, estimated spend, and how close you are to the
- *   Go 5h/$12, 7d/$30, 30d/$60 usage limits. History is persisted to
- *   SQLite (./modelhitch-usage.db) and survives restarts.
  */
-import {
-  createModelHitchServer,
-  OPENCODE_GO_MODELS,
-  OPENCODE_ZEN_MODELS,
-  printAsciiLogo,
-} from '../src/index.js';
+import { createModelHitchServer, printAsciiLogo } from '../src/index.js';
 
-const PORT = Number(process.env.MODELHITCH_PORT ?? 3939);
-const HOST = '127.0.0.1';
-const MAX_BODY_BYTES = Number(process.env.MODELHITCH_MAX_BODY_BYTES ?? 64 * 1024 * 1024);
+printAsciiLogo();
 
-async function main() {
-  printAsciiLogo();
-  const server = createModelHitchServer({
-    defaultProviderId: 'opencode-zen',
-    staticModels: {
-      'opencode-zen': [...OPENCODE_ZEN_MODELS],
-      'opencode-go': [...OPENCODE_GO_MODELS],
-    },
-    maxBodyBytes: MAX_BODY_BYTES,
-    autoMode: true,
-    usagePersistence: true,
-    logger: (line) => console.log(line),
-    onFailover: (event) =>
-      console.log(
-        `[auto-mode] ${event.from.providerId}/${event.from.model} -> ${event.to.providerId}/${event.to.model} (${event.error.code}${event.error.status ? ` HTTP ${event.error.status}` : ''})`,
-      ),
-  });
+const port = Number(process.env.MODELHITCH_PORT ?? 3939);
+const host = process.env.MODELHITCH_HOST ?? '127.0.0.1';
 
-  const { url } = await server.listen(PORT, HOST);
+const server = createModelHitchServer({
+  defaultProviderId: 'vercel-ai-gateway',
+  defaultModel: 'openai/gpt-5.4',
+  logger: (line) => console.log(line),
+  onFailover: (event) =>
+    console.log(
+      `[failover] ${event.from.providerId}/${event.from.model} -> ${event.to.providerId}/${event.to.model} (${event.error.code}${event.error.status ? ` HTTP ${event.error.status}` : ''})`,
+    ),
+});
+
+server.listen(port, host).then(() => {
   console.log(`
-=== ModelHitch bridge listening on ${url} ===
+ModelHitch bridge listening on http://${host}:${port}
 
-Point Android Studio's custom model endpoint (or any OpenAI-compatible
-client) at:
+Try:
+  vercel-ai-gateway/openai/gpt-5.4     (AI_GATEWAY_API_KEY or vercel login)
+  vercel-ai-gateway/anthropic/claude-sonnet-4.6
+  mock/mock-model
 
-  Base URL:   ${url}/v1
-  API key:    any value (keys are resolved locally, never sent out)
-
-Models: pick from the /v1/models catalog, e.g.
-  opencode-zen/big-pickle     (requires OPENCODE_ZEN_API_KEY)
-  opencode-go/deepseek-v4-flash (requires OPENCODE_GO_API_KEY)
-  mock/mock-model             (no key — deterministic demo)
-
-auto-mode: ON — 429/5xx/network failures fail over to
-  opencode-go/deepseek-v4-flash -> opencode-zen/big-pickle ->
-  opencode-zen/deepseek-v4-flash-free -> opencode-zen/mimo-v2.5-free
-
-Usage telemetry (persisted to ./modelhitch-usage.db):
-  JSON:       curl ${url}/v1/usage
-  Dashboard:  open ${url}/usage in a browser
-  Reset:      curl -X POST ${url}/v1/usage/reset
-
-Quick smoke test (streaming):
-  curl -N ${url}/v1/chat/completions ^
-    -H "Content-Type: application/json" ^
-    -d "{\"model\":\"mock/mock-model\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
-
-Press Ctrl+C to stop.
+Default failover:
+  vercel-ai-gateway/anthropic/claude-sonnet-4.6 ->
+  vercel-ai-gateway/google/gemini-3-flash -> openai/gpt-5.4
 `);
-}
-
-main().catch((err) => {
-  console.error('Failed to start bridge:', err);
-  process.exit(1);
 });

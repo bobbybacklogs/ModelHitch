@@ -81,13 +81,13 @@ export interface ModelHitchServerOptions {
   imageGeneration?: ImageGenerationConfig;
   /** Image upstream fetch implementation. Primarily useful for deterministic tests. */
   imageFetch?: typeof fetch;
-  /** Per-provider API key overrides, e.g. `{ 'opencode-zen': 'sk-...' }`. */
+  /** Per-provider API key overrides, e.g. `{ 'vercel-ai-gateway': '…' }`. */
   apiKeys?: Record<string, string>;
   /** Per-provider base URL overrides. */
   baseUrls?: Record<string, string>;
   /**
    * Extra models to advertise in `GET /v1/models` per provider, e.g.
-   * `{ 'opencode-zen': OPENCODE_ZEN_MODELS }`. Merged with live `/models`
+   * `{ 'vercel-ai-gateway': ['openai/gpt-5.4'] }`. Merged with live `/models`
    * discovery where the provider supports it.
    */
   staticModels?: Record<string, string[]>;
@@ -192,7 +192,7 @@ interface ResolvedLane extends FailoverTarget {
  *
  * Agentic IDEs (Android Studio's Agent Mode, JetBrains AI, Cursor, ...) that
  * accept a "custom model endpoint" can point at this server and drive any
- * registered provider — OpenCode Zen/Go, OpenAI, Anthropic, Ollama, ... —
+ * registered provider — Vercel AI Gateway, OpenAI, Anthropic, Ollama, ... —
  * with tools, multi-turn roles, and SSE streaming. Keys resolve locally
  * (apiKeys > keystore > provider env fallback) and never leave the machine.
  *
@@ -208,7 +208,7 @@ interface ResolvedLane extends FailoverTarget {
  * - `HEAD /api/hello` (Claude Code connection-warming probe)
  * - `GET /healthz`
  *
- * Model routing: `providerId/modelId` (e.g. `opencode-zen/big-pickle`); bare
+ * Model routing: `providerId/modelId` (e.g. `vercel-ai-gateway/openai/gpt-5.4`); bare
  * model ids go to the default provider.
  */
 export class OpenAICompatibleServer {
@@ -1453,7 +1453,7 @@ export class OpenAICompatibleServer {
   private cors(res: ServerResponse): void {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-opencode-session, x-session-id, session-id, x-conversation-id');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-session-id, session-id, x-conversation-id, conversation-id');
   }
 
   private log(line: string): void {
@@ -1514,13 +1514,11 @@ export class OpenAICompatibleServer {
 /** Env var hints for the settings UI when models.dev catalog mode is off. */
 function providerEnvHints(providerId: string): string[] {
   const map: Record<string, string[]> = {
-    'opencode-zen': ['OPENCODE_ZEN_API_KEY', 'OPENCODE_API_KEY'],
-    'opencode-go': ['OPENCODE_GO_API_KEY', 'OPENCODE_API_KEY'],
     openai: ['OPENAI_API_KEY'],
     anthropic: ['ANTHROPIC_API_KEY'],
     groq: ['GROQ_API_KEY'],
     openrouter: ['OPENROUTER_API_KEY'],
-    'vercel-ai-gateway': ['AI_GATEWAY_API_KEY', 'VERCEL_OIDC_TOKEN'],
+    'vercel-ai-gateway': ['AI_GATEWAY_API_KEY', 'VERCEL_OIDC_TOKEN', 'VERCEL_TOKEN'],
     together: ['TOGETHER_API_KEY'],
     huggingface: ['HF_TOKEN'],
     gemini: ['GEMINI_API_KEY'],

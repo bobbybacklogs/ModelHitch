@@ -116,33 +116,17 @@ export {
   OllamaProvider,
   type Provider,
   type ModelInfo,
-  // OpenCode Zen & Go
-  opencodeZen,
-  opencodeGo,
-  createOpenCodeZenProvider,
-  createOpenCodeGoProvider,
-  OPENCODE_ZEN_MODELS,
-  OPENCODE_GO_MODELS,
-  // Native OpenCode Zen protocol adapters
-  zenResponses,
-  zenMessages,
-  zenGemini,
-  createZenResponsesProvider,
-  ZenResponsesProvider,
-  type ZenResponsesProviderOptions,
-  createZenMessagesProvider,
-  type ZenMessagesProviderOptions,
-  createZenGeminiProvider,
-  ZenGeminiProvider,
-  type ZenGeminiProviderOptions,
-  zenProtocolForModel,
-  type ZenProtocol,
+  // Vercel AI Gateway (default runtime)
+  vercelAiGateway,
+  createVercelAiGatewayProvider,
+  VERCEL_AI_GATEWAY_BASE_URL,
+  VERCEL_AI_GATEWAY_DEFAULT_MODEL,
+  type VercelAiGatewayProviderOptions,
   // Default providers
   openai,
   anthropic,
   groq,
   openrouter,
-  vercelAiGateway,
   together,
   huggingface,
   gemini,
@@ -158,6 +142,15 @@ export {
   koboldcpp,
   mockProvider,
 } from './providers/index.js';
+
+export {
+  resolveVercelGatewayCredential,
+  readVercelCliAuthToken,
+  vercelCliAuthPaths,
+  VERCEL_GATEWAY_MISSING_KEY_HINT,
+  type ResolvedVercelCredential,
+  type VercelCredentialSource,
+} from './core/vercel-auth.js';
 
 export {
   ModelHitchError,

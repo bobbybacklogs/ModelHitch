@@ -10,7 +10,7 @@ import { createOpenAICompatibleProvider } from '../providers/openai-compatible.j
 export interface BridgeConfig {
   /** Bridge base URL, e.g. "http://127.0.0.1:3939/v1". */
   baseUrl: string;
-  /** Routed model id, e.g. "opencode-zen/big-pickle" or "mock-model". */
+  /** Routed model id, e.g. "vercel-ai-gateway/openai/gpt-5.4" or "mock-model". */
   model: string;
   /** Optional key forwarded as Authorization (the bridge may ignore it). */
   apiKey?: string;

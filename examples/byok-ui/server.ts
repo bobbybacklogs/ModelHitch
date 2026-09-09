@@ -9,7 +9,7 @@
  * Serves the deterministic mock provider at http://127.0.0.1:3939/v1 so the
  * UI works with no keys. Point `VITE_BRIDGE_MODEL` (or the App defaults) at
  * any real provider the bridge routes — e.g. start the studio bridge
- * (`npm run bridge` at the repo root) and use model "opencode-zen/big-pickle".
+ * (`npm run bridge` at the repo root) and use model "vercel-ai-gateway/openai/gpt-5.4".
  */
 import { createModelHitchServer, mockProvider } from 'modelhitch';
 

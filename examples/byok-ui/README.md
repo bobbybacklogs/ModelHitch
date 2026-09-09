@@ -67,7 +67,7 @@ Copy the two-mode shape; replace the demo tool, provider list, and styling with 
 ## Provider / CORS notes
 
 Providers that accept browser-origin calls without extra setup: OpenAI, OpenRouter, Groq,
-Together, DeepSeek, Mistral, xAI, Moonshot, Z.ai (GLM), HuggingFace, and OpenCode Zen/Go.
+Together, DeepSeek, Mistral, xAI, Moonshot, Z.ai (GLM), HuggingFace, and Vercel AI Gateway.
 
 - **Anthropic** rejects browser-origin requests unless you pass `dangerouslyAllowBrowser:
   true` in the provider options (it sends the `anthropic-dangerous-direct-browser-access`

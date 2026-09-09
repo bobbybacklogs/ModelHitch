@@ -44,13 +44,11 @@ Useful methods include `chat`, `stream`, `streamToResult`, `provider`, `capabili
 
 | Provider ID | Credential environment variable |
 | --- | --- |
-| `opencode-zen` | `OPENCODE_ZEN_API_KEY`, fallback `OPENCODE_API_KEY` |
-| `opencode-go` | `OPENCODE_GO_API_KEY`, fallback `OPENCODE_API_KEY` |
+| `vercel-ai-gateway` | `AI_GATEWAY_API_KEY`, then `VERCEL_OIDC_TOKEN`, then `VERCEL_TOKEN`, then Vercel CLI auth |
 | `openai` | `OPENAI_API_KEY` |
 | `anthropic` | `ANTHROPIC_API_KEY` |
 | `groq` | `GROQ_API_KEY` |
 | `openrouter` | `OPENROUTER_API_KEY` |
-| `vercel-ai-gateway` | `AI_GATEWAY_API_KEY`, fallback `VERCEL_OIDC_TOKEN` |
 | `together` | `TOGETHER_API_KEY` |
 | `huggingface` | `HF_TOKEN` |
 | `gemini` | `GEMINI_API_KEY` |
@@ -61,7 +59,7 @@ Useful methods include `chat`, `stream`, `streamToResult`, `provider`, `capabili
 | `zai` | `ZAI_API_KEY` |
 | `lmstudio`, `ollama`, `vllm`, `llamacpp`, `koboldcpp`, `mock` | None by default |
 
-OpenCode Zen chooses the upstream protocol by model family: GPT/Grok use Responses, Claude/Qwen use Anthropic Messages, Gemini uses GenerateContent, and other models use chat completions.
+Vercel AI Gateway is the default runtime. Use `creator/model` slugs such as `openai/gpt-5.4`.
 
 ## Bridge commands and environment
 

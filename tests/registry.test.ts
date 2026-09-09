@@ -5,13 +5,11 @@ describe('defaultProviders registry', () => {
   it('registers every built-in provider (guards against defined-but-unregistered regressions)', () => {
     const ids = defaultProviders.map((p) => p.id);
     const expected = [
-      'opencode-zen',
-      'opencode-go',
+      'vercel-ai-gateway',
       'openai',
       'anthropic',
       'groq',
       'openrouter',
-      'vercel-ai-gateway',
       'together',
       'huggingface',
       'gemini',

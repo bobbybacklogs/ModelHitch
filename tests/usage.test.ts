@@ -3,7 +3,7 @@ import { UsageTracker, usageDashboardHtml, type UsageEvent } from '../src/index.
 
 function event(overrides: Partial<UsageEvent> = {}): UsageEvent {
   return {
-    providerId: 'opencode-go',
+    providerId: 'vercel-ai-gateway',
     model: 'deepseek-v4-flash',
     wire: 'chat-completions',
     streamed: false,
@@ -33,15 +33,15 @@ describe('UsageTracker', () => {
 
   it('groups by provider, model, and wire', () => {
     const t = new UsageTracker();
-    t.record(event({ providerId: 'opencode-go', model: 'deepseek-v4-flash', wire: 'chat-completions' }));
-    t.record(event({ providerId: 'opencode-zen', model: 'big-pickle', wire: 'messages' }));
-    t.record(event({ providerId: 'opencode-zen', model: 'big-pickle', wire: 'responses' }));
+    t.record(event({ providerId: 'vercel-ai-gateway', model: 'openai/gpt-5.4', wire: 'chat-completions' }));
+    t.record(event({ providerId: 'openai', model: 'gpt-5.4', wire: 'messages' }));
+    t.record(event({ providerId: 'openai', model: 'gpt-5.4', wire: 'responses' }));
     const s = t.snapshot();
     expect(s.totals.requests).toBe(3);
-    expect(s.perProvider['opencode-go']!.requests).toBe(1);
-    expect(s.perProvider['opencode-zen']!.requests).toBe(2);
-    expect(s.perModel['opencode-go/deepseek-v4-flash']!.requests).toBe(1);
-    expect(s.perModel['opencode-zen/big-pickle']!.requests).toBe(2);
+    expect(s.perProvider['vercel-ai-gateway']!.requests).toBe(1);
+    expect(s.perProvider['openai']!.requests).toBe(2);
+    expect(s.perModel['vercel-ai-gateway/openai/gpt-5.4']!.requests).toBe(1);
+    expect(s.perModel['openai/gpt-5.4']!.requests).toBe(2);
     expect(s.perWire['messages']!.requests).toBe(1);
     expect(s.perWire['responses']!.requests).toBe(1);
   });
@@ -62,14 +62,14 @@ describe('UsageTracker', () => {
     t.record(event());
     t.recordFailover({
       at: new Date().toISOString(),
-      from: { providerId: 'opencode-zen', model: 'big-pickle' },
-      to: { providerId: 'opencode-go', model: 'deepseek-v4-flash' },
+      from: { providerId: 'vercel-ai-gateway', model: 'openai/gpt-5.4' },
+      to: { providerId: 'openai', model: 'gpt-5.4' },
       error: { code: 'rate-limited', message: '429', status: 429 },
       attempt: 1,
     });
     let s = t.snapshot();
     expect(s.failovers.total).toBe(1);
-    expect(s.failovers.recent[0]!.to.providerId).toBe('opencode-go');
+    expect(s.failovers.recent[0]!.to.providerId).toBe('openai');
 
     t.reset();
     s = t.snapshot();

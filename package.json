@@ -1,7 +1,7 @@
 {
   "name": "modelhitch",
-  "version": "0.15.2",
-  "description": "Plug-and-play BYOK integration layer — hitch any AI provider or model to your app.",
+  "version": "2.0.0",
+  "description": "ModelHitch V2 — hitch any AI model via Vercel AI Gateway (BYOK). One TypeScript API for chat, streaming, tools, and local bridges.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",

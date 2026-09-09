@@ -3,7 +3,6 @@ import { serializeText } from './content.js';
 
 /** Well-known session and conversation headers sent by various clients and gateways. */
 export const SESSION_HEADER_CANDIDATES = [
-  'x-opencode-session',
   'x-session-id',
   'session-id',
   'x-conversation-id',
@@ -11,6 +10,8 @@ export const SESSION_HEADER_CANDIDATES = [
   'x-request-session-id',
   'x-client-session-id',
   'prompt-cache-key',
+  // Legacy inbound alias still accepted for older clients.
+  'x-opencode-session',
 ] as const;
 
 /**
@@ -54,10 +55,9 @@ function randomId(): string {
  * Derive a stable, deterministic session identifier from a message list when no
  * explicit session header was provided by the client.
  *
- * OpenCode Go uses session IDs for prompt caching and gateway routing. Hashing
- * the conversation's initial root message or prefix allows multiple turns of the
- * same dialogue to share the same stable cache lane even when the calling client
- * didn't send an explicit session header.
+ * Hashing the conversation's initial root message or prefix allows multiple
+ * turns of the same dialogue to share a stable cache lane even when the calling
+ * client didn't send an explicit session header.
  */
 export function deriveSessionId(messages: ModelMessage[] | undefined, fallbackSeed?: string): string {
   if (!messages || messages.length === 0) {

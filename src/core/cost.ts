@@ -16,42 +16,18 @@ export interface ModelPricing {
 
 /** Exact model id → pricing (wins over family fallback). */
 export const MODEL_PRICING: Record<string, ModelPricing> = {
-  // OpenCode Zen gateway models (family pricing as a stand-in).
+  'openai/gpt-5.4': { inputPerMillion: 2.5, outputPerMillion: 15 },
   'gpt-5.6-luna': { inputPerMillion: 2.5, outputPerMillion: 10 },
   'deepseek-v4-flash': { inputPerMillion: 0.27, outputPerMillion: 1.1 },
   'qwen3.6-plus': { inputPerMillion: 0.4, outputPerMillion: 1.2 },
   'gemini-3.5-flash-lite': { inputPerMillion: 0.1, outputPerMillion: 0.4 },
 };
 
-/**
- * OpenCode Go subscription pricing (USD per 1M tokens) — the rates the Go
- * usage limits ($12/5h, $30/wk, $60/mo) are charged against. See
- * https://opencode.ai/docs/go. Applied only when the provider is
- * `opencode-go`; Zen pay-as-you-go pricing stays in `MODEL_PRICING`.
- */
-export const GO_MODEL_PRICING: Record<string, ModelPricing> = {
-  'grok-4.5': { inputPerMillion: 2.0, outputPerMillion: 6.0 },
-  'gpt-5.6-luna': { inputPerMillion: 0.2, outputPerMillion: 1.2 },
-  'glm-5.2': { inputPerMillion: 1.4, outputPerMillion: 4.4 },
-  'glm-5.1': { inputPerMillion: 1.4, outputPerMillion: 4.4 },
-  'kimi-k3': { inputPerMillion: 3.0, outputPerMillion: 15.0 },
-  'kimi-k2.7-code': { inputPerMillion: 0.95, outputPerMillion: 4.0 },
-  'kimi-k2.6': { inputPerMillion: 0.95, outputPerMillion: 4.0 },
-  'mimo-v2.5': { inputPerMillion: 0.14, outputPerMillion: 0.28 },
-  'mimo-v2.5-pro': { inputPerMillion: 0.435, outputPerMillion: 0.87 },
-  'minimax-m3': { inputPerMillion: 0.3, outputPerMillion: 1.2 },
-  'minimax-m2.7': { inputPerMillion: 0.3, outputPerMillion: 1.2 },
-  'qwen3.8-max': { inputPerMillion: 2.0, outputPerMillion: 6.0 },
-  'qwen3.7-max': { inputPerMillion: 2.5, outputPerMillion: 7.5 },
-  'qwen3.7-plus': { inputPerMillion: 0.4, outputPerMillion: 1.6 },
-  'qwen3.6-plus': { inputPerMillion: 0.5, outputPerMillion: 3.0 },
-  'deepseek-v4-pro': { inputPerMillion: 0.435, outputPerMillion: 0.87 },
-  'deepseek-v4-flash': { inputPerMillion: 0.14, outputPerMillion: 0.28 },
-  hy3: { inputPerMillion: 0.14, outputPerMillion: 0.58 },
-};
-
 /** Model family prefixes → pricing fallback. */
 const FAMILY_PRICING: Array<{ prefix: string; pricing: ModelPricing }> = [
+  { prefix: 'openai/', pricing: { inputPerMillion: 2.5, outputPerMillion: 15 } },
+  { prefix: 'anthropic/', pricing: { inputPerMillion: 3, outputPerMillion: 15 } },
+  { prefix: 'google/', pricing: { inputPerMillion: 0.3, outputPerMillion: 1.5 } },
   { prefix: 'gpt-', pricing: { inputPerMillion: 2.5, outputPerMillion: 10 } },
   { prefix: 'grok-', pricing: { inputPerMillion: 0.3, outputPerMillion: 1.2 } },
   { prefix: 'claude-', pricing: { inputPerMillion: 3, outputPerMillion: 15 } },
@@ -81,11 +57,6 @@ export interface CostEstimate {
 export function pricingFor(model: string, providerId?: string): ModelPricing {
   if (providerId && LOCAL_PROVIDER_IDS.has(providerId)) {
     return { inputPerMillion: 0, outputPerMillion: 0 };
-  }
-  // OpenCode Go charges its own subscription rates against the usage limits.
-  if (providerId === 'opencode-go') {
-    const go = GO_MODEL_PRICING[model];
-    if (go) return go;
   }
   const exact = MODEL_PRICING[model];
   if (exact) return exact;

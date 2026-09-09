@@ -54,20 +54,22 @@ export function writeConfigFile(path: string, config: ModelHitchConfig): void {
 
 /**
  * Default template written by `modelhitch config init` and used when the bridge
- * starts with no config file. Mirrors `DEFAULT_FAILOVER_LANES`: paid Zen first,
- * cheap Go next, free Zen models as the safety net. No `maxProviders` cap —
- * a hard provider cap trims free/cross-provider lanes when the request primary
- * is a third provider (e.g. openai), which silently kills rotation.
+ * starts with no config file. Mirrors `DEFAULT_FAILOVER_LANES`: Vercel AI
+ * Gateway primary with alternate gateway models as the safety net.
  */
 export function defaultConfigTemplate(): ModelHitchConfig {
   return {
     version: CONFIG_VERSION,
-    defaultProviderId: 'opencode-zen',
+    defaultProviderId: 'vercel-ai-gateway',
+    defaultModel: 'openai/gpt-5.4',
     policy: {
-      trusted: [{ providerId: 'opencode-zen', models: ['big-pickle'] }],
+      trusted: [{ providerId: 'vercel-ai-gateway', models: ['openai/gpt-5.4'] }],
       fallback: [
-        { providerId: 'opencode-go', models: ['deepseek-v4-flash'] },
-        { providerId: 'opencode-zen', models: ['deepseek-v4-flash-free', 'mimo-v2.5-free'] },
+        {
+          providerId: 'vercel-ai-gateway',
+          models: ['anthropic/claude-sonnet-4.6', 'google/gemini-3-flash'],
+        },
+        { providerId: 'openai', models: ['gpt-5.4'] },
       ],
     },
     cooldown: { type: 'circuit-breaker', failureThreshold: 3, baseTripMs: 15_000, maxTripMs: 120_000 },

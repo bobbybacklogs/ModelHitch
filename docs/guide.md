@@ -31,8 +31,8 @@ const result = await mh.chat({
 });
 
 for await (const chunk of await mh.stream({
-  provider: 'opencode-go',
-  model: 'deepseek-v4-flash',
+  provider: 'vercel-ai-gateway',
+  model: 'openai/gpt-5.4',
   messages: [{ role: 'user', content: 'Stream it.' }],
 })) {
   if (chunk.type === 'text-delta') process.stdout.write(chunk.text);
@@ -49,19 +49,18 @@ Credentials resolve in this order:
 1. Explicit request `apiKey` or `baseUrl`
 2. Configured keystore
 3. Provider environment variable
+4. For Vercel AI Gateway: Vercel CLI `auth.json` token after `vercel login`
 
 Use `LocalStorageKeyStore` for browser-owned keys and `MemoryKeyStore` or environment variables on
 the server. Never put a server credential in a browser bundle.
 
 | Provider | Environment variable |
 | --- | --- |
-| OpenCode Zen | `OPENCODE_ZEN_API_KEY`, fallback `OPENCODE_API_KEY` |
-| OpenCode Go | `OPENCODE_GO_API_KEY`, fallback `OPENCODE_API_KEY` |
+| Vercel AI Gateway (default) | `AI_GATEWAY_API_KEY`, then `VERCEL_OIDC_TOKEN`, then `VERCEL_TOKEN`, then Vercel CLI auth |
 | OpenAI | `OPENAI_API_KEY` |
 | Anthropic | `ANTHROPIC_API_KEY` |
 | Groq | `GROQ_API_KEY` |
 | OpenRouter | `OPENROUTER_API_KEY` |
-| Vercel AI Gateway | `AI_GATEWAY_API_KEY`, fallback `VERCEL_OIDC_TOKEN` on Vercel |
 | Together | `TOGETHER_API_KEY` |
 | HuggingFace | `HF_TOKEN` |
 | Google Gemini | `GEMINI_API_KEY` |
@@ -76,7 +75,7 @@ Local providers and `mock` require no key by default.
 Vercel AI Gateway uses provider-qualified model IDs such as `openai/gpt-5.4` and
 `anthropic/claude-sonnet-4.6`. Its public model catalog is loaded dynamically by `listModels`, so
 the settings model picker stays current without a hard-coded inventory; inference still requires
-an AI Gateway API key or Vercel OIDC token.
+an AI Gateway API key, OIDC token, `VERCEL_TOKEN`, or a logged-in Vercel CLI.
 
 ## Web apps (browser)
 
@@ -112,7 +111,7 @@ Keys stay in `localStorage` on the user's device and are read straight from the 
 ### CORS notes
 
 Provider APIs that accept browser-origin calls without extra setup: OpenAI, OpenRouter, Groq,
-Together, DeepSeek, Mistral, xAI, Moonshot, Z.ai (GLM), HuggingFace, and OpenCode Zen/Go.
+Together, DeepSeek, Mistral, xAI, Moonshot, Z.ai (GLM), HuggingFace, and Vercel AI Gateway.
 
 Anthropic rejects browser-origin requests unless the request carries the
 `anthropic-dangerous-direct-browser-access: true` header. Pass `dangerouslyAllowBrowser: true` to
@@ -279,7 +278,7 @@ import { useChat } from 'modelhitch/react';
 
 const chat = useChat({
   baseUrl: 'http://127.0.0.1:3939/v1',
-  model: 'opencode-zen/big-pickle',
+  model: 'vercel-ai-gateway/openai/gpt-5.4',
 });
 ```
 

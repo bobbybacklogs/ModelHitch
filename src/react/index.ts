@@ -17,7 +17,7 @@ export { createBridgeClient, type BridgeConfig } from './bridge.js';
  * ```tsx
  * const { messages, pending, send, isThinking, usage } = useChat({
  *   baseUrl: 'http://127.0.0.1:3939/v1',
- *   model: 'opencode-zen/big-pickle',
+ *   model: 'vercel-ai-gateway/openai/gpt-5.4',
  *   tools: [weatherTool],
  *   executeTool: async (name, args) => { ... },
  * });

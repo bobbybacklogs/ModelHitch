@@ -11,7 +11,7 @@ import type { ChatResult, ModelMessage, StreamChunk, ToolCall, Usage } from './c
  * tools (or the turn cap is hit).
  *
  * ```ts
- * for await (const ev of runToolLoop(mh, { provider: 'opencode-zen', messages, tools }, executeTool)) {
+ * for await (const ev of runToolLoop(mh, { provider: 'vercel-ai-gateway', messages, tools }, executeTool)) {
  *   if (ev.type === 'chunk' && ev.chunk.type === 'text-delta') ui.append(ev.chunk.text);
  *   if (ev.type === 'tool') console.log(`called ${ev.call.name} -> ${ev.output}`);
  *   if (ev.type === 'done') console.log(`total cost-tracked turns: ${ev.turns}, usage: ${JSON.stringify(ev.usage)}`);

@@ -161,7 +161,7 @@ export function toModelHitchResponseFormat(value: unknown): ChatParams['response
 
 /**
  * Route a model string to a provider. Supports the `providerId/modelId`
- * prefix form (e.g. `opencode-zen/big-pickle`, `anthropic/claude-sonnet-4-5`)
+ * prefix form (e.g. `vercel-ai-gateway/openai/gpt-5.4`, `anthropic/claude-sonnet-4-5`)
  * with longest-prefix matching, so models whose own ids contain slashes
  * (e.g. OpenRouter's `meta-llama/llama-3.1-8b-instruct:free`) fall through to
  * the default provider unchanged. Bare model ids go to the default provider.

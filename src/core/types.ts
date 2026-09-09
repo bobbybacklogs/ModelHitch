@@ -79,8 +79,8 @@ export interface ChatParams {
    */
   previousResponseId?: string;
   /**
-   * Session/conversation identifier forwarded to providers that optimize prompt
-   * caching and gateway routing by session (e.g. OpenCode Go's `x-opencode-session`).
+   * Optional session id forwarded as `x-session-id` / `x-conversation-id` for
+   * caching and gateway routing by session.
    */
   sessionId?: string;
   signal?: AbortSignal;

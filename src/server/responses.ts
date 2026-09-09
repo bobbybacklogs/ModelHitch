@@ -61,7 +61,7 @@ export interface ResponsesRequest {
   /**
    * Stateful continuation: the id of the previous response. Kept conversation
    * state server-side; input is the *delta* since that response. Forwarded to
-   * providers with a stateful Responses endpoint (zen-responses).
+   * providers with a stateful Responses endpoint.
    */
   previous_response_id?: string;
 }
