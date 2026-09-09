@@ -56,7 +56,7 @@ Same provider-neutral types for chat, streaming, tools, custom providers, and Re
 ## Agent skills + plugins
 
 <p align="center">
-  <img src="./repo_assets/V2/Skills.png" alt="ModelHitch plugins and skills for Codex, Cursor, VS Code, and Claude" width="45%" style="border: 1px solid #008000; padding: 2px; border-radius: 10px;"/>
+  <img src="./repo_assets/V2/Skills.png" alt="ModelHitch plugins and skills for Codex, Cursor, VS Code, and Claude" width="55%" style="border: 1px solid #008000; padding: 2px; border-radius: 10px;"/>
 </p>
 
 ```bash
