@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./repo_assets/V2/Lockup.png" alt="ModelHitch — LLM temp agency" width="45%"/>
+  <img src="./repo_assets/V2/Lockup.png" alt="ModelHitch — LLM temp agency" width="60%"/>
 </p>
 
 <p align="center">
