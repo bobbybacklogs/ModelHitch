@@ -162,6 +162,33 @@ describe('Vercel AI Gateway provider', () => {
     }
   });
 
+  it('reads Windows %APPDATA%/xdg.data/com.vercel.cli auth without a double Roaming segment', async () => {
+    delete process.env.AI_GATEWAY_API_KEY;
+    delete process.env.VERCEL_OIDC_TOKEN;
+    delete process.env.VERCEL_TOKEN;
+    delete process.env.MODELHITCH_SKIP_VERCEL_CLI_AUTH;
+    delete process.env.XDG_DATA_HOME;
+
+    const roaming = mkdtempSync(join(tmpdir(), 'mh-vercel-appdata-'));
+    process.env.APPDATA = roaming;
+    const authDir = join(roaming, 'xdg.data', 'com.vercel.cli');
+    mkdirSync(authDir, { recursive: true });
+    writeFileSync(join(authDir, 'auth.json'), JSON.stringify({ token: 'win-cli-token' }), 'utf8');
+
+    try {
+      const paths = vercelCliAuthPaths();
+      expect(paths).toContain(join(roaming, 'xdg.data', 'com.vercel.cli', 'auth.json'));
+      expect(paths.some((p) => p.includes(`${join('Roaming', 'Roaming')}`) || p.includes('Roaming\\Roaming') || p.includes('Roaming/Roaming'))).toBe(false);
+      expect(readVercelCliAuthToken()).toBe('win-cli-token');
+      expect(resolveVercelGatewayCredential()).toEqual({
+        apiKey: 'win-cli-token',
+        source: 'vercel-cli',
+      });
+    } finally {
+      rmSync(roaming, { recursive: true, force: true });
+    }
+  });
+
   it('still requires credentials for inference', async () => {
     delete process.env.AI_GATEWAY_API_KEY;
     delete process.env.VERCEL_OIDC_TOKEN;

@@ -78,14 +78,19 @@ export function vercelCliAuthPaths(node: NodeBuiltins = loadNodeBuiltins()!): st
   push(node.join(home, '.local', 'share', APP_DIR));
   push(node.join(home, 'Library', 'Application Support', APP_DIR));
 
+  // On Windows, APPDATA is already …\AppData\Roaming. Vercel CLI stores auth at
+  // %APPDATA%\xdg.data\com.vercel.cli — never insert another "Roaming" segment.
   const appData = process.env.APPDATA;
   if (appData) {
     push(node.join(appData, APP_DIR));
-    push(node.join(appData, 'Roaming', 'xdg.data', APP_DIR));
+    push(node.join(appData, 'xdg.data', APP_DIR));
   }
 
   const localAppData = process.env.LOCALAPPDATA;
-  if (localAppData) push(node.join(localAppData, APP_DIR));
+  if (localAppData) {
+    push(node.join(localAppData, APP_DIR));
+    push(node.join(localAppData, 'xdg.data', APP_DIR));
+  }
 
   paths.push(node.join(home, '.now', AUTH_FILE));
 
