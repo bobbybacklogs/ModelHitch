@@ -16,7 +16,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { currentModuleUrl } from './core/import-meta.js';
@@ -96,8 +96,18 @@ export async function probeBridge(port: number, host: string): Promise<BridgePro
   }
 }
 
-/** Path to the script we're currently running as. */
+/**
+ * Path to the CLI entry script to re-exec for background mode.
+ *
+ * In the bundled `dist/cli.js` artifact, `currentModuleUrl()` resolves to a
+ * shared chunk (e.g. `dist/chunk-*.js`), not the CLI entry — spawning that
+ * file exits immediately with no bridge. `process.argv[1]` is always the real
+ * entry (`dist/cli.js`, an npm `.bin` symlink, or `src/cli.ts` under tsx).
+ */
 function currentScript(): string {
+  if (process.argv[1]) return resolve(process.argv[1]);
+  const sibling = join(dirname(fileURLToPath(currentModuleUrl())), 'cli.js');
+  if (existsSync(sibling)) return sibling;
   return fileURLToPath(currentModuleUrl());
 }
 
