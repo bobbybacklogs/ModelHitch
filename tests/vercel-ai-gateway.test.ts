@@ -3,6 +3,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ModelHitchError } from '../src/core/errors.js';
+import {
+  OPENAI_COMPAT_GATEWAY_CATALOG_DEFAULT_MAX_TOKENS,
+  OPENAI_COMPAT_MAX_TOKENS_CEILING,
+  OPENAI_COMPAT_SAFE_DEFAULT_MAX_TOKENS,
+} from '../src/core/max-tokens.js';
 import type { ChatParams } from '../src/core/types.js';
 import {
   createVercelAiGatewayProvider,
@@ -61,6 +66,55 @@ describe('Vercel AI Gateway provider', () => {
       vision: true,
       embeddings: false,
     });
+  });
+
+  it('sends a safe max_tokens default when the caller omits maxTokens (Diffnote-style)', async () => {
+    const calls: CapturedRequest[] = [];
+    const provider = gatewayWithFetch(async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof Request ? input.url : input.href;
+      calls.push({ url, init: init ?? {} });
+      return new Response(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: 'commit msg' }, finish_reason: 'stop' }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    await provider.chat(params, { apiKey: 'gateway-test-key' });
+    const body = JSON.parse(String(calls[0]?.init.body));
+    expect(body.max_tokens).toBe(OPENAI_COMPAT_SAFE_DEFAULT_MAX_TOKENS);
+    expect(body.max_tokens).toBeLessThan(OPENAI_COMPAT_GATEWAY_CATALOG_DEFAULT_MAX_TOKENS);
+  });
+
+  it('forwards explicit maxTokens unchanged when within the gateway ceiling', async () => {
+    const calls: CapturedRequest[] = [];
+    const provider = gatewayWithFetch(async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof Request ? input.url : input.href;
+      calls.push({ url, init: init ?? {} });
+      return new Response(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    await provider.chat({ ...params, maxTokens: 1024 }, { apiKey: 'gateway-test-key' });
+    expect(JSON.parse(String(calls[0]?.init.body)).max_tokens).toBe(1024);
+  });
+
+  it('clamps oversize explicit maxTokens below the gateway catalog default', async () => {
+    const calls: CapturedRequest[] = [];
+    const provider = gatewayWithFetch(async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof Request ? input.url : input.href;
+      calls.push({ url, init: init ?? {} });
+      return new Response(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    await provider.chat(
+      { ...params, maxTokens: OPENAI_COMPAT_GATEWAY_CATALOG_DEFAULT_MAX_TOKENS },
+      { apiKey: 'gateway-test-key' },
+    );
+    const body = JSON.parse(String(calls[0]?.init.body));
+    expect(body.max_tokens).toBe(OPENAI_COMPAT_MAX_TOKENS_CEILING);
+    expect(body.max_tokens).toBeLessThan(OPENAI_COMPAT_GATEWAY_CATALOG_DEFAULT_MAX_TOKENS);
   });
 
   it('uses the OpenAI-compatible chat endpoint without changing slash-containing model ids', async () => {

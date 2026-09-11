@@ -65,6 +65,13 @@ export {
   type SkippedCapabilityLane,
 } from './core/capabilities.js';
 export { parseRetryAfter } from './core/headers.js';
+export {
+  OPENAI_COMPAT_GATEWAY_CATALOG_DEFAULT_MAX_TOKENS,
+  OPENAI_COMPAT_MAX_TOKENS_CEILING,
+  OPENAI_COMPAT_SAFE_DEFAULT_MAX_TOKENS,
+  resolveOpenAICompatMaxTokens,
+  type ResolveOpenAICompatMaxTokensOptions,
+} from './core/max-tokens.js';
 
 // models.dev catalog integration (Milestone 2) — consumes mdev-sdk
 export { createCatalogSource, isCallableProvider } from './catalog/source.js';

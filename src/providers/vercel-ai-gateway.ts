@@ -1,3 +1,7 @@
+import {
+  OPENAI_COMPAT_MAX_TOKENS_CEILING,
+  OPENAI_COMPAT_SAFE_DEFAULT_MAX_TOKENS,
+} from '../core/max-tokens.js';
 import type { Provider } from './types.js';
 import {
   createOpenAICompatibleProvider,
@@ -48,6 +52,8 @@ export function createVercelAiGatewayProvider(
     fetchImpl: opts.fetchImpl,
     extraApiKeySources: [() => readVercelCliAuthToken()],
     missingApiKeyHint: VERCEL_GATEWAY_MISSING_KEY_HINT,
+    defaultMaxTokens: OPENAI_COMPAT_SAFE_DEFAULT_MAX_TOKENS,
+    maxTokensCeiling: OPENAI_COMPAT_MAX_TOKENS_CEILING,
   };
   return createOpenAICompatibleProvider(config);
 }

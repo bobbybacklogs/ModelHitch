@@ -1,5 +1,6 @@
 import { ModelHitchError } from '../core/errors.js';
 import { parseRetryAfter } from '../core/headers.js';
+import { resolveOpenAICompatMaxTokens } from '../core/max-tokens.js';
 import type {
   Capabilities,
   ChatParams,
@@ -48,6 +49,14 @@ export interface OpenAICompatibleConfig {
   headers?: Record<string, string>;
   /** Injectable fetch for tests and edge runtimes. */
   fetchImpl?: typeof fetch;
+  /**
+   * When the caller omits `maxTokens`, send this as `max_tokens` instead of
+   * leaving the field off the wire. Gateways like Vercel AI Gateway inject an
+   * oversize catalog default (65536) when the field is absent.
+   */
+  defaultMaxTokens?: number;
+  /** Clamp explicit `maxTokens` above this value before sending. */
+  maxTokensCeiling?: number;
 }
 
 interface OpenAIContentPart {
@@ -377,7 +386,12 @@ export class OpenAICompatibleProvider implements Provider {
     const tools = toOpenAITools(params.tools);
     if (tools) body.tools = tools;
     if (params.temperature !== undefined) body.temperature = params.temperature;
-    if (params.maxTokens !== undefined) body.max_tokens = params.maxTokens;
+    const maxTokens = resolveOpenAICompatMaxTokens({
+      maxTokens: params.maxTokens,
+      defaultMaxTokens: this.config.defaultMaxTokens,
+      maxTokensCeiling: this.config.maxTokensCeiling,
+    });
+    if (maxTokens !== undefined) body.max_tokens = maxTokens;
     if (params.stop?.length) body.stop = params.stop;
     if (params.toolChoice !== undefined) body.tool_choice = toOpenAIToolChoice(params.toolChoice);
     if (params.responseFormat !== undefined && params.responseFormat !== 'text') {
