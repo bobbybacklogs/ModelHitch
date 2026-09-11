@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import {
+  OPENAI_COMPAT_SAFE_DEFAULT_MAX_TOKENS,
+  resolveOpenAICompatMaxTokens,
+} from '../src/core/max-tokens.js';
 import { createOpenAICompatibleProvider, mapHTTPError } from '../src/providers/openai-compatible.js';
 import type { ChatParams, ProviderCredentials } from '../src/core/types.js';
 import { isRetryableError } from '../src/core/failover.js';
@@ -36,6 +40,58 @@ const baseParams: ChatParams = {
   model: 'test-model',
   messages: [{ role: 'user', content: 'hi' }],
 };
+
+describe('OpenAI-compatible max_tokens resolution', () => {
+  it('returns undefined when neither caller value nor default is configured', () => {
+    expect(resolveOpenAICompatMaxTokens({ maxTokens: undefined })).toBeUndefined();
+    expect(resolveOpenAICompatMaxTokens({ maxTokens: 512 })).toBe(512);
+  });
+
+  it('uses configured defaults and ceilings', () => {
+    expect(
+      resolveOpenAICompatMaxTokens({
+        defaultMaxTokens: OPENAI_COMPAT_SAFE_DEFAULT_MAX_TOKENS,
+        maxTokensCeiling: 16_384,
+      }),
+    ).toBe(OPENAI_COMPAT_SAFE_DEFAULT_MAX_TOKENS);
+    expect(
+      resolveOpenAICompatMaxTokens({
+        maxTokens: 65_536,
+        defaultMaxTokens: OPENAI_COMPAT_SAFE_DEFAULT_MAX_TOKENS,
+        maxTokensCeiling: 16_384,
+      }),
+    ).toBe(16_384);
+  });
+
+  it('omits max_tokens on generic adapters without gateway defaults', async () => {
+    const { fetchImpl, calls } = mockFetch();
+    const provider = createOpenAICompatibleProvider({
+      id: 'test',
+      name: 'Test',
+      defaultModel: 'test-model',
+      baseUrl: 'https://example.com/v1',
+      requiresKey: false,
+      fetchImpl,
+    });
+    await provider.chat(baseParams, {});
+    expect(calls[0]!.body.max_tokens).toBeUndefined();
+  });
+
+  it('sends configured defaultMaxTokens when the caller omits maxTokens', async () => {
+    const { fetchImpl, calls } = mockFetch();
+    const provider = createOpenAICompatibleProvider({
+      id: 'test',
+      name: 'Test',
+      defaultModel: 'test-model',
+      baseUrl: 'https://example.com/v1',
+      requiresKey: false,
+      defaultMaxTokens: OPENAI_COMPAT_SAFE_DEFAULT_MAX_TOKENS,
+      fetchImpl,
+    });
+    await provider.chat(baseParams, {});
+    expect(calls[0]!.body.max_tokens).toBe(OPENAI_COMPAT_SAFE_DEFAULT_MAX_TOKENS);
+  });
+});
 
 describe('OpenAI-compatible error mapping', () => {
   it('retries an upstream model-unavailable failure wrapped in HTTP 400', () => {
@@ -240,6 +296,52 @@ describe('toolChoice on the mock provider', () => {
     const toolCalls = result.message.role === 'assistant' ? result.message.toolCalls : undefined;
     expect(toolCalls?.[0]?.name).toBe('get_weather');
   });
+});
+
+describe('bridge max_tokens passthrough to gateway provider', () => {
+  it('routes omitted max_tokens into a safe provider default for gateway adapters', async () => {
+    const calls: CapturedRequest[] = [];
+    const gateway = createOpenAICompatibleProvider({
+      id: 'vercel-ai-gateway',
+      name: 'Gateway',
+      defaultModel: 'openai/gpt-5.4',
+      baseUrl: 'https://example.com/v1',
+      requiresKey: false,
+      defaultMaxTokens: OPENAI_COMPAT_SAFE_DEFAULT_MAX_TOKENS,
+      maxTokensCeiling: 32_768,
+      fetchImpl: async (input, init) => {
+        const url = typeof input === 'string' ? input : input instanceof Request ? input.url : input.href;
+        calls.push({ url, init: init ?? {}, body: JSON.parse(String(init?.body ?? '{}')) });
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    });
+
+    const { OpenAICompatibleServer } = await import('../src/index.js');
+    const server = new OpenAICompatibleServer({
+      providers: [gateway],
+      defaultProviderId: 'vercel-ai-gateway',
+    });
+    const { url } = await server.listen(0, '127.0.0.1');
+    try {
+      const res = await fetch(`${url}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'vercel-ai-gateway/openai/gpt-5.4',
+          messages: [{ role: 'user', content: 'write a commit message' }],
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(calls[0]?.body.max_tokens).toBe(OPENAI_COMPAT_SAFE_DEFAULT_MAX_TOKENS);
+    } finally {
+      await server.close();
+    }
+  }, 30_000);
 });
 
 describe('bridge tool_choice passthrough to provider', () => {
