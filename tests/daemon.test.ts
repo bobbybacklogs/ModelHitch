@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -95,6 +95,10 @@ describe('background bridge spawn', () => {
     MODELHITCH_HOST: '127.0.0.1',
   };
 
+  beforeAll(() => {
+    execSync('npm run build', { cwd: repoRoot, stdio: 'pipe' });
+  }, 30_000);
+
   afterAll(async () => {
     process.env.MODELHITCH_HOME = bgHome;
     process.env.MODELHITCH_PORT = String(port);
@@ -102,16 +106,21 @@ describe('background bridge spawn', () => {
     rmSync(bgHome, { recursive: true, force: true });
   });
 
-  it.skipIf(!existsSync(builtCli))('stays up when launched via the built CLI', async () => {
-    const result = spawnSync(process.execPath, [builtCli, 'bridge', '--background'], {
-      env: bgEnv,
-      cwd: repoRoot,
-      encoding: 'utf8',
-    });
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain('responding on');
-    expect(await waitForReady(port, '127.0.0.1', 3000)).toBe(true);
-    const log = readFileSync(join(bgHome, 'bridge.log'), 'utf8');
-    expect(log).toContain('listening on');
-  });
+  it.skipIf(!existsSync(builtCli))(
+    'stays up when launched via the built CLI',
+    async () => {
+      const result = spawnSync(process.execPath, [builtCli, 'bridge', '--background'], {
+        env: bgEnv,
+        cwd: repoRoot,
+        encoding: 'utf8',
+      });
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe('');
+      expect(await waitForReady(port, '127.0.0.1', 8000)).toBe(true);
+      const log = readFileSync(join(bgHome, 'bridge.log'), 'utf8');
+      expect(log).toContain('listening on');
+      expect(result.stdout).toContain('responding on');
+    },
+    20_000,
+  );
 });

@@ -109,7 +109,10 @@ describe('bridge auto-mode failover', () => {
     const text = await res.text();
     // First fallback lane serves: lane-a. It must never come from the rated lane.
     expect(text).toContain('lane-a stream');
-    expect(text).not.toContain('429');
+    // Do not assert `.not.toContain('429')` — Unix `created` timestamps often include
+    // that substring (e.g. 1789143429), which is unrelated to the primary lane error.
+    expect(text).not.toContain('primary failed');
+    expect(text).not.toContain('HTTP 429');
     const last = usageEvents[usageEvents.length - 1];
     expect(last.streamed).toBe(true);
     expect(last.providerId).toBe('lane-a');
