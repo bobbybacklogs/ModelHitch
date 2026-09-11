@@ -19,7 +19,8 @@ final class ChatPage extends StatefulWidget {
 
 final class _ChatPageState extends State<ChatPage> {
   final _keyController = TextEditingController();
-  final _promptController = TextEditingController(text: 'Say hello from Flutter.');
+  final _promptController =
+      TextEditingController(text: 'Say hello from Flutter.');
   final _keys = FlutterSecureKeyStore();
   String _answer = '';
   String? _error;
@@ -70,12 +71,27 @@ final class _ChatPageState extends State<ChatPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              TextField(controller: _keyController, obscureText: true, decoration: const InputDecoration(labelText: 'OpenAI key')),
-              TextField(controller: _promptController, minLines: 2, maxLines: 4, decoration: const InputDecoration(labelText: 'Prompt')),
+              TextField(
+                  controller: _keyController,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: 'OpenAI key')),
+              TextField(
+                  controller: _promptController,
+                  minLines: 2,
+                  maxLines: 4,
+                  decoration: const InputDecoration(labelText: 'Prompt')),
               const SizedBox(height: 12),
-              FilledButton(onPressed: _pending ? null : _send, child: Text(_pending ? 'Streaming...' : 'Send')),
-              if (_error != null) Padding(padding: const EdgeInsets.only(top: 12), child: Text(_error!)),
-              if (_answer.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 12), child: Text(_answer)),
+              FilledButton(
+                  onPressed: _pending ? null : _send,
+                  child: Text(_pending ? 'Streaming...' : 'Send')),
+              if (_error != null)
+                Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Text(_error!)),
+              if (_answer.isNotEmpty)
+                Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Text(_answer)),
             ],
           ),
         ),
