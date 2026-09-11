@@ -51,7 +51,7 @@
     "example": "tsx examples/quickstart.ts",
     "bridge": "tsx examples/studio-bridge.ts",
     "canary": "tsx examples/canary.ts",
-    "prepublishOnly": "npm run typecheck && npm test && npm run build",
+    "prepublishOnly": "npm run typecheck && npm run build && npm test",
     "gh-release": "node scripts/gh-release.mjs",
     "release": "npm version patch && npm publish && git push origin main --tags && npm run gh-release",
     "release:minor": "npm version minor && npm publish && git push origin main --tags && npm run gh-release",

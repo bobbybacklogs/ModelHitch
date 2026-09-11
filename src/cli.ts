@@ -572,10 +572,19 @@ async function runWebSettings(): Promise<void> {
   console.log(`Opened ${url}`);
 }
 
+/** Logo is for interactive help; keep background/status/stop output script-friendly. */
+function shouldPrintLogo(args: string[]): boolean {
+  const [cmd] = args;
+  if (cmd === 'settings' || cmd === 'status' || cmd === 'stop') return false;
+  if (cmd === '-v' || cmd === '--version') return false;
+  if (cmd === 'bridge' && (args.includes('--background') || args.includes('-b'))) return false;
+  return true;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const [cmd] = args;
-  if (cmd !== 'settings') printAsciiLogo();
+  if (shouldPrintLogo(args)) printAsciiLogo();
   switch (cmd) {
     case undefined:
     case '-h':
