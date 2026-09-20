@@ -11,8 +11,9 @@ export default defineConfig({
   ],
   test: {
     environment: 'node',
-    // expo-sdk is a separate package with its own vitest config (it aliases the
-    // Expo/React Native peers to stubs). Run it with `npm test` inside expo-sdk.
-    exclude: [...configDefaults.exclude, 'expo-sdk/**'],
+    // Platform SDK packages have their own vitest configs (they alias Electron,
+    // Expo, and React Native peers to stubs). Run them with `npm test` inside
+    // each package directory.
+    exclude: [...configDefaults.exclude, 'expo-sdk/**', 'electron-sdk/**'],
   },
 });
