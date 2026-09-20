@@ -1,0 +1,76 @@
+{
+  "name": "modelhitch-electron",
+  "version": "0.1.0",
+  "description": "Electron adapter for ModelHitch — streaming BYOK AI in desktop apps with OS-backed credential storage.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./ipc": {
+      "types": "./dist/ipc.d.ts",
+      "import": "./dist/ipc.js",
+      "require": "./dist/ipc.cjs"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js",
+      "require": "./dist/react.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc -p tsconfig.dev.json",
+    "typecheck:pkg": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck:pkg && npm test && npm run build"
+  },
+  "peerDependencies": {
+    "electron": ">=28",
+    "modelhitch": ">=0.15.0",
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "electron",
+    "desktop",
+    "ai",
+    "llm",
+    "byok",
+    "bring-your-own-key",
+    "streaming",
+    "modelhitch"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bobbybacklogs/ModelHitch.git",
+    "directory": "electron-sdk"
+  },
+  "homepage": "https://github.com/bobbybacklogs/ModelHitch/tree/main/electron-sdk#readme",
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.1.1",
+    "electron": "^35.0.0",
+    "modelhitch": "^2.0.3",
+    "react": "19.2.3",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

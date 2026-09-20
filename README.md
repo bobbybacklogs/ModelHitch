@@ -84,6 +84,7 @@ Defaults to a personal install. Add `--project`, `--dry-run`, or `--force` as ne
 | **Web apps** | Browser bundler support via `modelhitch/browser` — no Node polyfills |
 | **Android** | Native Kotlin SDK, coroutine streaming, Compose sample, Keystore BYOK |
 | **Flutter** | Dart SDK, SSE streaming, secure BYOK, OpenAI-compatible providers |
+| **Electron** | Desktop adapter, `safeStorage` BYOK, renderer IPC, browser-safe bundling |
 | **BYOK** | Request keys, memory store, browser local storage, env fallback |
 | **React** | `useChat`, `useStream`, bridge client via `modelhitch/react` |
 | **Bridge** | OpenAI Chat/Responses/Images, Anthropic Messages, Gemini GenerateContent |
@@ -192,6 +193,36 @@ for await (const chunk of stream) {
 ```
 
 [Expo guide →](./expo-sdk/README.md)
+
+## Electron SDK
+
+Thin adapter over `modelhitch` for Electron 28+ desktop apps.
+
+- `safeStorage` BYOK + renderer IPC helpers
+- Bundler-safe entry (no Node-only modules in renderer bundles)
+- Same BYOK contract as Android/Dart/Expo — macOS, Windows, and Linux
+
+```bash
+npm install modelhitch modelhitch-electron
+```
+
+```ts
+import { createElectronModelHitch } from 'modelhitch-electron';
+
+const mh = createElectronModelHitch({ defaultProviderId: 'openai' });
+await mh.keystore?.set('openai', keyPastedByUser);
+
+const stream = await mh.stream({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Hello from Electron' }],
+});
+
+for await (const chunk of stream) {
+  if (chunk.type === 'text-delta') appendText(chunk.text);
+}
+```
+
+[Electron guide →](./electron-sdk/README.md)
 
 ## Local agent bridge
 

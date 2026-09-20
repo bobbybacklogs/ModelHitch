@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "electron": ["./stubs/electron.ts"],
+      "modelhitch/browser": ["../src/browser.ts"],
+      "modelhitch/react": ["../src/react/index.ts"]
+    }
+  },
+  "include": ["src"]
+}

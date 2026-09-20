@@ -10,6 +10,7 @@ The root [README](../README.md) is the storefront. This is the operations manual
 - [Web apps (browser)](#web-apps-browser)
 - [Android SDK](#android-sdk)
 - [Dart and Flutter SDKs](#dart-and-flutter-sdks)
+- [Electron SDK](#electron-sdk)
 - [Tools and React](#tools-and-react)
 - [Local agent bridge](#local-agent-bridge)
 - [Auto-mode failover](#auto-mode-failover)
@@ -265,6 +266,40 @@ for await (const chunk of stream) {
 keychain) and falls back to `localStorage` on web. The React hooks (`useChat`, `useStream`) are
 re-exported from `modelhitch-expo/react` for bridge-backed apps. See the
 [Expo README](../expo-sdk/README.md) for the full setup, security notes, and publishing guide.
+
+## Electron SDK
+
+The [`electron-sdk`](../electron-sdk) package adapts the published `modelhitch` npm package for
+Electron 28+ desktop apps. It is a thin layer, not a reimplementation: the same `ModelHitch`
+client, providers, failover, and usage tracking run in the main process and in renderer windows.
+
+Two things make it necessary:
+
+- **Credential storage.** Renderer windows cannot call `safeStorage` directly. The adapter stores
+  keys in the main process with `SafeStorageKeyStore` and exposes them to renderers through IPC
+  (`registerKeyStoreIpc` / `createIpcKeyStore`).
+- **Bundlers.** Some Electron bundlers resolve the Node `modelhitch` entry and pull in the bridge
+  server and `node:sqlite`. `modelhitch-electron` re-exports the browser-safe surface instead.
+
+```ts
+import { createElectronModelHitch } from 'modelhitch-electron';
+
+const mh = createElectronModelHitch({ defaultProviderId: 'openai' });
+await mh.keystore?.set('openai', keyPastedByUser); // OS credential store
+
+const stream = await mh.stream({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Hello from Electron' }],
+});
+for await (const chunk of stream) {
+  if (chunk.type === 'text-delta') appendText(chunk.text);
+}
+```
+
+`SafeStorageKeyStore` encrypts each provider key with Electron `safeStorage` and persists the
+ciphertext under the app's user-data directory. The React hooks (`useChat`, `useStream`) are
+re-exported from `modelhitch-electron/react` for bridge-backed apps. See the
+[Electron README](../electron-sdk/README.md) for renderer IPC, security notes, and publishing.
 
 ## Tools and React
 
