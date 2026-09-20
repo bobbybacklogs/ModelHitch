@@ -6,9 +6,11 @@ package's release scripts — `electron-sdk` is excluded from the root `files[]`
 ## Prerequisites
 
 - The `modelhitch` version the adapter targets is already on npm (it is a peer dependency).
-- `npm install` has been run **inside `electron-sdk`**. The peers (`electron`, `react`, `modelhitch`)
-  are pinned as devDependencies so the release build typechecks against the real types. The stubbed
-  `tsconfig.dev.json` is for fast in-repo verification only and is not used for the release build.
+- `npm install` has been run **inside `electron-sdk`**. The peers (`react`, `modelhitch`) are pinned
+  as devDependencies so the release build typechecks against the real types. `typecheck:pkg` resolves
+  `electron` through `types/electron.d.ts` so publish does not require the Electron binary download
+  (which often fails on Windows). The stubbed `tsconfig.dev.json` is for fast in-repo verification
+  only and is not used for the release build.
 - npm 2FA is available; `npm publish` prompts for an OTP.
 
 ## Release

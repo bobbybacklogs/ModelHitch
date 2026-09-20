@@ -31,7 +31,7 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc -p tsconfig.dev.json",
-    "typecheck:pkg": "tsc --noEmit",
+    "typecheck:pkg": "tsc -p tsconfig.pkg.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "prepublishOnly": "npm run typecheck:pkg && npm test && npm run build"
