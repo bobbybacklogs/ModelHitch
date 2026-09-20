@@ -1,12 +1,13 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    "noEmit": true,
     "types": ["node"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "baseUrl": ".",
     "paths": {
-      "electron": ["./types/electron.d.ts"],
-      "modelhitch/browser": ["../src/browser.ts"],
-      "modelhitch/react": ["../src/react/index.ts"]
+      "electron": ["./types/electron.d.ts"]
     }
   },
   "include": ["src"]
