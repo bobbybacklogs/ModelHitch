@@ -3,13 +3,14 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 describe('release scripts', () => {
-  it('builds dist before tests in prepublishOnly so integration tests use a fresh CLI', () => {
+  it('verify typechecks, then builds dist before tests so CLI integration uses a fresh binary', () => {
     const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '../package.json'), 'utf8')) as {
-      scripts: { prepublishOnly: string };
+      scripts: { verify: string; prepublishOnly: string };
     };
-    const script = pkg.scripts.prepublishOnly;
-    const buildAt = script.indexOf('npm run build');
-    const testAt = script.indexOf('npm test');
+    expect(pkg.scripts.verify).toBe('npm run typecheck && npm run build && npm test');
+    expect(pkg.scripts.prepublishOnly).toBe('npm run verify');
+    const buildAt = pkg.scripts.verify.indexOf('npm run build');
+    const testAt = pkg.scripts.verify.indexOf('npm test');
     expect(buildAt).toBeGreaterThanOrEqual(0);
     expect(testAt).toBeGreaterThanOrEqual(0);
     expect(buildAt).toBeLessThan(testAt);
