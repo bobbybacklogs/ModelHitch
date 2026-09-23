@@ -68,7 +68,12 @@ import { normalizeBodyImages } from './local-images.js';
 import { extractSessionId } from '../core/session.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
 import type { CloudAgentConfig, ImageGenerationConfig } from '../config.js';
-import { CURSOR_CLOUD_PROVIDER_ID } from '../providers/cursor-cloud.js';
+import {
+  CURSOR_CLOUD_PROVIDER_ID,
+  cancelCursorCloudAgent,
+  getCursorCloudAgent,
+  listCursorCloudAgents,
+} from '../providers/cursor-cloud.js';
 import { safeJsonParse } from '../core/json.js';
 import { modelhitchHome } from '../config-file.js';
 import { WorkspaceStore } from '../workspace/store.js';
@@ -508,6 +513,41 @@ export class OpenAICompatibleServer {
       const cd = this.cooldown;
       if (cd instanceof CircuitBreaker) health.push(...cd.snapshot());
       this.sendJson(res, 200, health);
+      return;
+    }
+
+    const cloudAgentCancelMatch = path.match(/^\/v1\/cloud-agents\/([^/]+)\/cancel$/);
+    if (method === 'POST' && cloudAgentCancelMatch) {
+      this.log(`${method} ${path} ->`);
+      try {
+        const agent = await this.handleCloudAgentCancel(decodeURIComponent(cloudAgentCancelMatch[1] ?? ''));
+        this.sendJson(res, 200, agent);
+      } catch (err) {
+        this.sendCloudAgentManageError(res, err);
+      }
+      return;
+    }
+
+    const cloudAgentIdMatch = path.match(/^\/v1\/cloud-agents\/([^/]+)$/);
+    if (method === 'GET' && cloudAgentIdMatch) {
+      this.log(`${method} ${path} ->`);
+      try {
+        const agent = await this.handleCloudAgentGet(decodeURIComponent(cloudAgentIdMatch[1] ?? ''));
+        this.sendJson(res, 200, agent);
+      } catch (err) {
+        this.sendCloudAgentManageError(res, err);
+      }
+      return;
+    }
+
+    if (method === 'GET' && path === '/v1/cloud-agents') {
+      this.log(`${method} ${path} ->`);
+      try {
+        const agents = await this.handleCloudAgentList();
+        this.sendJson(res, 200, { agents });
+      } catch (err) {
+        this.sendCloudAgentManageError(res, err);
+      }
       return;
     }
 
@@ -1339,6 +1379,47 @@ export class OpenAICompatibleServer {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  private resolveCloudAgentApiKey(): string {
+    if (!this.cloudAgent?.enabled) {
+      throw new ModelHitchError(
+        'bad-request',
+        'Cursor Cloud Agent lane is disabled. Enable cloudAgent in ~/.modelhitch/config.json or via /settings.',
+        { status: 403, providerId: CURSOR_CLOUD_PROVIDER_ID },
+      );
+    }
+    const key = this.options.apiKeys?.[CURSOR_CLOUD_PROVIDER_ID] ?? process.env.CURSOR_API_KEY;
+    if (!key) {
+      throw new ModelHitchError(
+        'missing-api-key',
+        'Cursor Cloud Agent lane requires CURSOR_API_KEY or keys.cursor-cloud in ~/.modelhitch/config.json.',
+        { status: 401, providerId: CURSOR_CLOUD_PROVIDER_ID },
+      );
+    }
+    return key;
+  }
+
+  private async handleCloudAgentList() {
+    const apiKey = this.resolveCloudAgentApiKey();
+    return listCursorCloudAgents(apiKey, { fetchImpl: this.options.imageFetch });
+  }
+
+  private async handleCloudAgentGet(id: string) {
+    const apiKey = this.resolveCloudAgentApiKey();
+    return getCursorCloudAgent(apiKey, id, { fetchImpl: this.options.imageFetch });
+  }
+
+  private async handleCloudAgentCancel(id: string) {
+    const apiKey = this.resolveCloudAgentApiKey();
+    return cancelCursorCloudAgent(apiKey, id, { fetchImpl: this.options.imageFetch });
+  }
+
+  private sendCloudAgentManageError(res: ServerResponse, err: unknown): void {
+    if (res.headersSent) return;
+    const { status, body } = toOpenAIError(err);
+    this.log(`  !! HTTP ${status} ${body.error.code}: ${body.error.message}`);
+    this.sendJson(res, status, body);
+  }
 
   private assertCloudAgentModel(modelInput: string | undefined): void {
     const model = modelInput?.trim();

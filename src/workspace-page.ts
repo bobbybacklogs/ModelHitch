@@ -138,13 +138,13 @@ export function workspacePageHtml(): string {
       </div>
     </div>
     <div class="rail-head" style="border-top:1px solid var(--line)">Cloud agents</div>
-    <div class="rail-body"><div class="empty-state">None connected</div></div>
+    <div class="rail-body" id="cloud-agents-list"><div class="empty-state">Loading…</div></div>
   </aside>
 </div>
 
 <script>
 "use strict";
-var state = { sessions: [], workOrders: [], models: [], activeSessionId: null, defaultTarget: 'rotation' };
+var state = { sessions: [], workOrders: [], cloudAgents: [], models: [], activeSessionId: null, defaultTarget: 'rotation' };
 
 function el(id) { return document.getElementById(id); }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, function (c) { return { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]; }); }
@@ -223,6 +223,58 @@ function renderTranscript(session) {
   box.scrollTop = box.scrollHeight;
 }
 
+function renderCloudAgents() {
+  var box = el('cloud-agents-list');
+  if (!state.cloudAgents.length) {
+    box.innerHTML = '<div class="empty-state">No cloud agents</div>';
+    return;
+  }
+  box.innerHTML = '';
+  state.cloudAgents.forEach(function (agent) {
+    var div = document.createElement('div');
+    div.className = 'item';
+    div.style.cursor = 'default';
+    var status = (agent.status || 'unknown').toLowerCase();
+    var pillClass = status === 'cancelled' ? 'cancelled' : status === 'running' ? 'running' : status === 'finished' ? 'done' : '';
+    div.innerHTML = '<div class="title mono">' + esc(agent.id) + '</div>' +
+      '<div class="meta"><span class="status-pill ' + esc(pillClass) + '">' + esc(agent.status || 'unknown') + '</span></div>';
+    if (status !== 'cancelled' && status !== 'finished') {
+      var btn = document.createElement('button');
+      btn.className = 'btn';
+      btn.type = 'button';
+      btn.textContent = 'Cancel';
+      btn.style.marginTop = '6px';
+      btn.addEventListener('click', function () { cancelCloudAgent(agent.id); });
+      div.appendChild(btn);
+    }
+    box.appendChild(div);
+  });
+}
+
+async function loadCloudAgents() {
+  try {
+    var body = await api('/v1/cloud-agents');
+    state.cloudAgents = body.agents || [];
+    renderCloudAgents();
+  } catch (err) {
+    el('cloud-agents-list').innerHTML = '<div class="empty-state">' + esc(err.message) + '</div>';
+  }
+}
+
+async function cancelCloudAgent(id) {
+  showErrors([]);
+  try {
+    await api('/v1/cloud-agents/' + encodeURIComponent(id) + '/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}'
+    });
+    await loadCloudAgents();
+  } catch (err) {
+    showErrors(['Cancel failed: ' + err.message]);
+  }
+}
+
 function renderWorkOrders() {
   var box = el('work-orders-list');
   if (!state.workOrders.length) {
@@ -276,6 +328,7 @@ async function loadBoot() {
     fillTargetSelect(el('chat-target'), state.defaultTarget);
     fillTargetSelect(el('wo-target'), state.defaultTarget);
     await reloadLists();
+    await loadCloudAgents();
   } catch (err) {
     showErrors(['Failed to load workspace: ' + err.message]);
   }
