@@ -179,7 +179,7 @@ Chat and work flags:
   --rotation                                     use the bridge default provider/model (rotation target)
   --model <provider>/<model>                     pin a provider and model (split on the first slash)
   --prompt <text>                                user prompt text
-  --base-url <url>                               bridge base URL (default http://127.0.0.1:\${MODELHITCH_PORT:-3939})
+  --base-url <url>                               bridge base URL (default http://127.0.0.1:3939, or MODELHITCH_PORT)
 
 Bridge flags (with \`bridge\` and \`bridge --background\`):
   --config <file>                config file (default ~/.modelhitch/config.json)

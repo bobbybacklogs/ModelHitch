@@ -296,6 +296,12 @@ export async function handleWorkspaceHttp(
 ): Promise<boolean> {
   const { readBody, sendJson, log } = helpers;
 
+  if (method === 'GET' && path === '/v1/sessions') {
+    log(`${method} ${path} ->`);
+    sendJson(res, 200, { sessions: ctx.store.listSessions() });
+    return true;
+  }
+
   if (method === 'POST' && path === '/v1/sessions') {
     log(`${method} ${path} ->`);
     const body = await readBody(req);
@@ -315,6 +321,12 @@ export async function handleWorkspaceHttp(
     log(`${method} ${path} ->`);
     const body = await readBody(req);
     await handleAppendMessage(decodeURIComponent(messageMatch[1]!), body, ctx, sendJson, res);
+    return true;
+  }
+
+  if (method === 'GET' && path === '/v1/work-orders') {
+    log(`${method} ${path} ->`);
+    sendJson(res, 200, { workOrders: ctx.store.listWorkOrders() });
     return true;
   }
 

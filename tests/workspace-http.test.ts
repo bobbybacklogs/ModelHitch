@@ -100,6 +100,27 @@ describe('workspace HTTP sessions', () => {
     expect(missing.status).toBe(404);
   });
 
+  it('lists saved sessions', async () => {
+    const first = await fetch(`${base}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'First' }),
+    });
+    const second = await fetch(`${base}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Second' }),
+    });
+    const a = (await first.json()) as ChatSession;
+    const b = (await second.json()) as ChatSession;
+    const listed = await fetch(`${base}/v1/sessions`);
+    expect(listed.status).toBe(200);
+    const body = (await listed.json()) as { sessions: ChatSession[] };
+    const ids = body.sessions.map((session) => session.id);
+    expect(ids).toContain(a.id);
+    expect(ids).toContain(b.id);
+  });
+
   it('appends two messages in order via rotation target', async () => {
     const created = await fetch(`${base}/v1/sessions`, {
       method: 'POST',
@@ -203,6 +224,11 @@ describe('workspace HTTP work orders', () => {
     const stored = store.readWorkOrder(body.id);
     expect(stored?.status).toBe('done');
     expect(stored?.result).toBe(body.result);
+
+    const listed = await fetch(`${base}/v1/work-orders`);
+    expect(listed.status).toBe(200);
+    const listBody = (await listed.json()) as { workOrders: Array<{ id: string; status: string }> };
+    expect(listBody.workOrders.some((order) => order.id === body.id && order.status === 'done')).toBe(true);
   });
 
   it('cancels an in-flight work order', async () => {
