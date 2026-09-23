@@ -144,7 +144,7 @@ export function settingsPageHtml(): string {
     <span class="wordmark">model<b>hitch</b></span>
     <span class="local-badge">local · 127.0.0.1</span>
     <span class="spacer"></span>
-    <span class="linkbar"><a href="/workspace">workspace</a> · <a href="/usage" target="_blank">usage</a> · <a href="/healthz" target="_blank">health</a></span>
+    <span class="linkbar"><a href="/workspace">workspace</a> · <a href="/usage">usage</a> · <a href="/healthz" target="_blank">health</a></span>
   </div>
 </header>
 

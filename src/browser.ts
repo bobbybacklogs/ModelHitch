@@ -100,8 +100,8 @@ export type { UsageStorage } from './core/usage-storage.js';
 export type {
   UsageEvent,
   UsageSnapshot,
+  UsageSlice,
   UsageTotals,
-  UsageWindow,
 } from './core/usage.js';
 
 export {

@@ -2,12 +2,12 @@ import type { FailoverEvent } from './failover.js';
 import type { UsageStorage } from './usage-storage.js';
 
 /**
- * Usage tracking for dashboards and rate-limit accounting.
+ * Usage tracking for the local dashboard.
  *
  * The server records every completed inference request (via `onUsage`) and
- * every auto-mode failover into a `UsageTracker`. Snapshots aggregate totals,
- * per-provider/model/wire breakdowns, and rolling spend windows (5h / 7d / 30d)
- * for operational visibility.
+ * every auto-mode failover into a `UsageTracker`. Snapshots aggregate totals
+ * and per-provider/model/wire breakdowns for the retained history and for
+ * rolling periods (24h / 7d / 30d). These are observed counts, not quotas.
  */
 
 /** One completed inference request, as reported to the `onUsage` hook. */
@@ -41,11 +41,13 @@ export interface UsageTotals {
   latencyMs: number;
 }
 
-export interface UsageWindow extends UsageTotals {
-  /** Soft dollar budget for the window (operational guidance, not a hard billing cap). */
-  capUsd: number;
-  /** Fraction of the cap consumed (0..1+; >1 means the limit is passed). */
-  fraction: number;
+/** Totals plus the same breakdowns, scoped to one period. */
+export interface UsageSlice {
+  totals: UsageTotals;
+  perProvider: Record<string, UsageTotals>;
+  /** Keyed by `providerId/model`. */
+  perModel: Record<string, UsageTotals>;
+  perWire: Record<string, UsageTotals>;
 }
 
 export interface UsageSnapshot {
@@ -61,8 +63,11 @@ export interface UsageSnapshot {
   /** Most recent events, newest first. */
   recent: UsageEvent[];
   failovers: { total: number; recent: FailoverEvent[] };
-  /** Rolling spend windows (5h / 7d / 30d). */
-  windows: { '5h': UsageWindow; '7d': UsageWindow; '30d': UsageWindow };
+  /**
+   * Observed spend. `all` is retained history. The others are rolling
+   * periods ending now. There is no dollar cap.
+   */
+  periods: { all: UsageSlice; '24h': UsageSlice; '7d': UsageSlice; '30d': UsageSlice };
 }
 
 const MAX_EVENTS = 10_000;
@@ -139,9 +144,9 @@ export class UsageTracker {
     return { requests, inputTokens, outputTokens, totalTokens, costUsd, latencyMs };
   }
 
-  private group(key: (e: UsageEvent) => string): Record<string, UsageTotals> {
+  private group(events: readonly UsageEvent[], key: (e: UsageEvent) => string): Record<string, UsageTotals> {
     const groups = new Map<string, UsageEvent[]>();
-    for (const e of this.events) {
+    for (const e of events) {
       const k = key(e);
       const list = groups.get(k);
       if (list) list.push(e);
@@ -152,172 +157,367 @@ export class UsageTracker {
     return out;
   }
 
-  private window(hours: number, capUsd: number): UsageWindow {
+  private slice(events: readonly UsageEvent[]): UsageSlice {
+    return {
+      totals: this.totals(events),
+      perProvider: this.group(events, (e) => e.providerId),
+      perModel: this.group(events, (e) => `${e.providerId}/${e.model}`),
+      perWire: this.group(events, (e) => e.wire),
+    };
+  }
+
+  private sinceHours(hours: number): UsageEvent[] {
     const cutoff = Date.now() - hours * 3_600_000;
-    const totals = this.totals(this.events.filter((e) => Date.parse(e.at) >= cutoff));
-    return { ...totals, capUsd, fraction: capUsd > 0 ? totals.costUsd / capUsd : 0 };
+    return this.events.filter((e) => Date.parse(e.at) >= cutoff);
   }
 
   snapshot(): UsageSnapshot {
+    const all = this.slice(this.events);
     return {
       since: this.since.toISOString(),
       persisted: this.persisted,
-      totals: this.totals(),
-      perProvider: this.group((e) => e.providerId),
-      perModel: this.group((e) => `${e.providerId}/${e.model}`),
-      perWire: this.group((e) => e.wire),
+      totals: all.totals,
+      perProvider: all.perProvider,
+      perModel: all.perModel,
+      perWire: all.perWire,
       recent: this.events.slice(-50).reverse(),
       failovers: {
         total: this.failoverEvents.length,
         recent: this.failoverEvents.slice(-20).reverse(),
       },
-      windows: {
-        '5h': this.window(5, 12),
-        '7d': this.window(168, 30),
-        '30d': this.window(720, 60),
+      periods: {
+        all,
+        '24h': this.slice(this.sinceHours(24)),
+        '7d': this.slice(this.sinceHours(24 * 7)),
+        '30d': this.slice(this.sinceHours(24 * 30)),
       },
     };
   }
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-}
-
 /** Self-contained dashboard served by the bridge at `GET /usage`. */
 export function usageDashboardHtml(): string {
-  return `<!doctype html>
+  return String.raw`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>ModelHitch usage</title>
+<title>ModelHitch — usage</title>
 <style>
-  :root { color-scheme: dark; }
+  :root {
+    --bg: #0d0e0c; --panel: #141613; --panel2: #191c18; --raised: #1e221d;
+    --line: #2a2e28; --line2: #373c34; --text: #d8d6cf; --muted: #8d8e84;
+    --accent: #b7a06a; --accent-dim: #8a7a52; --ok: #8fbf6a; --warn: #d9a441; --bad: #c9704f;
+    --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; background: #0d1117; color: #e6edf3; padding: 24px; }
-  h1 { font-size: 18px; margin: 0 0 4px; }
-  .sub { color: #8b949e; margin-bottom: 20px; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; }
-  .card .k { color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
-  .card .v { font-size: 22px; font-weight: 700; margin-top: 4px; }
-  .wins { display: grid; gap: 10px; margin-bottom: 20px; }
-  .win { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; }
-  .win-label { margin-bottom: 6px; }
-  .bar { height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; }
-  .fill { height: 100%; background: #2f81f7; border-radius: 4px; }
-  .fill.over { background: #f85149; }
-  .over { color: #f85149; }
-  .win-sub { color: #8b949e; font-size: 12px; margin-top: 4px; }
-  table { width: 100%; border-collapse: collapse; margin-bottom: 20px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
-  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #21262d; }
-  th { color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
-  tr:last-child td { border-bottom: none; }
-  .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 24px 0 8px; }
-  .section-head h1 { margin: 0; }
-  .btn { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 6px 12px; font: inherit; font-size: 12px; cursor: pointer; }
-  .btn:hover { background: #30363d; }
-  .btn:disabled { opacity: .5; cursor: default; }
-  .fail { display: flex; align-items: baseline; gap: 10px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; flex-wrap: wrap; }
-  .fail.stale { opacity: .55; }
-  .fail-when { color: #8b949e; font-size: 12px; white-space: nowrap; min-width: 84px; }
-  .fail-lane { flex: 1; min-width: 200px; }
-  .pill { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid #30363d; white-space: nowrap; }
-  .pill.rate-limited { color: #d29922; border-color: #d29922; }
-  .pill.provider-error, .pill.network-error { color: #f85149; border-color: #f85149; }
-  .pill.other { color: #8b949e; }
-  .muted { color: #8b949e; }
-  #err { color: #f85149; margin-bottom: 12px; display: none; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 1.45; }
+  code, .mono { font-family: var(--mono); font-size: 0.92em; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  header { background: color-mix(in srgb, var(--bg) 92%, transparent); border-bottom: 1px solid var(--line); }
+  .bar { padding: 14px 20px; display: flex; align-items: baseline; gap: 12px; }
+  .wordmark { font-family: var(--mono); font-weight: 700; letter-spacing: 0.04em; font-size: 15px; color: var(--text); }
+  .wordmark b { color: var(--accent); }
+  .local-badge { font-size: 11px; color: var(--muted); border: 1px solid var(--line2); border-radius: 3px; padding: 2px 7px; font-family: var(--mono); }
+  .spacer { flex: 1; }
+  .linkbar { font-size: 12px; color: var(--muted); }
+
+  .rail { display: flex; height: calc(100vh - 52px); }
+  .rail-side { width: 260px; flex-shrink: 0; border-right: 1px solid var(--line); display: flex; flex-direction: column; background: var(--panel); }
+  .rail-side.right { width: 320px; border-right: 0; border-left: 1px solid var(--line); }
+  .rail-center { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
+  .rail-head { padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--accent); font-weight: 600; display: flex; align-items: baseline; gap: 8px; }
+  .rail-head .hint { color: var(--muted); letter-spacing: 0; text-transform: none; font-weight: 400; font-size: 12px; }
+  .rail-body { flex: 1; overflow-y: auto; padding: 8px; }
+  .rail-foot { padding: 8px; border-top: 1px solid var(--line); }
+
+  .item { display: block; width: 100%; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 8px 10px; margin-bottom: 4px; cursor: pointer; color: var(--text); font-family: var(--sans); font-size: 13px; }
+  .item:hover { background: var(--panel2); border-color: var(--line); }
+  .item.active { background: var(--raised); border-color: var(--accent-dim); }
+  .item .title { font-family: var(--mono); font-size: 12px; }
+  .item .meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .center-scroll { flex: 1; overflow-y: auto; padding: 16px 20px 28px; }
+  .lede { color: var(--muted); font-size: 12px; margin: 0 0 14px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 16px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+  .stat .k { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  .stat .v { font-family: var(--mono); font-size: 18px; margin-top: 4px; }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 12px 8px; margin-bottom: 14px; }
+  .panel h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--accent); margin: 10px 0 6px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line2); font-weight: 600; }
+  td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  td.mono { font-family: var(--mono); font-size: 12px; }
+  .share { height: 3px; background: var(--raised); border-radius: 2px; margin-top: 6px; }
+  .share > span { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+  .wires { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; border: 1px solid var(--line2); border-radius: 3px; padding: 2px 7px; background: var(--panel2); color: var(--text); }
+  .pill.warn { color: var(--warn); border-color: var(--warn); }
+  .pill.bad { color: var(--bad); border-color: var(--bad); }
+  .pill.muted { color: var(--muted); }
+
+  .event { padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .event:last-child { border-bottom: 0; }
+  .event .title { font-family: var(--mono); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .event .meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .event.stale { opacity: 0.55; }
+  .empty-state { color: var(--muted); font-style: italic; padding: 12px 10px; }
+
+  .btn {
+    background: transparent; color: var(--text); border: 1px solid var(--line2); border-radius: 4px;
+    padding: 8px 14px; font-size: 12px; cursor: pointer; font-family: var(--sans); width: 100%;
+  }
+  .btn:hover { border-color: var(--bad); color: var(--bad); }
+  .btn:disabled { opacity: 0.45; cursor: default; }
+
+  #errors { display: none; background: #2a1813; border: 1px solid var(--bad); color: #e8b7a4; border-radius: 6px; padding: 8px 12px; font-size: 13px; margin: 8px 16px; white-space: pre-line; }
+
+  @media (max-width: 960px) {
+    .rail { flex-direction: column; height: auto; }
+    .rail-side, .rail-side.right { width: auto; border-right: 0; border-left: 0; border-bottom: 1px solid var(--line); }
+    .rail-body { max-height: 280px; }
+  }
 </style>
 </head>
 <body>
-  <h1>ModelHitch usage</h1>
-  <div class="sub">live bridge telemetry · <span id="since">—</span> · auto-refreshes<span id="persist" style="display:none"> · persisted to SQLite</span></div>
-  <div id="err"></div>
-  <div id="app">loading…</div>
+<header>
+  <div class="bar">
+    <span class="wordmark">model<b>hitch</b></span>
+    <span class="local-badge">usage · local</span>
+    <span class="spacer"></span>
+    <span class="linkbar"><a href="/workspace">workspace</a> · <a href="/settings">settings</a></span>
+  </div>
+</header>
+<div id="errors"></div>
+<div class="rail">
+  <aside class="rail-side">
+    <div class="rail-head">Range</div>
+    <div class="rail-body" id="ranges"></div>
+  </aside>
+  <section class="rail-center">
+    <div class="center-scroll" id="detail"><div class="empty-state">Loading…</div></div>
+  </section>
+  <aside class="rail-side right">
+    <div class="rail-head">Recent <span class="hint" id="recent-count"></span></div>
+    <div class="rail-body" id="recent"><div class="empty-state">No requests yet</div></div>
+    <div class="rail-head">Failovers <span class="hint" id="fail-count"></span></div>
+    <div class="rail-body" id="fails"><div class="empty-state">No failovers yet</div></div>
+    <div class="rail-foot">
+      <button class="btn" id="clear-history" type="button">Clear history</button>
+    </div>
+  </aside>
+</div>
 <script>
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmt = (n) => '$' + Number(n).toFixed(2);
-const fmtI = (n) => Math.round(n).toLocaleString('en-US');
+"use strict";
+var RANGES = [
+  { id: "all", label: "All recorded", hours: 0 },
+  { id: "24h", label: "Last 24 hours", hours: 24 },
+  { id: "7d", label: "Last 7 days", hours: 24 * 7 },
+  { id: "30d", label: "Last 30 days", hours: 24 * 30 }
+];
+var range = "all";
+var snap = null;
+var lastPaint = "";
+
+function el(id) { return document.getElementById(id); }
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+function fmtMoney(n) { return "$" + Number(n || 0).toFixed(2); }
+function fmtI(n) { return Math.round(Number(n) || 0).toLocaleString("en-US"); }
+function fmtMs(ms) {
+  var n = Number(ms) || 0;
+  if (n < 1000) return Math.round(n) + " ms";
+  return (n / 1000).toFixed(1) + " s";
+}
 function timeAgo(iso) {
-  const ms = Date.now() - new Date(iso).getTime();
-  const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return 'just now';
-  const m = Math.round(s / 60);
-  if (m < 60) return m + 'm ago';
-  const h = Math.round(m / 60);
-  if (h < 24) return h + 'h ago';
-  const d = Math.round(h / 24);
-  if (d < 30) return d + 'd ago';
-  return Math.round(d / 30) + 'mo ago';
+  var ms = Date.now() - new Date(iso).getTime();
+  var s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return "just now";
+  var m = Math.round(s / 60);
+  if (m < 60) return m + "m ago";
+  var h = Math.round(m / 60);
+  if (h < 24) return h + "h ago";
+  var d = Math.round(h / 24);
+  if (d < 30) return d + "d ago";
+  return Math.round(d / 30) + "mo ago";
 }
-async function clearHistory() {
-  if (!confirm('Clear all usage stats and failover history? This cannot be undone.')) return;
-  const btn = document.getElementById('clear-history');
-  if (btn) btn.disabled = true;
-  try {
-    await fetch('/v1/usage/reset', { method: 'POST' });
-  } finally {
-    if (btn) btn.disabled = false;
-    tick();
+function inRange(iso) {
+  var spec = RANGES.filter(function (r) { return r.id === range; })[0];
+  if (!spec || !spec.hours) return true;
+  return Date.now() - new Date(iso).getTime() <= spec.hours * 3600000;
+}
+function avgMs(totals) {
+  if (!totals || !totals.requests) return 0;
+  return totals.latencyMs / totals.requests;
+}
+function rows(record, limit) {
+  return Object.entries(record || {}).sort(function (a, b) {
+    return (b[1].costUsd - a[1].costUsd) || (b[1].requests - a[1].requests);
+  }).slice(0, limit || 100);
+}
+function shareWidth(part, whole) {
+  if (!whole) return 0;
+  return Math.max(0, Math.min(100, (part / whole) * 100));
+}
+
+function renderRanges() {
+  var box = el("ranges");
+  box.innerHTML = "";
+  RANGES.forEach(function (spec) {
+    var slice = snap && snap.periods ? snap.periods[spec.id] : null;
+    var totals = slice ? slice.totals : { requests: 0, costUsd: 0 };
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "item" + (spec.id === range ? " active" : "");
+    btn.innerHTML = '<div class="title">' + esc(spec.label) + '</div>' +
+      '<div class="meta">' + fmtI(totals.requests) + " requests · " + fmtMoney(totals.costUsd) + "</div>";
+    btn.addEventListener("click", function () {
+      range = spec.id;
+      lastPaint = "";
+      render();
+    });
+    box.appendChild(btn);
+  });
+}
+
+function renderDetail() {
+  var slice = snap.periods[range];
+  var totals = slice.totals;
+  var spec = RANGES.filter(function (r) { return r.id === range; })[0];
+  var since = "since " + new Date(snap.since).toLocaleString();
+  var persist = snap.persisted ? " · saved in SQLite" : "";
+  var providerRows = rows(slice.perProvider);
+  var modelRows = rows(slice.perModel, 20);
+  var wireRows = rows(slice.perWire);
+  var denom = totals.costUsd > 0 ? totals.costUsd : totals.requests;
+  var useCost = totals.costUsd > 0;
+  var body = providerRows.length
+    ? providerRows.map(function (pair) {
+        var id = pair[0];
+        var v = pair[1];
+        var part = useCost ? v.costUsd : v.requests;
+        return "<tr><td class=\"mono\">" + esc(id) +
+          '<div class="share"><span style="width:' + shareWidth(part, denom) + '%"></span></div></td>' +
+          "<td>" + fmtI(v.requests) + "</td><td>" + fmtI(v.inputTokens) + " / " + fmtI(v.outputTokens) +
+          "</td><td>" + fmtMoney(v.costUsd) + "</td><td>" + fmtMs(avgMs(v)) + "</td></tr>";
+      }).join("")
+    : '<tr><td colspan="5" class="empty-state">No requests in this range</td></tr>';
+  var models = modelRows.length
+    ? modelRows.map(function (pair) {
+        var v = pair[1];
+        return "<tr><td class=\"mono\">" + esc(pair[0]) + "</td><td>" + fmtI(v.requests) +
+          "</td><td>" + fmtI(v.totalTokens) + "</td><td>" + fmtMoney(v.costUsd) +
+          "</td><td>" + fmtMs(avgMs(v)) + "</td></tr>";
+      }).join("")
+    : '<tr><td colspan="5" class="empty-state">No requests in this range</td></tr>';
+  var wires = wireRows.length
+    ? wireRows.map(function (pair) {
+        return '<span class="pill">' + esc(pair[0]) + " · " + fmtI(pair[1].requests) + "</span>";
+      }).join("")
+    : "";
+  el("detail").innerHTML =
+    '<p class="lede">' + esc(spec.label) + " · " + esc(since) + esc(persist) +
+    ". Estimated from list prices. Models without a price count as $0. No quota.</p>" +
+    '<div class="stats">' +
+      '<div class="stat"><div class="k">Requests</div><div class="v">' + fmtI(totals.requests) + "</div></div>" +
+      '<div class="stat"><div class="k">Tokens in</div><div class="v">' + fmtI(totals.inputTokens) + "</div></div>" +
+      '<div class="stat"><div class="k">Tokens out</div><div class="v">' + fmtI(totals.outputTokens) + "</div></div>" +
+      '<div class="stat"><div class="k">Est. cost</div><div class="v">' + fmtMoney(totals.costUsd) + "</div></div>" +
+      '<div class="stat"><div class="k">Avg latency</div><div class="v">' + fmtMs(avgMs(totals)) + "</div></div>" +
+    "</div>" +
+    (wires ? '<div class="wires">' + wires + "</div>" : "") +
+    '<div class="panel"><h2>Providers</h2><table><thead><tr><th>Provider</th><th>Requests</th><th>Tokens in / out</th><th>Est. cost</th><th>Avg</th></tr></thead><tbody>' +
+      body + "</tbody></table></div>" +
+    '<div class="panel"><h2>Models</h2><table><thead><tr><th>Model</th><th>Requests</th><th>Tokens</th><th>Est. cost</th><th>Avg</th></tr></thead><tbody>' +
+      models + "</tbody></table></div>";
+}
+
+function renderRecent() {
+  var list = (snap.recent || []).filter(function (e) { return inRange(e.at); });
+  el("recent-count").textContent = list.length ? String(list.length) : "";
+  var box = el("recent");
+  if (!list.length) {
+    box.innerHTML = '<div class="empty-state">No requests in this range</div>';
+    return;
   }
+  box.innerHTML = list.map(function (e) {
+    return '<div class="event"><div class="title">' + esc(e.providerId) + "/" + esc(e.model) + "</div>" +
+      '<div class="meta">' + esc(timeAgo(e.at)) + " · " + esc(e.wire) + (e.streamed ? " · stream" : "") +
+      " · " + fmtI(e.totalTokens) + " tok · " + fmtMoney(e.costUsd) + " · " + fmtMs(e.latencyMs) + "</div></div>";
+  }).join("");
 }
+
+function renderFails() {
+  var STALE_MS = 60 * 60 * 1000;
+  var list = (snap.failovers.recent || []).filter(function (f) { return inRange(f.at); });
+  el("fail-count").textContent = snap.failovers.total ? String(snap.failovers.total) + " total" : "";
+  var box = el("fails");
+  if (!list.length) {
+    box.innerHTML = '<div class="empty-state">No failovers in this range</div>';
+    return;
+  }
+  box.innerHTML = list.map(function (f) {
+    var code = (f.error && f.error.code) || "other";
+    var pill = code === "rate-limited" ? "warn" : (code === "provider-error" || code === "network-error" ? "bad" : "muted");
+    var stale = Date.now() - new Date(f.at).getTime() > STALE_MS;
+    var status = f.error && f.error.status ? " " + f.error.status : "";
+    return '<div class="event' + (stale ? " stale" : "") + '"><div class="title">' +
+      esc(f.from.providerId) + "/" + esc(f.from.model) + " → " + esc(f.to.providerId) + "/" + esc(f.to.model) +
+      '</div><div class="meta">' + esc(timeAgo(f.at)) + ' <span class="pill ' + pill + '">' + esc(code) + esc(status) + "</span></div></div>";
+  }).join("");
+}
+
+function render() {
+  if (!snap) return;
+  var key = range + JSON.stringify(snap);
+  if (key === lastPaint) return;
+  lastPaint = key;
+  renderRanges();
+  renderDetail();
+  renderRecent();
+  renderFails();
+}
+
 async function tick() {
   try {
-    const t = await (await fetch('/v1/usage')).json();
-    document.getElementById('err').style.display = 'none';
-    document.getElementById('since').textContent = 'since ' + new Date(t.since).toLocaleString();
-    document.getElementById('persist').style.display = t.persisted ? '' : 'none';
-    const winLabels = {'5h':'5 hours ($12 cap)','7d':'7 days ($30 cap)','30d':'30 days ($60 cap)'};
-    const wins = Object.keys(winLabels).map((k) => {
-      const w = t.windows[k];
-      const over = w.fraction > 1;
-      return '<div class="win"><div class="win-label">' + winLabels[k] + ' <b>' + fmt(w.costUsd) + '</b> of ' + fmt(w.capUsd) +
-        ' <span class="' + (over ? 'over' : '') + '">' + Math.min(Math.round(w.fraction*100),999) + '%</span></div>' +
-        '<div class="bar"><div class="fill ' + (over ? 'over' : '') + '" style="width:' + Math.min(w.fraction*100,100) + '%"></div></div>' +
-        '<div class="win-sub">' + fmtI(w.requests) + ' req · ' + fmtI(w.totalTokens) + ' tok</div></div>';
-    }).join('');
-    const prow = Object.entries(t.perProvider).sort((a,b) => b[1].costUsd - a[1].costUsd)
-      .map(([id,v]) => '<tr><td>' + esc(id) + '</td><td>' + fmtI(v.requests) + '</td><td>' + fmtI(v.inputTokens) + '/' + fmtI(v.outputTokens) + '</td><td>' + fmt(v.costUsd) + '</td></tr>').join('') ||
-      '<tr><td colspan="4" class="muted">no requests yet</td></tr>';
-    const mrow = Object.entries(t.perModel).sort((a,b) => b[1].costUsd - a[1].costUsd).slice(0,15)
-      .map(([id,v]) => '<tr><td>' + esc(id) + '</td><td>' + fmtI(v.requests) + '</td><td>' + fmtI(v.totalTokens) + '</td><td>' + fmt(v.costUsd) + '</td></tr>').join('') ||
-      '<tr><td colspan="4" class="muted">no requests yet</td></tr>';
-    const STALE_MS = 60 * 60 * 1000; // failovers older than an hour fade out — they're history, not live routing
-    const fails = t.failovers.recent.length === 0
-      ? '<div class="muted">no failovers yet — routing is standing by</div>'
-      : t.failovers.recent.map((f) => {
-          const code = f.error.code || 'other';
-          const pillClass = ['rate-limited', 'provider-error', 'network-error'].includes(code) ? code : 'other';
-          const stale = Date.now() - new Date(f.at).getTime() > STALE_MS;
-          return '<div class="fail' + (stale ? ' stale' : '') + '">' +
-            '<span class="fail-when" title="' + esc(new Date(f.at).toLocaleString()) + '">' + esc(timeAgo(f.at)) + '</span>' +
-            '<span class="fail-lane">' + esc(f.from.providerId) + '/' + esc(f.from.model) + ' → <b>' + esc(f.to.providerId) + '/' + esc(f.to.model) + '</b></span>' +
-            '<span class="pill ' + pillClass + '">' + esc(code) + (f.error.status ? ' ' + f.error.status : '') + '</span>' +
-            '</div>';
-        }).join('');
-    document.getElementById('app').innerHTML =
-      '<div class="cards">' +
-        '<div class="card"><div class="k">Requests</div><div class="v">' + fmtI(t.totals.requests) + '</div></div>' +
-        '<div class="card"><div class="k">Tokens (in/out)</div><div class="v">' + fmtI(t.totals.inputTokens) + ' / ' + fmtI(t.totals.outputTokens) + '</div></div>' +
-        '<div class="card"><div class="k">Est. cost</div><div class="v">' + fmt(t.totals.costUsd) + '</div></div>' +
-        '<div class="card"><div class="k">Failovers</div><div class="v">' + t.failovers.total + '</div></div>' +
-      '</div>' +
-      '<div class="wins">' + wins + '</div>' +
-      '<table><thead><tr><th>Provider</th><th>Requests</th><th>Tokens (in/out)</th><th>Cost</th></tr></thead><tbody>' + prow + '</tbody></table>' +
-      '<table><thead><tr><th>Model</th><th>Requests</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>' + mrow + '</tbody></table>' +
-      '<div class="section-head"><h1>Recent failovers</h1><button class="btn" id="clear-history" onclick="clearHistory()">Clear history</button></div>' +
-      '<div class="sub" style="margin:-4px 0 8px">newest first · faded rows are over an hour old</div>' +
-      fails;
+    var res = await fetch("/v1/usage");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    snap = await res.json();
+    el("errors").style.display = "none";
+    render();
   } catch (e) {
-    document.getElementById('err').style.display = 'block';
-    document.getElementById('err').textContent = 'bridge unreachable: ' + e;
+    var box = el("errors");
+    box.style.display = "block";
+    box.textContent = "Bridge unreachable: " + e;
   }
 }
+
+el("clear-history").addEventListener("click", async function () {
+  if (!confirm("Clear all usage stats and failover history? This cannot be undone.")) return;
+  var btn = el("clear-history");
+  btn.disabled = true;
+  try {
+    await fetch("/v1/usage/reset", { method: "POST" });
+    lastPaint = "";
+  } finally {
+    btn.disabled = false;
+    tick();
+  }
+});
+
 tick();
 setInterval(tick, 2000);
 </script>
 </body>
 </html>`;
 }
+

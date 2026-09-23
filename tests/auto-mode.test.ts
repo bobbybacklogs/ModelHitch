@@ -159,8 +159,8 @@ describe('bridge usage endpoints', () => {
     expect(s.totals.requests).toBeGreaterThan(0);
     expect(s.perProvider['lane-a']).toBeDefined();
     expect(s.failovers.total).toBeGreaterThan(0);
-    expect(s.windows['5h'].capUsd).toBe(12);
-    expect(typeof s.windows['5h'].fraction).toBe('number');
+    expect(s.periods['24h'].totals.requests).toBeGreaterThan(0);
+    expect(s.periods).not.toHaveProperty('5h');
   });
 
   it('GET /usage serves the HTML dashboard', async () => {

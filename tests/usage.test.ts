@@ -46,15 +46,18 @@ describe('UsageTracker', () => {
     expect(s.perWire['responses']!.requests).toBe(1);
   });
 
-  it('exposes rolling windows with cap and fraction', () => {
+  it('splits observed periods without a dollar cap', () => {
     const t = new UsageTracker();
-    t.record(event({ costUsd: 6 }));
+    t.record(event({ costUsd: 6, providerId: 'openai', model: 'gpt-5.4' }));
+    t.record(event({ costUsd: 4, at: new Date(Date.now() - 3 * 24 * 3600_000).toISOString(), providerId: 'mock' }));
     const s = t.snapshot();
-    expect(s.windows['5h']!.capUsd).toBe(12);
-    expect(s.windows['5h']!.fraction).toBeCloseTo(0.5);
-    expect(s.windows['7d']!.capUsd).toBe(30);
-    expect(s.windows['30d']!.capUsd).toBe(60);
-    expect(s.windows['30d']!.fraction).toBeCloseTo(0.1);
+    expect(s.periods['24h']!.totals.costUsd).toBeCloseTo(6);
+    expect(s.periods['24h']!.perProvider['openai']!.requests).toBe(1);
+    expect(s.periods['24h']!.perProvider['mock']).toBeUndefined();
+    expect(s.periods['7d']!.totals.costUsd).toBeCloseTo(10);
+    expect(s.periods['30d']!.totals.requests).toBe(2);
+    expect(s.periods.all.totals.costUsd).toBeCloseTo(10);
+    expect(s.periods['24h']).not.toHaveProperty('capUsd');
   });
 
   it('tracks failover events and resets everything', () => {
@@ -104,7 +107,12 @@ describe('usageDashboardHtml', () => {
     const html = usageDashboardHtml();
     expect(html).toContain('<!doctype html>');
     expect(html).toContain('/v1/usage');
-    expect(html).toContain('ModelHitch usage');
+    expect(html).toContain('ModelHitch — usage');
+    expect(html).toContain('class="rail"');
+    expect(html).toContain('Last 24 hours');
+    expect(html).toContain('href="/workspace"');
+    expect(html).not.toContain('$12');
+    expect(html).not.toContain('5 hours');
     expect(html).toContain('setInterval');
   });
 });

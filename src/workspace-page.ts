@@ -89,7 +89,7 @@ export function workspacePageHtml(): string {
     <span class="wordmark">model<b>hitch</b></span>
     <span class="local-badge">workspace · local</span>
     <span class="spacer"></span>
-    <span class="linkbar"><a href="/settings">settings</a> · <a href="/usage" target="_blank">usage</a></span>
+    <span class="linkbar"><a href="/settings">settings</a> · <a href="/usage">usage</a></span>
   </div>
 </header>
 

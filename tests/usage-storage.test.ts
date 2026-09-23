@@ -72,7 +72,7 @@ describe('SqliteUsageStorage', () => {
     t2.close();
   });
 
-  it('restores recent events newest-first and keeps rolling windows', () => {
+  it('restores recent events newest-first and keeps rolling periods', () => {
     const file = tempFile();
     const t1 = new UsageTracker(new SqliteUsageStorage(file));
     // 29d ago (inside the 30d window), 8d ago (inside 30d only), now.
@@ -86,9 +86,9 @@ describe('SqliteUsageStorage', () => {
     const t2 = new UsageTracker(new SqliteUsageStorage(file));
     const s = t2.snapshot();
     expect(s.recent.map((e) => e.costUsd)).toEqual([5, 10, 40]);
-    expect(s.windows['30d']!.costUsd).toBeCloseTo(55);
-    expect(s.windows['7d']!.costUsd).toBeCloseTo(5);
-    expect(s.windows['5h']!.costUsd).toBeCloseTo(5);
+    expect(s.periods['30d']!.totals.costUsd).toBeCloseTo(55);
+    expect(s.periods['7d']!.totals.costUsd).toBeCloseTo(5);
+    expect(s.periods['24h']!.totals.costUsd).toBeCloseTo(5);
     t2.close();
   });
 
