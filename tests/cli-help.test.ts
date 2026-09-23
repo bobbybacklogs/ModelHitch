@@ -36,6 +36,8 @@ describe('CLI help output', () => {
       'MODELHITCH_HOME',
       'MODELHITCH_DEBUG',
       'cursor-cloud/<model>',
+      'modelhitch chat',
+      'modelhitch work',
     ]) {
       expect(stdout).toContain(token);
     }

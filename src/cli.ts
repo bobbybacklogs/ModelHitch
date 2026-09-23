@@ -172,6 +172,15 @@ Usage:
 
   modelhitch setup <agent>                       install agent skills (codex, claude, cursor, vscode, or all)
 
+  modelhitch chat                                send a prompt through a bridge chat session
+  modelhitch work                                run a one-shot work order on the bridge
+
+Chat and work flags:
+  --rotation                                     use the bridge default provider/model (rotation target)
+  --model <provider>/<model>                     pin a provider and model (split on the first slash)
+  --prompt <text>                                user prompt text
+  --base-url <url>                               bridge base URL (default http://127.0.0.1:3939, or MODELHITCH_PORT)
+
 Bridge flags (with \`bridge\` and \`bridge --background\`):
   --config <file>                config file (default ~/.modelhitch/config.json)
   --image-lane                   enable image generation lane (alias: --image-generation)
@@ -601,6 +610,83 @@ function openBrowser(url: string): void {
   child.unref();
 }
 
+function defaultBridgeBaseUrl(): string {
+  const port = process.env.MODELHITCH_PORT ?? '3939';
+  return `http://127.0.0.1:${port}`;
+}
+
+function parseChatWorkTarget(args: string[]): { target: { kind: 'rotation' } | { kind: 'model'; providerId: string; modelId: string } } {
+  const rotation = args.includes('--rotation');
+  const modelFlag = argValue(args, '--model');
+  if (rotation && modelFlag) {
+    throw new Error('Use either --rotation or --model, not both.');
+  }
+  if (modelFlag) {
+    const slash = modelFlag.indexOf('/');
+    if (slash <= 0 || slash === modelFlag.length - 1) {
+      throw new Error('--model must be <provider>/<model> (split on the first slash).');
+    }
+    return {
+      target: {
+        kind: 'model',
+        providerId: modelFlag.slice(0, slash),
+        modelId: modelFlag.slice(slash + 1),
+      },
+    };
+  }
+  return { target: { kind: 'rotation' } };
+}
+
+async function runChatCommand(args: string[]): Promise<void> {
+  const prompt = argValue(args, '--prompt');
+  if (!prompt?.trim()) throw new Error('--prompt is required.');
+  const baseUrl = (argValue(args, '--base-url') ?? defaultBridgeBaseUrl()).replace(/\/+$/, '');
+  const { target } = parseChatWorkTarget(args);
+
+  const sessionRes = await fetch(`${baseUrl}/v1/sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target }),
+  });
+  if (!sessionRes.ok) {
+    throw new Error(`Failed to create session: HTTP ${sessionRes.status} ${await sessionRes.text()}`);
+  }
+  const session = (await sessionRes.json()) as { id: string };
+
+  const messageRes = await fetch(`${baseUrl}/v1/sessions/${encodeURIComponent(session.id)}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt }),
+  });
+  if (!messageRes.ok) {
+    throw new Error(`Failed to send message: HTTP ${messageRes.status} ${await messageRes.text()}`);
+  }
+  const updated = (await messageRes.json()) as {
+    messages: Array<{ role: string; content?: string }>;
+  };
+  const assistant = [...updated.messages].reverse().find((m) => m.role === 'assistant');
+  const text = typeof assistant?.content === 'string' ? assistant.content : '';
+  console.log(text);
+}
+
+async function runWorkCommand(args: string[]): Promise<void> {
+  const prompt = argValue(args, '--prompt');
+  if (!prompt?.trim()) throw new Error('--prompt is required.');
+  const baseUrl = (argValue(args, '--base-url') ?? defaultBridgeBaseUrl()).replace(/\/+$/, '');
+  const { target } = parseChatWorkTarget(args);
+
+  const res = await fetch(`${baseUrl}/v1/work-orders`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, target }),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to create work order: HTTP ${res.status} ${await res.text()}`);
+  }
+  const body = (await res.json()) as { id: string; status: string };
+  console.log(`${body.id}\t${body.status}`);
+}
+
 async function runWebSettings(): Promise<void> {
   const port = Number(process.env.MODELHITCH_PORT ?? 3939);
   const host = process.env.MODELHITCH_HOST ?? '127.0.0.1';
@@ -673,6 +759,12 @@ async function main(): Promise<void> {
     case 'settings':
       if (args.includes('--web')) await runWebSettings();
       else runSettings(args.slice(1));
+      break;
+    case 'chat':
+      await runChatCommand(args.slice(1));
+      break;
+    case 'work':
+      await runWorkCommand(args.slice(1));
       break;
     default:
       console.log(`Unknown command: ${cmd}\n`);

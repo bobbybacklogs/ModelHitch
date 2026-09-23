@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { join } from 'node:path';
 import { ModelHitchError } from '../core/errors.js';
 import { estimateCost } from '../core/cost.js';
 import type { KeyStore } from '../core/keystore.js';
@@ -68,6 +69,9 @@ import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './t
 import type { CloudAgentConfig, ImageGenerationConfig } from '../config.js';
 import { CURSOR_CLOUD_PROVIDER_ID } from '../providers/cursor-cloud.js';
 import { safeJsonParse } from '../core/json.js';
+import { modelhitchHome } from '../config-file.js';
+import { WorkspaceStore } from '../workspace/store.js';
+import { handleWorkspaceHttp } from './workspace-http.js';
 
 export interface ModelHitchServerOptions {
   /** Providers to serve. Defaults to the built-in set. */
@@ -148,6 +152,8 @@ export interface ModelHitchServerOptions {
    * >= 22.5 (`node:sqlite`). Ignored when `usageTracker` is provided.
    */
   usagePersistence?: boolean | string;
+  /** Persist chat sessions and work orders. Defaults to `<modelhitchHome>/workspace`. */
+  workspaceStore?: WorkspaceStore;
 }
 
 /** One completed inference request, as reported to the `onUsage` hook. */
@@ -226,9 +232,12 @@ export class OpenAICompatibleServer {
   private cooldown: LaneCooldown | undefined;
   private source: ProviderSource;
   private catalogSource: CatalogSource | undefined;
+  private workspaceStore: WorkspaceStore;
 
   constructor(options: ModelHitchServerOptions = {}) {
     this.options = options;
+    this.workspaceStore =
+      options.workspaceStore ?? new WorkspaceStore(join(modelhitchHome(), 'workspace'));
     this.providers = options.providers ?? defaultProviders;
     this.imageGeneration = options.imageGeneration;
     this.cloudAgent = options.cloudAgent;
@@ -557,6 +566,25 @@ export class OpenAICompatibleServer {
     if (method === 'HEAD' && path === '/api/hello') {
       res.writeHead(200);
       res.end();
+      return;
+    }
+
+    if (
+      await handleWorkspaceHttp(method, path, req, res, {
+        store: this.workspaceStore,
+        providers: this.providers,
+        defaultProviderId: this.options.defaultProviderId,
+        defaultModel: this.options.defaultModel,
+        autoMode: this.options.autoMode,
+        policy: this.options.policy,
+        keystore: this.options.keystore,
+        apiKeys: this.options.apiKeys,
+      }, {
+        readBody: (r) => this.readBody(r),
+        sendJson: (r, status, data) => this.sendJson(r, status, data),
+        log: (line) => this.log(line),
+      })
+    ) {
       return;
     }
 
