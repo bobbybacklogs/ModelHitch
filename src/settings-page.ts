@@ -385,13 +385,21 @@ function usageBadges(id) {
   return bits;
 }
 
+function workspaceTargetValue(model) {
+  var id = model && model.id ? String(model.id) : '';
+  if (!id) return '';
+  if (id.indexOf('/') > 0) return id;
+  return model.owned_by ? model.owned_by + '/' + id : id;
+}
+
 function renderWorkspaceTarget() {
   var cfg = state.config || {};
   var selected = cfg.defaultWorkspaceTarget || 'rotation';
   var sel = el('workspaceTarget');
   var opts = ['<option value="rotation">rotation</option>'];
   (state.models || []).forEach(function (m) {
-    opts.push('<option value="' + esc(m.id) + '"' + (m.id === selected ? ' selected' : '') + '>' + esc(m.id) + '</option>');
+    var val = workspaceTargetValue(m);
+    opts.push('<option value="' + esc(val) + '"' + (val === selected ? ' selected' : '') + '>' + esc(val) + '</option>');
   });
   sel.innerHTML = opts.join('');
   if (selected && selected !== 'rotation') sel.value = selected;

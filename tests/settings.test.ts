@@ -192,6 +192,8 @@ describe('settings bridge endpoints', () => {
     const html = await res.text();
     expect(html).toContain('model');
     expect(html).toContain('Lane health');
+    expect(html).toContain('workspaceTargetValue');
+    expect(html).toContain('owned_by');
   });
 
   it("serves an inline script that actually parses (template escape-rot guard)", () => {
