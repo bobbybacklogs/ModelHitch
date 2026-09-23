@@ -33,6 +33,7 @@ import { MemoryLaneCooldown } from '../core/cooldown.js';
 import { inferRequirements, filterEligibleLanes, CapabilityUnavailableError, type CapabilityRequirements } from '../core/capabilities.js';
 import type { CatalogSource } from '../catalog/source.js';
 import { settingsPageHtml } from '../settings-page.js';
+import { workspacePageHtml } from '../workspace-page.js';
 import { UsageTracker, usageDashboardHtml, type UsageEvent } from '../core/usage.js';
 import { SqliteUsageStorage } from '../core/usage-storage.js';
 import { mapFinishReasonOpenAI, mapRequest, routeModel, toChatCompletion, toOpenAIError, toUsageOutput } from './mapping.js';
@@ -467,6 +468,14 @@ export class OpenAICompatibleServer {
       this.cors(res);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(settingsPageHtml());
+      return;
+    }
+
+    if (method === 'GET' && path === '/workspace') {
+      this.log(`${method} ${path} ->`);
+      this.cors(res);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(workspacePageHtml());
       return;
     }
 

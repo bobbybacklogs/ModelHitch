@@ -144,13 +144,27 @@ export function settingsPageHtml(): string {
     <span class="wordmark">model<b>hitch</b></span>
     <span class="local-badge">local · 127.0.0.1</span>
     <span class="spacer"></span>
-    <span class="linkbar"><a href="/usage" target="_blank">usage</a> · <a href="/healthz" target="_blank">health</a></span>
+    <span class="linkbar"><a href="/workspace">workspace</a> · <a href="/usage" target="_blank">usage</a> · <a href="/healthz" target="_blank">health</a></span>
   </div>
 </header>
 
 <main>
   <div id="errors"></div>
   <div id="saved">Applied.</div>
+
+  <section>
+    <div class="section-head"><h2>Workspace</h2><span class="hint">default composer target on /workspace — rotation or a pinned provider/model id</span></div>
+    <div class="panel">
+      <div class="row" style="border-bottom:0">
+        <div class="grow">
+          <label>default target</label>
+          <select id="workspaceTarget">
+            <option value="rotation">rotation</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <section>
     <div class="section-head"><h2>Providers</h2><span class="hint">paste an API key to enable a provider — stored locally in ~/.modelhitch/config.json, masked everywhere else</span></div>
@@ -363,6 +377,18 @@ function usageBadges(id) {
   if (pol.fallback.some(function (l) { return l.providerId === id; })) bits.push('fallback');
   if ((cfg.defaultProviderId || '') === id) bits.push('default');
   return bits;
+}
+
+function renderWorkspaceTarget() {
+  var cfg = state.config || {};
+  var selected = cfg.defaultWorkspaceTarget || 'rotation';
+  var sel = el('workspaceTarget');
+  var opts = ['<option value="rotation">rotation</option>'];
+  (state.models || []).forEach(function (m) {
+    opts.push('<option value="' + esc(m.id) + '"' + (m.id === selected ? ' selected' : '') + '>' + esc(m.id) + '</option>');
+  });
+  sel.innerHTML = opts.join('');
+  if (selected && selected !== 'rotation') sel.value = selected;
 }
 
 function renderProviders() {
@@ -686,6 +712,7 @@ function assemble() {
     version: 1,
     defaultProviderId: el('defaultProviderId').value.trim() || undefined,
     defaultModel: el('defaultModel').value.trim() || undefined,
+    defaultWorkspaceTarget: el('workspaceTarget').value || 'rotation',
     policy: collectPolicy(),
     catalog: catalogChoice ? { providers: catalogChoice, baseUrls: (cfg.catalog && cfg.catalog.baseUrls) || undefined, ttlMs: (cfg.catalog && cfg.catalog.ttlMs) || undefined } : undefined,
     cooldown: collectReliability(),
@@ -703,7 +730,7 @@ async function loadAll() {
     state.builtin = cat.builtin || [];
     var models = await api('/v1/models');
     state.models = models.data || [];
-    renderImageGeneration(); renderCloudAgent(); renderProviders(); renderCatalog(); renderPolicy(); renderReliability();
+    renderImageGeneration(); renderCloudAgent(); renderWorkspaceTarget(); renderProviders(); renderCatalog(); renderPolicy(); renderReliability();
     refreshHealth();
   } catch (err) {
     showErrors(['Failed to load settings: ' + err.message]);

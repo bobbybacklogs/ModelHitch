@@ -93,6 +93,8 @@ export interface ModelHitchConfig {
   cloudAgent?: CloudAgentConfig;
   /** Per-provider API keys. Persisted locally; masked on read. */
   keys?: Record<string, string>;
+  /** Default composer target on /workspace: "rotation" or "provider/model". */
+  defaultWorkspaceTarget?: string;
 }
 
 export interface ConfigValidation {
@@ -293,6 +295,17 @@ export function validateConfig(config: unknown): ConfigValidation {
 
   if (cfg.keys !== undefined && (!cfg.keys || typeof cfg.keys !== 'object')) {
     errors.push('keys must be an object of providerId -> API key.');
+  }
+
+  if (cfg.defaultWorkspaceTarget !== undefined) {
+    if (typeof cfg.defaultWorkspaceTarget !== 'string' || !cfg.defaultWorkspaceTarget.trim()) {
+      errors.push('defaultWorkspaceTarget must be a non-empty string.');
+    } else if (cfg.defaultWorkspaceTarget !== 'rotation') {
+      const slash = cfg.defaultWorkspaceTarget.indexOf('/');
+      if (slash <= 0 || slash === cfg.defaultWorkspaceTarget.length - 1) {
+        errors.push('defaultWorkspaceTarget must be "rotation" or "provider/model".');
+      }
+    }
   }
 
   return { errors, warnings };
