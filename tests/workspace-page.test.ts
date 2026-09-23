@@ -30,6 +30,8 @@ describe('GET /workspace', () => {
     const html = await res.text();
     expect(html).toContain('value="rotation"');
     expect(html).toContain('Work order');
+    expect(html).toContain('esc(wo.id)');
+    expect(html).toContain('owned_by');
   });
 });
 

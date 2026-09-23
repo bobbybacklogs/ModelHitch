@@ -174,10 +174,17 @@ function parseTargetValue(value) {
   return { kind: 'model', providerId: value.slice(0, slash), modelId: value.slice(slash + 1) };
 }
 
+function targetOptionValue(model) {
+  var id = model && model.id ? String(model.id) : '';
+  if (!id) return '';
+  if (id.indexOf('/') > 0) return id;
+  return model.owned_by ? model.owned_by + '/' + id : id;
+}
+
 function fillTargetSelect(sel, selected) {
   var opts = ['<option value="rotation">rotation</option>'];
   (state.models || []).forEach(function (m) {
-    var val = m.id;
+    var val = targetOptionValue(m);
     opts.push('<option value="' + esc(val) + '"' + (val === selected ? ' selected' : '') + '>' + esc(val) + '</option>');
   });
   sel.innerHTML = opts.join('');
@@ -287,8 +294,9 @@ function renderWorkOrders() {
     div.className = 'item';
     div.style.cursor = 'default';
     var preview = (wo.prompt || '').slice(0, 60);
-    div.innerHTML = '<div class="title">' + esc(preview) + (wo.prompt && wo.prompt.length > 60 ? '…' : '') + '</div>' +
-      '<div class="meta"><span class="status-pill ' + esc(wo.status) + '">' + esc(wo.status) + '</span> ' + esc(targetLabel(wo.target)) + '</div>';
+    div.innerHTML = '<div class="title mono">' + esc(wo.id) + '</div>' +
+      '<div class="meta"><span class="status-pill ' + esc(wo.status) + '">' + esc(wo.status) + '</span> ' +
+      esc(preview) + (wo.prompt && wo.prompt.length > 60 ? '…' : '') + '</div>';
     box.appendChild(div);
   });
 }
