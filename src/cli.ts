@@ -1,24 +1,6 @@
 #!/usr/bin/env node
 /**
- * ModelHitch CLI.
- *
- *   modelhitch            print the logo, version, and command help
- *   modelhitch bridge     start the local OpenAI-compatible bridge server
- *   modelhitch bridge --background  start it as a background process (pid in ~/.modelhitch)
- *   modelhitch status     is a background bridge running?
- *   modelhitch front      stop the background one and run the bridge in this terminal
- *   modelhitch stop       stop the background bridge
- *   modelhitch settings   edit local settings in an OpenTUI terminal interface
- *   modelhitch settings --web  open the bridge settings UI in a browser
- *   modelhitch setup codex  install the ModelHitch skill for Codex
- *   modelhitch --version  print the version
- *   modelhitch --help     print help
- *
- * Environment:
- *   MODELHITCH_PORT       bridge port (default 3939)
- *   MODELHITCH_HOST       bridge host (default 127.0.0.1)
- *   MODELHITCH_MAX_BODY_BYTES  max request body for the bridge (default 64 MiB)
- *   MODELHITCH_HOME       directory for the background pid/log (default ~/.modelhitch)
+ * ModelHitch CLI — see `usage()` for the authoritative command and flag list.
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -170,45 +152,57 @@ function usage(): void {
   hitched at https://github.com/genoventures-labs/ModelHitch
 
 Usage:
-  modelhitch                                     print the logo, version, and this help
-  modelhitch bridge                              start the local OpenAI-compatible bridge server
-  modelhitch bridge --background                  start it in the background (terminal stays free)
-  modelhitch bridge --image-lane                  enable the dedicated image generation lane
-  modelhitch bridge --no-image-lane               disable the image generation lane
-  modelhitch bridge --image-provider openai       set the image lane provider (openai|gemini)
-  modelhitch bridge --image-model gpt-image-2     set the default image model
-  modelhitch bridge --cloud-agent-lane            enable the Cursor Cloud Agent lane
-  modelhitch bridge --no-cloud-agent-lane         disable the Cursor Cloud Agent lane
-  modelhitch bridge --cloud-agent-repo <url>      set cloudAgent.repos[0].url
-  modelhitch bridge --cloud-agent-ref <ref>       set cloudAgent.repos[0].startingRef
-  modelhitch bridge --cloud-agent-model <id>      set cloudAgent.defaultModel
-  modelhitch status                              is a background bridge running?
-  modelhitch front                               stop the background one, run the bridge in this terminal
+  modelhitch                                     print logo, version, and this help
+  modelhitch --help | -h                         same as above
+  modelhitch --version | -v                      print version
+
+  modelhitch bridge                              start the local OpenAI-compatible bridge (foreground)
+  modelhitch bridge --background | -b            start bridge in the background (terminal stays free)
+  modelhitch status                              show background bridge pid, health, and log path
+  modelhitch front                               stop background bridge and run it in this terminal
   modelhitch stop                                stop the background bridge
-  modelhitch settings                            edit local config in an OpenTUI interface
-  modelhitch settings --web                      open the bridge settings UI in a browser
-  modelhitch settings --config <path>            edit a specific config file
-  modelhitch setup <agent>                       install skills for codex, claude, cursor, vscode, or all
-  modelhitch --version                           print the version
-  modelhitch --help                              print this help
 
-Background process:
-  tracked in ~/.modelhitch (bridge.pid + bridge.log, override with MODELHITCH_HOME)
+  modelhitch config                              print masked local config (default ~/.modelhitch/config.json)
+  modelhitch config init                         create the default config file if missing
+  modelhitch config --path <file>                use a specific config file
 
-Skill setup:
-  modelhitch setup codex            install to the agent's user skill directory
-  modelhitch setup all --project    install project skills for all four agents
-  --project                         install in the current project instead
-  --dry-run                         show destinations without writing
-  --force                           update files in existing skill directories
+  modelhitch settings                            edit config in OpenTUI (requires Bun; needs a TTY)
+  modelhitch settings --web                      open the running bridge /settings page in a browser
+  modelhitch settings --config <file>            config file to edit (alias: --path)
 
-Bridge environment:
-  MODELHITCH_PORT           port (default 3939)
-  MODELHITCH_HOST           host (default 127.0.0.1)
+  modelhitch setup <agent>                       install agent skills (codex, claude, cursor, vscode, or all)
+
+Bridge flags (with \`bridge\` and \`bridge --background\`):
+  --config <file>                config file (default ~/.modelhitch/config.json)
+  --image-lane                   enable image generation lane (alias: --image-generation)
+  --no-image-lane                disable image lane (alias: --no-image-generation)
+  --image-provider openai|gemini image provider (default openai)
+  --image-model <id>             image model (openai default gpt-image-2; gemini default gemini-3.1-flash-image)
+  --image-quality low|medium|high  image quality (default medium)
+  --image-size <WxH>             image size (default 1024x1024)
+  --cloud-agent-lane             enable Cursor Cloud Agent lane (alias: --cloud-agent)
+  --no-cloud-agent-lane          disable cloud agent lane (alias: --no-cloud-agent)
+  --cloud-agent-repo <url>       cloudAgent.repos[0].url
+  --cloud-agent-ref <ref>        cloudAgent.repos[0].startingRef
+  --cloud-agent-model <id>       cloudAgent.defaultModel (default composer-2.5)
+
+Setup options (with \`setup <agent>\`):
+  modelhitch setup codex                         install to the agent user skill directory
+  modelhitch setup all --project                 install project skills for all four agents
+  --project                                      install in the current project instead of user home
+  --dry-run                                      show destinations without writing
+  --force                                        overwrite files in existing skill directories
+
+Files and environment:
+  ~/.modelhitch/bridge.pid, bridge.log, config.json  (override directory with MODELHITCH_HOME)
+  MODELHITCH_PORT           bridge port (default 3939)
+  MODELHITCH_HOST           bind host (default 127.0.0.1)
   MODELHITCH_MAX_BODY_BYTES max request body (default 64 MiB)
-  Image generation is disabled by default; enable it via CLI flags or /settings.
-  Cursor Cloud Agent lane is disabled by default; route explicitly as cursor-cloud/<model> after enabling.
-  CURSOR_API_KEY (or keys.cursor-cloud) enables the lane; service-account keys via env only.
+  MODELHITCH_DEBUG=1        log forwarded request bodies (may expose secrets)
+  Provider keys resolve from config keys.* and env vars (e.g. OPENAI_API_KEY, CURSOR_API_KEY).
+  Image lane is off by default; enable via bridge flags or /settings.
+  Cloud Agent lane is off by default; route explicitly as cursor-cloud/<model> after enabling.
+  CURSOR_API_KEY (or keys.cursor-cloud) enables the cloud lane; service-account keys via env only.
 `);
 }
 
@@ -446,7 +440,7 @@ Usage telemetry (persisted to ./modelhitch-usage.db):
 Press Ctrl+C to stop.`);
 }
 
-async function runBackgroundBridge(): Promise<void> {
+async function runBackgroundBridge(bridgeArgs: string[]): Promise<void> {
   const port = Number(process.env.MODELHITCH_PORT ?? 3939);
   const host = process.env.MODELHITCH_HOST ?? '127.0.0.1';
   const tracked = daemonStatus();
@@ -460,7 +454,7 @@ async function runBackgroundBridge(): Promise<void> {
     }
   }
 
-  const spawned = spawnBackground(['bridge']);
+  const spawned = spawnBackground(['bridge', ...bridgeArgs]);
 
   if (spawned.alreadyRunning) {
     console.log(`A background bridge is already running (pid ${spawned.pid}).`);
@@ -651,13 +645,16 @@ async function main(): Promise<void> {
     case '--version':
       console.log(VERSION);
       break;
-    case 'bridge':
-      if (args.includes('--background') || args.includes('-b')) {
-        await runBackgroundBridge();
+    case 'bridge': {
+      const bridgeArgs = args.slice(1);
+      if (bridgeArgs.includes('--background') || bridgeArgs.includes('-b')) {
+        const forwarded = bridgeArgs.filter((arg) => arg !== '--background' && arg !== '-b');
+        await runBackgroundBridge(forwarded);
       } else {
         await runBridge();
       }
       break;
+    }
     case 'status':
       await runStatus();
       break;
