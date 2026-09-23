@@ -130,6 +130,7 @@ async function run(): Promise<void> {
 
   const defaultProvider = input('default-provider', form.defaultProviderId, 'provider id');
   const defaultModel = input('default-model', form.defaultModel, 'provider default');
+  const defaultWorkspaceTarget = input('workspace-target', form.defaultWorkspaceTarget, 'rotation or provider/model');
   const trustedLanes = input('trusted-lanes', form.trustedLanes, 'provider/model; provider/model');
   const fallbackLanes = input('fallback-lanes', form.fallbackLanes, 'provider/model; provider/model');
   const imageEnabled = tabs('image-enabled', ['off', 'on'], form.imageEnabled ? 'on' : 'off');
@@ -147,6 +148,7 @@ async function run(): Promise<void> {
   for (const child of [
     field('Default provider', defaultProvider),
     field('Default model', defaultModel),
+    field('Workspace target (rotation or provider/model)', defaultWorkspaceTarget),
     field('Trusted lanes  (provider/model,model; ...)', trustedLanes),
     field('Fallback lanes (provider/model,model; ...)', fallbackLanes),
     new TextRenderable(renderer, {
@@ -174,6 +176,7 @@ async function run(): Promise<void> {
   const focusables: Array<{ focus(): void; blur(): void }> = [
     defaultProvider,
     defaultModel,
+    defaultWorkspaceTarget,
     trustedLanes,
     fallbackLanes,
     imageEnabled,
@@ -206,6 +209,7 @@ async function run(): Promise<void> {
       const next = applySettingsForm(config, {
         defaultProviderId: defaultProvider.value,
         defaultModel: defaultModel.value,
+        defaultWorkspaceTarget: defaultWorkspaceTarget.value,
         trustedLanes: trustedLanes.value,
         fallbackLanes: fallbackLanes.value,
         imageEnabled: selectedValue<'off' | 'on'>(imageEnabled) === 'on',

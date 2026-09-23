@@ -169,6 +169,7 @@ Usage:
   modelhitch settings                            edit config in OpenTUI (requires Bun; needs a TTY)
   modelhitch settings --web                      open the running bridge /settings page in a browser
   modelhitch settings --config <file>            config file to edit (alias: --path)
+  modelhitch workspace                           open the running bridge /workspace page in a browser
 
   modelhitch setup <agent>                       install agent skills (codex, claude, cursor, vscode, or all)
 
@@ -366,7 +367,7 @@ async function runBridge(): Promise<void> {
         // Apply immediately — hot reload. Optional fields absent from the
         // incoming document must be cleared first: Object.assign alone would
         // keep stale values (e.g. a catalog block the UI just unchecked).
-        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'cooldown', 'imageGeneration', 'cloudAgent'] as const) {
+        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'defaultWorkspaceTarget', 'cooldown', 'imageGeneration', 'cloudAgent'] as const) {
           delete (config as unknown as Record<string, unknown>)[k];
         }
         Object.assign(config, asConfig);
@@ -687,10 +688,10 @@ async function runWorkCommand(args: string[]): Promise<void> {
   console.log(`${body.id}\t${body.status}`);
 }
 
-async function runWebSettings(): Promise<void> {
+async function openBridgePage(path: string, label: string): Promise<void> {
   const port = Number(process.env.MODELHITCH_PORT ?? 3939);
   const host = process.env.MODELHITCH_HOST ?? '127.0.0.1';
-  const url = `http://${host}:${port}/settings`;
+  const url = `http://${host}:${port}${path}`;
   let response: Response;
   try {
     response = await fetch(url, { signal: AbortSignal.timeout(1500) });
@@ -700,12 +701,20 @@ async function runWebSettings(): Promise<void> {
   const contentType = response.headers.get('content-type') ?? '';
   if (!response.ok || !contentType.includes('text/html')) {
     throw new Error(
-      `The bridge at ${url} does not provide the settings UI (HTTP ${response.status}, ${contentType || 'unknown content type'}). ` +
+      `The bridge at ${url} does not provide the ${label} UI (HTTP ${response.status}, ${contentType || 'unknown content type'}). ` +
       'Stop it and restart it with this ModelHitch version.',
     );
   }
   openBrowser(url);
   console.log(`Opened ${url}`);
+}
+
+async function runWebSettings(): Promise<void> {
+  await openBridgePage('/settings', 'settings');
+}
+
+async function runWebWorkspace(): Promise<void> {
+  await openBridgePage('/workspace', 'workspace');
 }
 
 /** Logo is for interactive help; keep background/status/stop output script-friendly. */
@@ -765,6 +774,9 @@ async function main(): Promise<void> {
       break;
     case 'work':
       await runWorkCommand(args.slice(1));
+      break;
+    case 'workspace':
+      await runWebWorkspace();
       break;
     default:
       console.log(`Unknown command: ${cmd}\n`);
