@@ -169,8 +169,21 @@ Usage:
   modelhitch settings                            edit config in OpenTUI (requires Bun; needs a TTY)
   modelhitch settings --web                      open the running bridge /settings page in a browser
   modelhitch settings --config <file>            config file to edit (alias: --path)
+  modelhitch workspace                           open the running bridge /workspace page in a browser
 
   modelhitch setup <agent>                       install agent skills (codex, claude, cursor, vscode, or all)
+
+  modelhitch chat                                send a prompt through a bridge chat session
+  modelhitch work                                run a one-shot work order on the bridge
+  modelhitch cloud list                          list Cursor Cloud agents via the bridge
+  modelhitch cloud get <id>                      show one cloud agent id and status
+  modelhitch cloud cancel <id>                   cancel a cloud agent (exit 0 when cancelled)
+
+Chat and work flags:
+  --rotation                                     use the bridge default provider/model (rotation target)
+  --model <provider>/<model>                     pin a provider and model (split on the first slash)
+  --prompt <text>                                user prompt text
+  --base-url <url>                               bridge base URL (default http://127.0.0.1:3939, or MODELHITCH_PORT)
 
 Bridge flags (with \`bridge\` and \`bridge --background\`):
   --config <file>                config file (default ~/.modelhitch/config.json)
@@ -357,7 +370,7 @@ async function runBridge(): Promise<void> {
         // Apply immediately — hot reload. Optional fields absent from the
         // incoming document must be cleared first: Object.assign alone would
         // keep stale values (e.g. a catalog block the UI just unchecked).
-        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'cooldown', 'imageGeneration', 'cloudAgent'] as const) {
+        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'defaultWorkspaceTarget', 'cooldown', 'imageGeneration', 'cloudAgent'] as const) {
           delete (config as unknown as Record<string, unknown>)[k];
         }
         Object.assign(config, asConfig);
@@ -601,10 +614,161 @@ function openBrowser(url: string): void {
   child.unref();
 }
 
-async function runWebSettings(): Promise<void> {
+function defaultBridgeBaseUrl(): string {
+  const port = process.env.MODELHITCH_PORT ?? '3939';
+  return `http://127.0.0.1:${port}`;
+}
+
+function parseChatWorkTarget(args: string[]): { target: { kind: 'rotation' } | { kind: 'model'; providerId: string; modelId: string } } {
+  const rotation = args.includes('--rotation');
+  const modelFlag = argValue(args, '--model');
+  if (rotation && modelFlag) {
+    throw new Error('Use either --rotation or --model, not both.');
+  }
+  if (modelFlag) {
+    const slash = modelFlag.indexOf('/');
+    if (slash <= 0 || slash === modelFlag.length - 1) {
+      throw new Error('--model must be <provider>/<model> (split on the first slash).');
+    }
+    return {
+      target: {
+        kind: 'model',
+        providerId: modelFlag.slice(0, slash),
+        modelId: modelFlag.slice(slash + 1),
+      },
+    };
+  }
+  return { target: { kind: 'rotation' } };
+}
+
+async function runChatCommand(args: string[]): Promise<void> {
+  const prompt = argValue(args, '--prompt');
+  if (!prompt?.trim()) throw new Error('--prompt is required.');
+  const baseUrl = (argValue(args, '--base-url') ?? defaultBridgeBaseUrl()).replace(/\/+$/, '');
+  const { target } = parseChatWorkTarget(args);
+
+  const sessionRes = await fetch(`${baseUrl}/v1/sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target }),
+  });
+  if (!sessionRes.ok) {
+    throw new Error(`Failed to create session: HTTP ${sessionRes.status} ${await sessionRes.text()}`);
+  }
+  const session = (await sessionRes.json()) as { id: string };
+
+  const messageRes = await fetch(`${baseUrl}/v1/sessions/${encodeURIComponent(session.id)}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt }),
+  });
+  if (!messageRes.ok) {
+    throw new Error(`Failed to send message: HTTP ${messageRes.status} ${await messageRes.text()}`);
+  }
+  const updated = (await messageRes.json()) as {
+    messages: Array<{ role: string; content?: string }>;
+  };
+  const assistant = [...updated.messages].reverse().find((m) => m.role === 'assistant');
+  const text = typeof assistant?.content === 'string' ? assistant.content : '';
+  console.log(text);
+}
+
+async function cloudBridgeFetch(baseUrl: string, path: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(`${baseUrl}${path}`, init);
+  return res;
+}
+
+async function parseCloudBridgeError(res: Response, id?: string): Promise<never> {
+  const body = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+  const message = body.error?.message ?? `HTTP ${res.status}`;
+  if (id && res.status === 404) {
+    console.error(`Cloud agent not found: ${id}`);
+    process.exitCode = 1;
+    throw new Error(message);
+  }
+  throw new Error(message);
+}
+
+async function runCloudList(args: string[]): Promise<void> {
+  const baseUrl = (argValue(args, '--base-url') ?? defaultBridgeBaseUrl()).replace(/\/+$/, '');
+  const res = await cloudBridgeFetch(baseUrl, '/v1/cloud-agents');
+  if (!res.ok) await parseCloudBridgeError(res);
+  const body = (await res.json()) as { agents?: Array<{ id: string }> };
+  for (const agent of body.agents ?? []) console.log(agent.id);
+}
+
+async function runCloudGet(args: string[]): Promise<void> {
+  const id = args[0];
+  if (!id) throw new Error('Usage: modelhitch cloud get <id>');
+  const baseUrl = (argValue(args, '--base-url') ?? defaultBridgeBaseUrl()).replace(/\/+$/, '');
+  const res = await cloudBridgeFetch(baseUrl, `/v1/cloud-agents/${encodeURIComponent(id)}`);
+  if (!res.ok) await parseCloudBridgeError(res, id);
+  const agent = (await res.json()) as { id: string; status?: string };
+  console.log(`${agent.id}\t${agent.status ?? ''}`);
+}
+
+async function runCloudCancel(args: string[]): Promise<void> {
+  const id = args[0];
+  if (!id) {
+    console.error('Usage: modelhitch cloud cancel <id>');
+    process.exitCode = 1;
+    return;
+  }
+  const baseUrl = (argValue(args, '--base-url') ?? defaultBridgeBaseUrl()).replace(/\/+$/, '');
+  const cancelRes = await cloudBridgeFetch(baseUrl, `/v1/cloud-agents/${encodeURIComponent(id)}/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  if (!cancelRes.ok) await parseCloudBridgeError(cancelRes, id);
+  const getRes = await cloudBridgeFetch(baseUrl, `/v1/cloud-agents/${encodeURIComponent(id)}`);
+  if (!getRes.ok) await parseCloudBridgeError(getRes, id);
+  const agent = (await getRes.json()) as { status?: string };
+  if ((agent.status ?? '').toLowerCase() !== 'cancelled') {
+    process.exitCode = 1;
+  }
+}
+
+async function runCloudCommand(args: string[]): Promise<void> {
+  const sub = args[0];
+  const subArgs = args.slice(1);
+  switch (sub) {
+    case 'list':
+      await runCloudList(subArgs);
+      break;
+    case 'get':
+      await runCloudGet(subArgs);
+      break;
+    case 'cancel':
+      await runCloudCancel(subArgs);
+      break;
+    default:
+      throw new Error('Usage: modelhitch cloud list | get <id> | cancel <id>');
+  }
+}
+
+async function runWorkCommand(args: string[]): Promise<void> {
+  const prompt = argValue(args, '--prompt');
+  if (!prompt?.trim()) throw new Error('--prompt is required.');
+  const baseUrl = (argValue(args, '--base-url') ?? defaultBridgeBaseUrl()).replace(/\/+$/, '');
+  const { target } = parseChatWorkTarget(args);
+
+  const res = await fetch(`${baseUrl}/v1/work-orders`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, target }),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to create work order: HTTP ${res.status} ${await res.text()}`);
+  }
+  const body = (await res.json()) as { id: string; status: string };
+  console.log(`${body.id}\t${body.status}`);
+}
+
+async function openBridgePage(path: string, label: string): Promise<void> {
   const port = Number(process.env.MODELHITCH_PORT ?? 3939);
   const host = process.env.MODELHITCH_HOST ?? '127.0.0.1';
-  const url = `http://${host}:${port}/settings`;
+  const url = `http://${host}:${port}${path}`;
   let response: Response;
   try {
     response = await fetch(url, { signal: AbortSignal.timeout(1500) });
@@ -614,12 +778,20 @@ async function runWebSettings(): Promise<void> {
   const contentType = response.headers.get('content-type') ?? '';
   if (!response.ok || !contentType.includes('text/html')) {
     throw new Error(
-      `The bridge at ${url} does not provide the settings UI (HTTP ${response.status}, ${contentType || 'unknown content type'}). ` +
+      `The bridge at ${url} does not provide the ${label} UI (HTTP ${response.status}, ${contentType || 'unknown content type'}). ` +
       'Stop it and restart it with this ModelHitch version.',
     );
   }
   openBrowser(url);
   console.log(`Opened ${url}`);
+}
+
+async function runWebSettings(): Promise<void> {
+  await openBridgePage('/settings', 'settings');
+}
+
+async function runWebWorkspace(): Promise<void> {
+  await openBridgePage('/workspace', 'workspace');
 }
 
 /** Logo is for interactive help; keep background/status/stop output script-friendly. */
@@ -673,6 +845,18 @@ async function main(): Promise<void> {
     case 'settings':
       if (args.includes('--web')) await runWebSettings();
       else runSettings(args.slice(1));
+      break;
+    case 'chat':
+      await runChatCommand(args.slice(1));
+      break;
+    case 'work':
+      await runWorkCommand(args.slice(1));
+      break;
+    case 'cloud':
+      await runCloudCommand(args.slice(1));
+      break;
+    case 'workspace':
+      await runWebWorkspace();
       break;
     default:
       console.log(`Unknown command: ${cmd}\n`);

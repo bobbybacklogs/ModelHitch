@@ -419,6 +419,47 @@ Requirements:
 
 There is no automatic routing to cloud agents in this release — use an explicit model prefix only.
 
+### Bridge CLI commands
+
+These commands talk to a running bridge (start one with `modelhitch bridge` or
+`modelhitch bridge --background` first).
+
+**Chat and work** send a prompt through the bridge. `chat` opens an interactive session;
+`work` runs a one-shot work order.
+
+```bash
+modelhitch chat --prompt "Summarize the README"
+modelhitch chat --rotation --prompt "Use the default provider"
+modelhitch chat --model openai/gpt-4o-mini --prompt "Hello"
+modelhitch work --prompt "Refactor the auth module"
+```
+
+Shared flags for `chat` and `work`:
+
+| Flag | Purpose |
+| --- | --- |
+| `--rotation` | Use the bridge default provider/model (rotation target) |
+| `--model <provider>/<model>` | Pin a provider and model (split on the first slash) |
+| `--prompt <text>` | User prompt text |
+| `--base-url <url>` | Bridge base URL (default `http://127.0.0.1:3939`, or `MODELHITCH_PORT`) |
+
+**Workspace** opens the running bridge `/workspace` page in a browser:
+
+```bash
+modelhitch workspace
+```
+
+**Cloud** lists and manages Cursor Cloud agents via the bridge:
+
+```bash
+modelhitch cloud list
+modelhitch cloud get <id>
+modelhitch cloud cancel <id>
+```
+
+`cloud cancel` exits 0 when the agent is cancelled. Requires the Cloud Agent lane to be enabled
+and a valid `CURSOR_API_KEY` (see [Cursor Cloud Agent lane](#cursor-cloud-agent-lane)).
+
 Environment controls:
 
 | Variable | Default | Purpose |

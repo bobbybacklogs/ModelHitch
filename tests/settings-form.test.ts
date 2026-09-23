@@ -74,4 +74,11 @@ describe('settings TUI form mapping', () => {
     expect(next.defaultProviderId).toBeUndefined();
     expect(next.defaultModel).toBeUndefined();
   });
+
+  it('round-trips the default workspace target', () => {
+    const pinned = applySettingsForm(config, form({ defaultWorkspaceTarget: 'openai/gpt-4o-mini' }));
+    expect(pinned.defaultWorkspaceTarget).toBe('openai/gpt-4o-mini');
+    const rotation = applySettingsForm(config, form({ defaultWorkspaceTarget: 'rotation' }));
+    expect(rotation.defaultWorkspaceTarget).toBe('rotation');
+  });
 });

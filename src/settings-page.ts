@@ -144,13 +144,27 @@ export function settingsPageHtml(): string {
     <span class="wordmark">model<b>hitch</b></span>
     <span class="local-badge">local · 127.0.0.1</span>
     <span class="spacer"></span>
-    <span class="linkbar"><a href="/usage" target="_blank">usage</a> · <a href="/healthz" target="_blank">health</a></span>
+    <span class="linkbar"><a href="/workspace">workspace</a> · <a href="/usage" target="_blank">usage</a> · <a href="/healthz" target="_blank">health</a></span>
   </div>
 </header>
 
 <main>
   <div id="errors"></div>
   <div id="saved">Applied.</div>
+
+  <section>
+    <div class="section-head"><h2>Workspace</h2><span class="hint">default composer target on /workspace — rotation or a pinned provider/model id</span></div>
+    <div class="panel">
+      <div class="row" style="border-bottom:0">
+        <div class="grow">
+          <label>default target</label>
+          <select id="workspaceTarget">
+            <option value="rotation">rotation</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <section>
     <div class="section-head"><h2>Providers</h2><span class="hint">paste an API key to enable a provider — stored locally in ~/.modelhitch/config.json, masked everywhere else</span></div>
@@ -230,6 +244,12 @@ export function settingsPageHtml(): string {
         <div class="grow">
           <label>CURSOR_API_KEY</label>
           <input id="cloudApiKey" type="password" autocomplete="off" placeholder="(stored as keys.cursor-cloud)" />
+        </div>
+      </div>
+      <div class="row" style="border-bottom:0; margin-top:10px">
+        <div class="grow">
+          <label>running agents</label>
+          <div id="cloud-agents-list" class="empty">Loading…</div>
         </div>
       </div>
     </div>
@@ -363,6 +383,18 @@ function usageBadges(id) {
   if (pol.fallback.some(function (l) { return l.providerId === id; })) bits.push('fallback');
   if ((cfg.defaultProviderId || '') === id) bits.push('default');
   return bits;
+}
+
+function renderWorkspaceTarget() {
+  var cfg = state.config || {};
+  var selected = cfg.defaultWorkspaceTarget || 'rotation';
+  var sel = el('workspaceTarget');
+  var opts = ['<option value="rotation">rotation</option>'];
+  (state.models || []).forEach(function (m) {
+    opts.push('<option value="' + esc(m.id) + '"' + (m.id === selected ? ' selected' : '') + '>' + esc(m.id) + '</option>');
+  });
+  sel.innerHTML = opts.join('');
+  if (selected && selected !== 'rotation') sel.value = selected;
 }
 
 function renderProviders() {
@@ -537,6 +569,61 @@ function renderImageGeneration() {
   el('imageQuality').disabled = image.providerId === 'gemini';
 }
 
+function renderCloudAgentsList(agents, errorMessage) {
+  var box = el('cloud-agents-list');
+  if (errorMessage) {
+    box.className = 'empty';
+    box.textContent = errorMessage;
+    return;
+  }
+  if (!agents || !agents.length) {
+    box.className = 'empty';
+    box.textContent = 'No cloud agents';
+    return;
+  }
+  box.className = '';
+  box.innerHTML = '';
+  agents.forEach(function (agent) {
+    var row = document.createElement('div');
+    row.className = 'row';
+    row.style.borderBottom = '1px solid var(--line)';
+    var status = (agent.status || 'unknown').toLowerCase();
+    row.innerHTML = '<div class="grow"><span class="mono">' + esc(agent.id) + '</span> <span class="muted">' + esc(agent.status || 'unknown') + '</span></div>';
+    if (status !== 'cancelled' && status !== 'finished') {
+      var btn = document.createElement('button');
+      btn.className = 'btn danger';
+      btn.type = 'button';
+      btn.textContent = 'Cancel';
+      btn.addEventListener('click', function () { cancelCloudAgent(agent.id); });
+      row.appendChild(btn);
+    }
+    box.appendChild(row);
+  });
+}
+
+async function loadCloudAgents() {
+  try {
+    var body = await api('/v1/cloud-agents');
+    renderCloudAgentsList(body.agents || []);
+  } catch (err) {
+    renderCloudAgentsList([], err.message);
+  }
+}
+
+async function cancelCloudAgent(id) {
+  showErrors([]);
+  try {
+    await api('/v1/cloud-agents/' + encodeURIComponent(id) + '/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}'
+    });
+    await loadCloudAgents();
+  } catch (err) {
+    showErrors(['Cancel failed: ' + err.message]);
+  }
+}
+
 function renderCloudAgent() {
   var cfg = state.config || {};
   var cloud = cfg.cloudAgent || { enabled: false, defaultModel: 'composer-2.5', repos: [] };
@@ -548,6 +635,7 @@ function renderCloudAgent() {
   var hasKey = !!(cfg.keys && cfg.keys['cursor-cloud']);
   el('cloudApiKey').placeholder = hasKey ? '(set — leave blank to keep)' : '(paste CURSOR_API_KEY)';
   el('cloudApiKey').value = '';
+  loadCloudAgents();
 }
 
 function collectCloudAgent() {
@@ -686,6 +774,7 @@ function assemble() {
     version: 1,
     defaultProviderId: el('defaultProviderId').value.trim() || undefined,
     defaultModel: el('defaultModel').value.trim() || undefined,
+    defaultWorkspaceTarget: el('workspaceTarget').value || 'rotation',
     policy: collectPolicy(),
     catalog: catalogChoice ? { providers: catalogChoice, baseUrls: (cfg.catalog && cfg.catalog.baseUrls) || undefined, ttlMs: (cfg.catalog && cfg.catalog.ttlMs) || undefined } : undefined,
     cooldown: collectReliability(),
@@ -703,7 +792,7 @@ async function loadAll() {
     state.builtin = cat.builtin || [];
     var models = await api('/v1/models');
     state.models = models.data || [];
-    renderImageGeneration(); renderCloudAgent(); renderProviders(); renderCatalog(); renderPolicy(); renderReliability();
+    renderImageGeneration(); renderCloudAgent(); renderWorkspaceTarget(); renderProviders(); renderCatalog(); renderPolicy(); renderReliability();
     refreshHealth();
   } catch (err) {
     showErrors(['Failed to load settings: ' + err.message]);

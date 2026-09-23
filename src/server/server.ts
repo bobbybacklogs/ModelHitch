@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { join } from 'node:path';
 import { ModelHitchError } from '../core/errors.js';
 import { estimateCost } from '../core/cost.js';
 import type { KeyStore } from '../core/keystore.js';
@@ -32,6 +33,7 @@ import { MemoryLaneCooldown } from '../core/cooldown.js';
 import { inferRequirements, filterEligibleLanes, CapabilityUnavailableError, type CapabilityRequirements } from '../core/capabilities.js';
 import type { CatalogSource } from '../catalog/source.js';
 import { settingsPageHtml } from '../settings-page.js';
+import { workspacePageHtml } from '../workspace-page.js';
 import { UsageTracker, usageDashboardHtml, type UsageEvent } from '../core/usage.js';
 import { SqliteUsageStorage } from '../core/usage-storage.js';
 import { mapFinishReasonOpenAI, mapRequest, routeModel, toChatCompletion, toOpenAIError, toUsageOutput } from './mapping.js';
@@ -66,8 +68,16 @@ import { normalizeBodyImages } from './local-images.js';
 import { extractSessionId } from '../core/session.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
 import type { CloudAgentConfig, ImageGenerationConfig } from '../config.js';
-import { CURSOR_CLOUD_PROVIDER_ID } from '../providers/cursor-cloud.js';
+import {
+  CURSOR_CLOUD_PROVIDER_ID,
+  cancelCursorCloudAgent,
+  getCursorCloudAgent,
+  listCursorCloudAgents,
+} from '../providers/cursor-cloud.js';
 import { safeJsonParse } from '../core/json.js';
+import { modelhitchHome } from '../config-file.js';
+import { WorkspaceStore } from '../workspace/store.js';
+import { handleWorkspaceHttp } from './workspace-http.js';
 
 export interface ModelHitchServerOptions {
   /** Providers to serve. Defaults to the built-in set. */
@@ -148,6 +158,8 @@ export interface ModelHitchServerOptions {
    * >= 22.5 (`node:sqlite`). Ignored when `usageTracker` is provided.
    */
   usagePersistence?: boolean | string;
+  /** Persist chat sessions and work orders. Defaults to `<modelhitchHome>/workspace`. */
+  workspaceStore?: WorkspaceStore;
 }
 
 /** One completed inference request, as reported to the `onUsage` hook. */
@@ -226,9 +238,12 @@ export class OpenAICompatibleServer {
   private cooldown: LaneCooldown | undefined;
   private source: ProviderSource;
   private catalogSource: CatalogSource | undefined;
+  private workspaceStore: WorkspaceStore;
 
   constructor(options: ModelHitchServerOptions = {}) {
     this.options = options;
+    this.workspaceStore =
+      options.workspaceStore ?? new WorkspaceStore(join(modelhitchHome(), 'workspace'));
     this.providers = options.providers ?? defaultProviders;
     this.imageGeneration = options.imageGeneration;
     this.cloudAgent = options.cloudAgent;
@@ -461,6 +476,14 @@ export class OpenAICompatibleServer {
       return;
     }
 
+    if (method === 'GET' && path === '/workspace') {
+      this.log(`${method} ${path} ->`);
+      this.cors(res);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(workspacePageHtml());
+      return;
+    }
+
     if (method === 'GET' && path === '/v1/config') {
       this.log(`${method} ${path} ->`);
       const config = this.options.configBridge ? (this.options.configBridge.getConfig() as unknown) : {};
@@ -490,6 +513,41 @@ export class OpenAICompatibleServer {
       const cd = this.cooldown;
       if (cd instanceof CircuitBreaker) health.push(...cd.snapshot());
       this.sendJson(res, 200, health);
+      return;
+    }
+
+    const cloudAgentCancelMatch = path.match(/^\/v1\/cloud-agents\/([^/]+)\/cancel$/);
+    if (method === 'POST' && cloudAgentCancelMatch) {
+      this.log(`${method} ${path} ->`);
+      try {
+        const agent = await this.handleCloudAgentCancel(decodeURIComponent(cloudAgentCancelMatch[1] ?? ''));
+        this.sendJson(res, 200, agent);
+      } catch (err) {
+        this.sendCloudAgentManageError(res, err);
+      }
+      return;
+    }
+
+    const cloudAgentIdMatch = path.match(/^\/v1\/cloud-agents\/([^/]+)$/);
+    if (method === 'GET' && cloudAgentIdMatch) {
+      this.log(`${method} ${path} ->`);
+      try {
+        const agent = await this.handleCloudAgentGet(decodeURIComponent(cloudAgentIdMatch[1] ?? ''));
+        this.sendJson(res, 200, agent);
+      } catch (err) {
+        this.sendCloudAgentManageError(res, err);
+      }
+      return;
+    }
+
+    if (method === 'GET' && path === '/v1/cloud-agents') {
+      this.log(`${method} ${path} ->`);
+      try {
+        const agents = await this.handleCloudAgentList();
+        this.sendJson(res, 200, { agents });
+      } catch (err) {
+        this.sendCloudAgentManageError(res, err);
+      }
       return;
     }
 
@@ -557,6 +615,25 @@ export class OpenAICompatibleServer {
     if (method === 'HEAD' && path === '/api/hello') {
       res.writeHead(200);
       res.end();
+      return;
+    }
+
+    if (
+      await handleWorkspaceHttp(method, path, req, res, {
+        store: this.workspaceStore,
+        providers: this.providers,
+        defaultProviderId: this.options.defaultProviderId,
+        defaultModel: this.options.defaultModel,
+        autoMode: this.options.autoMode,
+        policy: this.options.policy,
+        keystore: this.options.keystore,
+        apiKeys: this.options.apiKeys,
+      }, {
+        readBody: (r) => this.readBody(r),
+        sendJson: (r, status, data) => this.sendJson(r, status, data),
+        log: (line) => this.log(line),
+      })
+    ) {
       return;
     }
 
@@ -1302,6 +1379,47 @@ export class OpenAICompatibleServer {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  private resolveCloudAgentApiKey(): string {
+    if (!this.cloudAgent?.enabled) {
+      throw new ModelHitchError(
+        'bad-request',
+        'Cursor Cloud Agent lane is disabled. Enable cloudAgent in ~/.modelhitch/config.json or via /settings.',
+        { status: 403, providerId: CURSOR_CLOUD_PROVIDER_ID },
+      );
+    }
+    const key = this.options.apiKeys?.[CURSOR_CLOUD_PROVIDER_ID] ?? process.env.CURSOR_API_KEY;
+    if (!key) {
+      throw new ModelHitchError(
+        'missing-api-key',
+        'Cursor Cloud Agent lane requires CURSOR_API_KEY or keys.cursor-cloud in ~/.modelhitch/config.json.',
+        { status: 401, providerId: CURSOR_CLOUD_PROVIDER_ID },
+      );
+    }
+    return key;
+  }
+
+  private async handleCloudAgentList() {
+    const apiKey = this.resolveCloudAgentApiKey();
+    return listCursorCloudAgents(apiKey, { fetchImpl: this.options.imageFetch });
+  }
+
+  private async handleCloudAgentGet(id: string) {
+    const apiKey = this.resolveCloudAgentApiKey();
+    return getCursorCloudAgent(apiKey, id, { fetchImpl: this.options.imageFetch });
+  }
+
+  private async handleCloudAgentCancel(id: string) {
+    const apiKey = this.resolveCloudAgentApiKey();
+    return cancelCursorCloudAgent(apiKey, id, { fetchImpl: this.options.imageFetch });
+  }
+
+  private sendCloudAgentManageError(res: ServerResponse, err: unknown): void {
+    if (res.headersSent) return;
+    const { status, body } = toOpenAIError(err);
+    this.log(`  !! HTTP ${status} ${body.error.code}: ${body.error.message}`);
+    this.sendJson(res, status, body);
+  }
 
   private assertCloudAgentModel(modelInput: string | undefined): void {
     const model = modelInput?.trim();

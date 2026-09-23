@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { CONFIG_VERSION, type CloudAgentConfig } from '../src/config.js';
 import { validateConfig } from '../src/config.js';
 import {
+  cancelCursorCloudAgent,
   createCursorCloudProvider,
+  getCursorCloudAgent,
+  listCursorCloudAgents,
   parseSseBlock,
   validateCursorCloudApiKey,
   CURSOR_CLOUD_API_BASE,
@@ -47,6 +50,15 @@ function mockCursorFetch() {
     }
     if (url.endsWith('/models')) {
       return new Response(JSON.stringify({ items: [{ id: 'composer-2.5' }, { id: 'mock-run' }] }), { status: 200 });
+    }
+    if (method === 'GET' && url.endsWith('/agents')) {
+      return new Response(JSON.stringify({ items: [{ id: 'bc-mock-1', status: 'RUNNING' }] }), { status: 200 });
+    }
+    if (method === 'GET' && url.endsWith('/agents/bc-mock-1')) {
+      return new Response(JSON.stringify({ agent: { id: 'bc-mock-1', status: 'RUNNING' } }), { status: 200 });
+    }
+    if (method === 'POST' && url.endsWith('/agents/bc-mock-1/cancel')) {
+      return new Response(JSON.stringify({ agent: { id: 'bc-mock-1', status: 'CANCELLED' } }), { status: 200 });
     }
     if (method === 'POST' && url.endsWith('/agents')) {
       return new Response(
@@ -153,6 +165,20 @@ describe('cursor-cloud provider', () => {
     } finally {
       if (saved) process.env.CURSOR_API_KEY = saved;
     }
+  });
+
+  it('lists, gets, and cancels agents without treating cancel as run creation', async () => {
+    const { fetchImpl, calls } = mockCursorFetch();
+    const listed = await listCursorCloudAgents('test-key', { fetchImpl });
+    expect(listed[0]?.id).toBe('bc-mock-1');
+    const agent = await getCursorCloudAgent('test-key', 'bc-mock-1', { fetchImpl });
+    expect(agent.status).toBe('RUNNING');
+    const cancelled = await cancelCursorCloudAgent('test-key', 'bc-mock-1', { fetchImpl });
+    expect(cancelled.status).toBe('CANCELLED');
+    const runCreates = calls.filter((c) => c.method === 'POST' && c.url.includes('/runs') && !c.url.endsWith('/cancel'));
+    expect(runCreates).toHaveLength(0);
+    expect(calls.some((c) => c.method === 'GET' && c.url.endsWith('/agents'))).toBe(true);
+    expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/agents/bc-mock-1/cancel'))).toBe(true);
   });
 
   it('config validation accepts cloudAgent and rejects autoCreatePR true', () => {

@@ -9,6 +9,7 @@ import type { TrustListEntry } from './core/policy.js';
 export interface SettingsFormState {
   defaultProviderId: string;
   defaultModel: string;
+  defaultWorkspaceTarget: string;
   trustedLanes: string;
   fallbackLanes: string;
   imageEnabled: boolean;
@@ -48,6 +49,7 @@ export function configToSettingsForm(config: ModelHitchConfig): SettingsFormStat
   return {
     defaultProviderId: config.defaultProviderId ?? '',
     defaultModel: config.defaultModel ?? '',
+    defaultWorkspaceTarget: config.defaultWorkspaceTarget ?? 'rotation',
     trustedLanes: formatLanes(config.policy?.trusted),
     fallbackLanes: formatLanes(config.policy?.fallback),
     imageEnabled: image?.enabled ?? false,
@@ -84,6 +86,11 @@ export function applySettingsForm(config: ModelHitchConfig, form: SettingsFormSt
   else delete next.defaultProviderId;
   if (defaultModel) next.defaultModel = defaultModel;
   else delete next.defaultModel;
+
+  const workspaceTarget = form.defaultWorkspaceTarget.trim();
+  if (workspaceTarget && workspaceTarget !== 'rotation') next.defaultWorkspaceTarget = workspaceTarget;
+  else if (workspaceTarget === 'rotation') next.defaultWorkspaceTarget = 'rotation';
+  else delete next.defaultWorkspaceTarget;
 
   const trusted = parseLanes(form.trustedLanes, 'Trusted lanes');
   const fallback = parseLanes(form.fallbackLanes, 'Fallback lanes');
