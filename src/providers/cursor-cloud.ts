@@ -37,6 +37,22 @@ interface CursorRunDetail {
   durationMs?: number;
 }
 
+export interface CursorCloudAgent {
+  id: string;
+  status?: string;
+  name?: string;
+  createdAt?: string;
+}
+
+interface CursorCloudAgentsListResponse {
+  items?: CursorCloudAgent[];
+  agents?: CursorCloudAgent[];
+}
+
+interface CursorCloudAgentResponse {
+  agent?: CursorCloudAgent;
+}
+
 interface CursorRepositoryEntry {
   url?: string;
   repository?: string;
@@ -53,6 +69,84 @@ export interface SseEvent {
   event: string;
   data: string;
   id?: string;
+}
+
+async function cursorApiFetch(
+  path: string,
+  init: RequestInit,
+  apiKey: string,
+  opts: { fetchImpl?: typeof fetch; baseUrl?: string } = {},
+): Promise<Response> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const baseUrl = (opts.baseUrl ?? CURSOR_CLOUD_API_BASE).replace(/\/$/, '');
+  const res = await fetchImpl(`${baseUrl}${path}`, {
+    ...init,
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      ...(init.headers ?? {}),
+    },
+  });
+  if (!res.ok) throw await mapCursorResponseError(res, CURSOR_CLOUD_PROVIDER_ID);
+  return res;
+}
+
+function agentNotFoundError(id: string): ModelHitchError {
+  return new ModelHitchError('model-not-found', `Cloud agent "${id}" was not found.`, {
+    status: 404,
+    providerId: CURSOR_CLOUD_PROVIDER_ID,
+  });
+}
+
+/** List Cursor Cloud agents via `GET /v1/agents`. */
+export async function listCursorCloudAgents(
+  apiKey: string,
+  opts: { fetchImpl?: typeof fetch; baseUrl?: string } = {},
+): Promise<CursorCloudAgent[]> {
+  const res = await cursorApiFetch('/agents', { method: 'GET' }, apiKey, opts);
+  const body = (await res.json()) as CursorCloudAgentsListResponse;
+  return body.items ?? body.agents ?? [];
+}
+
+/** Fetch one Cursor Cloud agent via `GET /v1/agents/:id`. */
+export async function getCursorCloudAgent(
+  apiKey: string,
+  id: string,
+  opts: { fetchImpl?: typeof fetch; baseUrl?: string } = {},
+): Promise<CursorCloudAgent> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const baseUrl = (opts.baseUrl ?? CURSOR_CLOUD_API_BASE).replace(/\/$/, '');
+  const res = await fetchImpl(`${baseUrl}/agents/${encodeURIComponent(id)}`, {
+    method: 'GET',
+    headers: { Accept: 'application/json', Authorization: `Bearer ${apiKey}` },
+  });
+  if (res.status === 404) throw agentNotFoundError(id);
+  if (!res.ok) throw await mapCursorResponseError(res, CURSOR_CLOUD_PROVIDER_ID);
+  const body = (await res.json()) as CursorCloudAgent | CursorCloudAgentResponse;
+  const agent = 'agent' in body && body.agent ? body.agent : (body as CursorCloudAgent);
+  if (!agent?.id) throw agentNotFoundError(id);
+  return agent;
+}
+
+/** Cancel a Cursor Cloud agent via `POST /v1/agents/:id/cancel`. */
+export async function cancelCursorCloudAgent(
+  apiKey: string,
+  id: string,
+  opts: { fetchImpl?: typeof fetch; baseUrl?: string } = {},
+): Promise<CursorCloudAgent> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const baseUrl = (opts.baseUrl ?? CURSOR_CLOUD_API_BASE).replace(/\/$/, '');
+  const res = await fetchImpl(`${baseUrl}/agents/${encodeURIComponent(id)}/cancel`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  if (res.status === 404) throw agentNotFoundError(id);
+  if (!res.ok) throw await mapCursorResponseError(res, CURSOR_CLOUD_PROVIDER_ID);
+  const body = (await res.json()) as CursorCloudAgent | CursorCloudAgentResponse;
+  const agent = 'agent' in body && body.agent ? body.agent : (body as CursorCloudAgent);
+  if (!agent?.id) throw agentNotFoundError(id);
+  return agent;
 }
 
 /** Validate a Cursor API key via `GET /v1/me`. */

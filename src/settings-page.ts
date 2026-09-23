@@ -246,6 +246,12 @@ export function settingsPageHtml(): string {
           <input id="cloudApiKey" type="password" autocomplete="off" placeholder="(stored as keys.cursor-cloud)" />
         </div>
       </div>
+      <div class="row" style="border-bottom:0; margin-top:10px">
+        <div class="grow">
+          <label>running agents</label>
+          <div id="cloud-agents-list" class="empty">Loading…</div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -563,6 +569,61 @@ function renderImageGeneration() {
   el('imageQuality').disabled = image.providerId === 'gemini';
 }
 
+function renderCloudAgentsList(agents, errorMessage) {
+  var box = el('cloud-agents-list');
+  if (errorMessage) {
+    box.className = 'empty';
+    box.textContent = errorMessage;
+    return;
+  }
+  if (!agents || !agents.length) {
+    box.className = 'empty';
+    box.textContent = 'No cloud agents';
+    return;
+  }
+  box.className = '';
+  box.innerHTML = '';
+  agents.forEach(function (agent) {
+    var row = document.createElement('div');
+    row.className = 'row';
+    row.style.borderBottom = '1px solid var(--line)';
+    var status = (agent.status || 'unknown').toLowerCase();
+    row.innerHTML = '<div class="grow"><span class="mono">' + esc(agent.id) + '</span> <span class="muted">' + esc(agent.status || 'unknown') + '</span></div>';
+    if (status !== 'cancelled' && status !== 'finished') {
+      var btn = document.createElement('button');
+      btn.className = 'btn danger';
+      btn.type = 'button';
+      btn.textContent = 'Cancel';
+      btn.addEventListener('click', function () { cancelCloudAgent(agent.id); });
+      row.appendChild(btn);
+    }
+    box.appendChild(row);
+  });
+}
+
+async function loadCloudAgents() {
+  try {
+    var body = await api('/v1/cloud-agents');
+    renderCloudAgentsList(body.agents || []);
+  } catch (err) {
+    renderCloudAgentsList([], err.message);
+  }
+}
+
+async function cancelCloudAgent(id) {
+  showErrors([]);
+  try {
+    await api('/v1/cloud-agents/' + encodeURIComponent(id) + '/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}'
+    });
+    await loadCloudAgents();
+  } catch (err) {
+    showErrors(['Cancel failed: ' + err.message]);
+  }
+}
+
 function renderCloudAgent() {
   var cfg = state.config || {};
   var cloud = cfg.cloudAgent || { enabled: false, defaultModel: 'composer-2.5', repos: [] };
@@ -574,6 +635,7 @@ function renderCloudAgent() {
   var hasKey = !!(cfg.keys && cfg.keys['cursor-cloud']);
   el('cloudApiKey').placeholder = hasKey ? '(set — leave blank to keep)' : '(paste CURSOR_API_KEY)';
   el('cloudApiKey').value = '';
+  loadCloudAgents();
 }
 
 function collectCloudAgent() {

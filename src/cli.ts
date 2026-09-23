@@ -175,6 +175,9 @@ Usage:
 
   modelhitch chat                                send a prompt through a bridge chat session
   modelhitch work                                run a one-shot work order on the bridge
+  modelhitch cloud list                          list Cursor Cloud agents via the bridge
+  modelhitch cloud get <id>                      show one cloud agent id and status
+  modelhitch cloud cancel <id>                   cancel a cloud agent (exit 0 when cancelled)
 
 Chat and work flags:
   --rotation                                     use the bridge default provider/model (rotation target)
@@ -670,6 +673,80 @@ async function runChatCommand(args: string[]): Promise<void> {
   console.log(text);
 }
 
+async function cloudBridgeFetch(baseUrl: string, path: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(`${baseUrl}${path}`, init);
+  return res;
+}
+
+async function parseCloudBridgeError(res: Response, id?: string): Promise<never> {
+  const body = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+  const message = body.error?.message ?? `HTTP ${res.status}`;
+  if (id && res.status === 404) {
+    console.error(`Cloud agent not found: ${id}`);
+    process.exitCode = 1;
+    throw new Error(message);
+  }
+  throw new Error(message);
+}
+
+async function runCloudList(args: string[]): Promise<void> {
+  const baseUrl = (argValue(args, '--base-url') ?? defaultBridgeBaseUrl()).replace(/\/+$/, '');
+  const res = await cloudBridgeFetch(baseUrl, '/v1/cloud-agents');
+  if (!res.ok) await parseCloudBridgeError(res);
+  const body = (await res.json()) as { agents?: Array<{ id: string }> };
+  for (const agent of body.agents ?? []) console.log(agent.id);
+}
+
+async function runCloudGet(args: string[]): Promise<void> {
+  const id = args[0];
+  if (!id) throw new Error('Usage: modelhitch cloud get <id>');
+  const baseUrl = (argValue(args, '--base-url') ?? defaultBridgeBaseUrl()).replace(/\/+$/, '');
+  const res = await cloudBridgeFetch(baseUrl, `/v1/cloud-agents/${encodeURIComponent(id)}`);
+  if (!res.ok) await parseCloudBridgeError(res, id);
+  const agent = (await res.json()) as { id: string; status?: string };
+  console.log(`${agent.id}\t${agent.status ?? ''}`);
+}
+
+async function runCloudCancel(args: string[]): Promise<void> {
+  const id = args[0];
+  if (!id) {
+    console.error('Usage: modelhitch cloud cancel <id>');
+    process.exitCode = 1;
+    return;
+  }
+  const baseUrl = (argValue(args, '--base-url') ?? defaultBridgeBaseUrl()).replace(/\/+$/, '');
+  const cancelRes = await cloudBridgeFetch(baseUrl, `/v1/cloud-agents/${encodeURIComponent(id)}/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  if (!cancelRes.ok) await parseCloudBridgeError(cancelRes, id);
+  const getRes = await cloudBridgeFetch(baseUrl, `/v1/cloud-agents/${encodeURIComponent(id)}`);
+  if (!getRes.ok) await parseCloudBridgeError(getRes, id);
+  const agent = (await getRes.json()) as { status?: string };
+  if ((agent.status ?? '').toLowerCase() !== 'cancelled') {
+    process.exitCode = 1;
+  }
+}
+
+async function runCloudCommand(args: string[]): Promise<void> {
+  const sub = args[0];
+  const subArgs = args.slice(1);
+  switch (sub) {
+    case 'list':
+      await runCloudList(subArgs);
+      break;
+    case 'get':
+      await runCloudGet(subArgs);
+      break;
+    case 'cancel':
+      await runCloudCancel(subArgs);
+      break;
+    default:
+      throw new Error('Usage: modelhitch cloud list | get <id> | cancel <id>');
+  }
+}
+
 async function runWorkCommand(args: string[]): Promise<void> {
   const prompt = argValue(args, '--prompt');
   if (!prompt?.trim()) throw new Error('--prompt is required.');
@@ -774,6 +851,9 @@ async function main(): Promise<void> {
       break;
     case 'work':
       await runWorkCommand(args.slice(1));
+      break;
+    case 'cloud':
+      await runCloudCommand(args.slice(1));
       break;
     case 'workspace':
       await runWebWorkspace();
