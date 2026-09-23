@@ -53,6 +53,12 @@ describe('config validity + serialization', () => {
     expect(validateConfig({ keys: 'sk-foo' }).errors.join('\n')).toMatch(/object/);
   });
 
+  it('cloud agent lane is disabled by default and validates when enabled', () => {
+    const tpl = defaultConfigTemplate();
+    expect(tpl.cloudAgent).toMatchObject({ enabled: false, defaultModel: 'composer-2.5', autoCreatePR: false });
+    expect(validateConfig({ version: 1, cloudAgent: { enabled: true, repos: [{ url: 'https://github.com/org/repo' }] } }).errors).toEqual([]);
+  });
+
   it('image generation is disabled by default and validates when enabled', () => {
     const tpl = defaultConfigTemplate();
     expect(tpl.imageGeneration).toMatchObject({ enabled: false, providerId: 'openai', model: 'gpt-image-2' });

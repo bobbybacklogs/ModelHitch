@@ -26,4 +26,14 @@ export { createOpenAICompatibleProvider, OpenAICompatibleProvider, type OpenAICo
 export { createAnthropicProvider, AnthropicProvider, type AnthropicProviderOptions, anthropic } from './anthropic.js';
 export { createOllamaProvider, OllamaProvider, type OllamaProviderOptions, ollama } from './ollama.js';
 export { mockProvider } from './mock.js';
+export {
+  createCursorCloudProvider,
+  validateCursorCloudApiKey,
+  CURSOR_CLOUD_API_BASE,
+  CURSOR_CLOUD_PROVIDER_ID,
+  parseSseBlock,
+  type CursorCloudProviderOptions,
+  type SseEvent,
+} from './cursor-cloud.js';
+export { CursorCloudSessionStore } from './cursor-cloud-session.js';
 export type { Provider, ModelInfo } from './types.js';

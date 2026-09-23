@@ -65,7 +65,8 @@ import { clearConversations, findConversationWithToolCall, rememberConversation 
 import { normalizeBodyImages } from './local-images.js';
 import { extractSessionId } from '../core/session.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
-import type { ImageGenerationConfig } from '../config.js';
+import type { CloudAgentConfig, ImageGenerationConfig } from '../config.js';
+import { CURSOR_CLOUD_PROVIDER_ID } from '../providers/cursor-cloud.js';
 import { safeJsonParse } from '../core/json.js';
 
 export interface ModelHitchServerOptions {
@@ -79,6 +80,8 @@ export interface ModelHitchServerOptions {
   defaultModel?: string;
   /** Dedicated image lane config, disabled by default. */
   imageGeneration?: ImageGenerationConfig;
+  /** Cursor Cloud Agent lane config, disabled by default. */
+  cloudAgent?: CloudAgentConfig;
   /** Image upstream fetch implementation. Primarily useful for deterministic tests. */
   imageFetch?: typeof fetch;
   /** Per-provider API key overrides, e.g. `{ 'vercel-ai-gateway': '…' }`. */
@@ -218,6 +221,7 @@ export class OpenAICompatibleServer {
   private usageTracker: UsageTracker;
   private ownsUsageTracker = false;
   private imageGeneration: ImageGenerationConfig | undefined;
+  private cloudAgent: CloudAgentConfig | undefined;
   private policy: Policy | undefined;
   private cooldown: LaneCooldown | undefined;
   private source: ProviderSource;
@@ -227,6 +231,7 @@ export class OpenAICompatibleServer {
     this.options = options;
     this.providers = options.providers ?? defaultProviders;
     this.imageGeneration = options.imageGeneration;
+    this.cloudAgent = options.cloudAgent;
     this.catalogSource = options.catalogSource;
     this.source = this.catalogSource ?? createRegistrySource(this.providers);
     this.policy = options.policy;
@@ -268,6 +273,7 @@ export class OpenAICompatibleServer {
     defaultProviderId?: string;
     defaultModel?: string;
     imageGeneration?: ImageGenerationConfig;
+    cloudAgent?: CloudAgentConfig;
     keystore?: KeyStore;
     staticModels?: Record<string, string[]>;
   }): void {
@@ -301,6 +307,10 @@ export class OpenAICompatibleServer {
     if (partial.imageGeneration !== undefined) {
       this.imageGeneration = partial.imageGeneration;
       this.options.imageGeneration = partial.imageGeneration;
+    }
+    if (partial.cloudAgent !== undefined) {
+      this.cloudAgent = partial.cloudAgent;
+      this.options.cloudAgent = partial.cloudAgent;
     }
     if (partial.keystore !== undefined) this.options.keystore = partial.keystore;
     if (partial.staticModels !== undefined) this.options.staticModels = partial.staticModels;
@@ -679,12 +689,15 @@ export class OpenAICompatibleServer {
     if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'messages' array.", { status: 400 });
     }
+    this.assertCloudAgentModel(body.model);
     const { provider, model } = routeModel(body.model, this.providers, this.options.defaultProviderId);
+    this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
-    const params = mapRequest(body, model);
+    let params = mapRequest(body, model);
     const incomingSession = extractSessionId(req.headers);
     if (incomingSession) params.sessionId = incomingSession;
     if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
+    params = this.prepareParamsForProvider(provider, params);
 
     if (body.stream === true) {
       this.log(`  -> ${provider.id}/${model} (stream)`);
@@ -695,7 +708,7 @@ export class OpenAICompatibleServer {
     this.log(`  -> ${provider.id}/${model}`);
     const startedAt = Date.now();
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params);
+    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
     );
@@ -733,7 +746,7 @@ export class OpenAICompatibleServer {
     });
 
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params, { streaming: true });
+    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params, { streaming: true });
     const usageInfo = { providerId: provider.id, model, wire: 'chat-completions' as const, streamed: true };
     const stream = this.trackStream(
       withFailoverStream(
@@ -854,12 +867,15 @@ export class OpenAICompatibleServer {
     if (!body || (!hasInput && !hasInstructions)) {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'input' array or 'instructions'.", { status: 400 });
     }
+    this.assertCloudAgentModel(body.model);
     const { provider, model } = routeModel(body.model, this.providers, this.options.defaultProviderId);
+    this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
-    const params = mapResponsesRequest(body, model);
+    let params = mapResponsesRequest(body, model);
     const incomingSession = extractSessionId(req.headers);
     if (incomingSession) params.sessionId = incomingSession;
     if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
+    params = this.prepareParamsForProvider(provider, params);
 
     // Stateful continuation: the client sliced prior turns out and references
     // them via previous_response_id. The bridge holds the state (zen rejects
@@ -899,7 +915,7 @@ export class OpenAICompatibleServer {
     this.log(`  -> ${provider.id}/${model} (responses)`);
     const startedAt = Date.now();
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params);
+    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
     );
@@ -929,7 +945,7 @@ export class OpenAICompatibleServer {
     });
 
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params, { streaming: true });
+    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params, { streaming: true });
     const usageInfo = { providerId: provider.id, model, wire: 'responses' as const, streamed: true };
     const stream = this.trackStream(
       withFailoverStream(
@@ -999,12 +1015,15 @@ export class OpenAICompatibleServer {
     if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'messages' array.", { status: 400 });
     }
+    this.assertCloudAgentModel(body.model);
     const { provider, model } = routeModel(body.model, this.providers, this.options.defaultProviderId);
+    this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
-    const params = mapAnthropicRequest(body, model);
+    let params = mapAnthropicRequest(body, model);
     const incomingSession = extractSessionId(req.headers);
     if (incomingSession) params.sessionId = incomingSession;
     if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
+    params = this.prepareParamsForProvider(provider, params);
 
     if (body.stream === true) {
       this.log(`  -> ${provider.id}/${model} (anthropic stream)`);
@@ -1015,7 +1034,7 @@ export class OpenAICompatibleServer {
     this.log(`  -> ${provider.id}/${model} (anthropic)`);
     const startedAt = Date.now();
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params);
+    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
     );
@@ -1043,7 +1062,7 @@ export class OpenAICompatibleServer {
     });
 
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params, { streaming: true });
+    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params, { streaming: true });
     const usageInfo = { providerId: provider.id, model, wire: 'messages' as const, streamed: true };
     const stream = this.trackStream(
       withFailoverStream(
@@ -1128,12 +1147,15 @@ export class OpenAICompatibleServer {
     }
     // The model lives in the URL path for the Google wire; body.model (if any)
     // is a fallback for clients that send it anyway.
+    this.assertCloudAgentModel(modelFromPath || body.model);
     const { provider, model } = routeModel(modelFromPath || body.model, this.providers, this.options.defaultProviderId);
+    this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
-    const params = mapGeminiRequest(body, model);
+    let params = mapGeminiRequest(body, model);
     const incomingSession = extractSessionId(req.headers);
     if (incomingSession) params.sessionId = incomingSession;
     if (this.options.defaultModel && !modelFromPath && !body.model) params.model = this.options.defaultModel;
+    params = this.prepareParamsForProvider(provider, params);
 
     if (stream) {
       this.log(`  -> ${provider.id}/${model} (gemini stream)`);
@@ -1144,7 +1166,7 @@ export class OpenAICompatibleServer {
     this.log(`  -> ${provider.id}/${model} (gemini)`);
     const startedAt = Date.now();
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params);
+    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
     );
@@ -1172,7 +1194,7 @@ export class OpenAICompatibleServer {
     });
 
     const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.resolveLaneTargets(provider.id, model))], params, { streaming: true });
+    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params, { streaming: true });
     const usageInfo = { providerId: provider.id, model, wire: 'gemini' as const, streamed: true };
     const stream = this.trackStream(
       withFailoverStream(
@@ -1280,6 +1302,45 @@ export class OpenAICompatibleServer {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  private assertCloudAgentModel(modelInput: string | undefined): void {
+    const model = modelInput?.trim();
+    if (!model?.startsWith(`${CURSOR_CLOUD_PROVIDER_ID}/`)) return;
+    if (!this.cloudAgent?.enabled) {
+      throw new ModelHitchError(
+        'bad-request',
+        'Cursor Cloud Agent lane is disabled. Enable cloudAgent in ~/.modelhitch/config.json and route explicitly as cursor-cloud/<model>.',
+        { status: 400, providerId: CURSOR_CLOUD_PROVIDER_ID },
+      );
+    }
+  }
+
+  private assertCloudAgentRoute(provider: Provider): void {
+    if (provider.id !== CURSOR_CLOUD_PROVIDER_ID) return;
+    if (!this.cloudAgent?.enabled) {
+      throw new ModelHitchError(
+        'bad-request',
+        'Cursor Cloud Agent lane is disabled. Enable cloudAgent in ~/.modelhitch/config.json and route explicitly as cursor-cloud/<model>.',
+        { status: 400, providerId: CURSOR_CLOUD_PROVIDER_ID },
+      );
+    }
+  }
+
+  /** Drop client-side tool definitions for cloud-agent runs (VM executes tools). */
+  private prepareParamsForProvider(provider: Provider, params: ChatParams): ChatParams {
+    if (provider.id !== CURSOR_CLOUD_PROVIDER_ID) return params;
+    const next: ChatParams = { ...params };
+    delete next.tools;
+    delete next.toolChoice;
+    return next;
+  }
+
+  /** No failover onto/off cloud-agent lanes unless the primary is already cursor-cloud. */
+  private async laneTargetsFor(provider: Provider, model: string): Promise<ResolvedLane[]> {
+    if (provider.id === CURSOR_CLOUD_PROVIDER_ID) return [];
+    const lanes = await this.resolveLaneTargets(provider.id, model);
+    return lanes.filter((lane) => lane.providerId !== CURSOR_CLOUD_PROVIDER_ID);
+  }
 
   /** Credential resolution: apiKeys option > keystore > provider env fallback. */
   private async resolveCredentials(providerId: string): Promise<ProviderCredentials> {

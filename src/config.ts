@@ -41,6 +41,26 @@ export type CooldownConfig =
   | ({ type: 'circuit-breaker' } & CircuitBreakerOptions)
   | ({ type: 'memory' } & MemoryLaneCooldownOptions);
 
+/** Repository target for Cursor Cloud Agent runs. */
+export interface CloudAgentRepoConfig {
+  url: string;
+  startingRef?: string;
+}
+
+/** Cursor Cloud Agent lane (disabled by default). */
+export interface CloudAgentConfig {
+  enabled: boolean;
+  /** Model id from GET /v1/models (e.g. composer-2.5). */
+  defaultModel?: string;
+  /** Required unless exactly one connected repo is cached from the API. */
+  repos?: CloudAgentRepoConfig[];
+  mode?: 'agent' | 'plan';
+  /** Locked false for Phase 1 — Cursor default branch/PR behavior only. */
+  autoCreatePR?: false;
+  workOnCurrentBranch?: boolean;
+  sessionReuse?: 'per-request' | 'per-bridge-session' | 'sticky-until-idle';
+}
+
 export interface ImageGenerationConfig {
   /** Enable the dedicated image generation lane. Disabled by default. */
   enabled: boolean;
@@ -69,6 +89,8 @@ export interface ModelHitchConfig {
   cooldown?: CooldownConfig;
   /** Dedicated image-generation lane (kind of like a special failover lane). */
   imageGeneration?: ImageGenerationConfig;
+  /** Cursor Cloud Agent lane (explicit cursor-cloud/… routes only). */
+  cloudAgent?: CloudAgentConfig;
   /** Per-provider API keys. Persisted locally; masked on read. */
   keys?: Record<string, string>;
 }
@@ -192,6 +214,49 @@ export function validateConfig(config: unknown): ConfigValidation {
         if (c.maxTripMs !== undefined && c.baseTripMs !== undefined && c.maxTripMs < c.baseTripMs) {
           errors.push('cooldown.maxTripMs must be >= cooldown.baseTripMs.');
         }
+      }
+    }
+  }
+
+  if (cfg.cloudAgent !== undefined) {
+    const c = cfg.cloudAgent;
+    if (!c || typeof c !== 'object') {
+      errors.push('cloudAgent must be an object.');
+    } else {
+      if (typeof c.enabled !== 'boolean') errors.push('cloudAgent.enabled must be a boolean.');
+      if (c.defaultModel !== undefined && (typeof c.defaultModel !== 'string' || !c.defaultModel.trim())) {
+        errors.push('cloudAgent.defaultModel must be a non-empty string when set.');
+      }
+      if (c.repos !== undefined) {
+        if (!Array.isArray(c.repos)) {
+          errors.push('cloudAgent.repos must be an array.');
+        } else {
+          for (const [i, repo] of c.repos.entries()) {
+            if (!repo || typeof repo !== 'object' || typeof repo.url !== 'string' || !repo.url.trim()) {
+              errors.push(`cloudAgent.repos[${i}].url must be a non-empty string.`);
+            }
+            if (repo.startingRef !== undefined && (typeof repo.startingRef !== 'string' || !repo.startingRef.trim())) {
+              errors.push(`cloudAgent.repos[${i}].startingRef must be a non-empty string when set.`);
+            }
+          }
+        }
+      }
+      if (c.enabled && (!c.repos || c.repos.length === 0)) {
+        warnings.push('cloudAgent.enabled is true but cloudAgent.repos is empty — a single connected repo may be used at runtime when cached.');
+      }
+      if (c.mode !== undefined && c.mode !== 'agent' && c.mode !== 'plan') {
+        errors.push('cloudAgent.mode must be "agent" or "plan".');
+      }
+      if (c.autoCreatePR !== undefined && c.autoCreatePR !== false) {
+        errors.push('cloudAgent.autoCreatePR must be false when set.');
+      }
+      if (
+        c.sessionReuse !== undefined &&
+        c.sessionReuse !== 'per-request' &&
+        c.sessionReuse !== 'per-bridge-session' &&
+        c.sessionReuse !== 'sticky-until-idle'
+      ) {
+        errors.push('cloudAgent.sessionReuse must be per-request, per-bridge-session, or sticky-until-idle.');
       }
     }
   }
