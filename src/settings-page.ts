@@ -200,6 +200,42 @@ export function settingsPageHtml(): string {
   </section>
 
   <section>
+    <div class="section-head"><h2>Cloud Agent lane</h2><span class="hint">disabled by default; explicit cursor-cloud/&lt;model&gt; routes only — bills Cursor usage</span></div>
+    <div class="panel">
+      <div class="warnbox">Requires CURSOR_API_KEY (stored as keys.cursor-cloud). Service-account keys: set CURSOR_API_KEY in the environment only.</div>
+      <div class="row" style="border-bottom:0">
+        <div class="grow">
+          <label>enabled</label>
+          <select id="cloudEnabled">
+            <option value="false">disabled</option>
+            <option value="true">enabled</option>
+          </select>
+        </div>
+        <div class="grow">
+          <label>default model</label>
+          <input id="cloudModel" type="text" placeholder="composer-2.5" />
+        </div>
+      </div>
+      <div class="row" style="border-bottom:0">
+        <div class="grow">
+          <label>repository url</label>
+          <input id="cloudRepoUrl" type="text" placeholder="https://github.com/org/repo" />
+        </div>
+        <div class="grow">
+          <label>starting ref</label>
+          <input id="cloudRepoRef" type="text" placeholder="main" />
+        </div>
+      </div>
+      <div class="row" style="border-bottom:0">
+        <div class="grow">
+          <label>CURSOR_API_KEY</label>
+          <input id="cloudApiKey" type="password" autocomplete="off" placeholder="(stored as keys.cursor-cloud)" />
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
     <div class="section-head"><h2>Policy</h2><span class="hint">trusted lanes first, fallback lanes after — the lane is the trust object</span></div>
     <div class="panel lane-list">
       <div class="lbl">trusted</div>
@@ -367,6 +403,7 @@ function collectKeys() {
     if (val) keys[providerId] = val;
     else if (existing[providerId]) keys[providerId] = existing[providerId]; // preserve untouched masked keys
   });
+  collectCloudAgentKey(keys);
   return keys;
 }
 
@@ -500,6 +537,44 @@ function renderImageGeneration() {
   el('imageQuality').disabled = image.providerId === 'gemini';
 }
 
+function renderCloudAgent() {
+  var cfg = state.config || {};
+  var cloud = cfg.cloudAgent || { enabled: false, defaultModel: 'composer-2.5', repos: [] };
+  var repo = (cloud.repos && cloud.repos[0]) || {};
+  el('cloudEnabled').value = String(!!cloud.enabled);
+  el('cloudModel').value = cloud.defaultModel || 'composer-2.5';
+  el('cloudRepoUrl').value = repo.url || '';
+  el('cloudRepoRef').value = repo.startingRef || '';
+  var hasKey = !!(cfg.keys && cfg.keys['cursor-cloud']);
+  el('cloudApiKey').placeholder = hasKey ? '(set — leave blank to keep)' : '(paste CURSOR_API_KEY)';
+  el('cloudApiKey').value = '';
+}
+
+function collectCloudAgent() {
+  var enabled = el('cloudEnabled').value === 'true';
+  var url = el('cloudRepoUrl').value.trim();
+  var ref = el('cloudRepoRef').value.trim();
+  var cfg = {
+    enabled: enabled,
+    defaultModel: el('cloudModel').value.trim() || 'composer-2.5',
+    repos: url ? [{ url: url, startingRef: ref || undefined }] : [],
+    mode: 'agent',
+    autoCreatePR: false,
+    workOnCurrentBranch: false,
+    sessionReuse: 'per-bridge-session'
+  };
+  if (!enabled) {
+    cfg.enabled = false;
+    if (url) cfg.repos = [{ url: url, startingRef: ref || undefined }];
+  }
+  return cfg;
+}
+
+function collectCloudAgentKey(keys) {
+  var val = el('cloudApiKey').value.trim();
+  if (val) keys['cursor-cloud'] = val;
+}
+
 function collectImageGeneration() {
   var enabled = el('imageEnabled').value === 'true';
   var cfg = {
@@ -615,6 +690,7 @@ function assemble() {
     catalog: catalogChoice ? { providers: catalogChoice, baseUrls: (cfg.catalog && cfg.catalog.baseUrls) || undefined, ttlMs: (cfg.catalog && cfg.catalog.ttlMs) || undefined } : undefined,
     cooldown: collectReliability(),
     imageGeneration: collectImageGeneration(),
+    cloudAgent: collectCloudAgent(),
     keys: collectKeys()
   };
 }
@@ -627,7 +703,7 @@ async function loadAll() {
     state.builtin = cat.builtin || [];
     var models = await api('/v1/models');
     state.models = models.data || [];
-    renderImageGeneration(); renderProviders(); renderCatalog(); renderPolicy(); renderReliability();
+    renderImageGeneration(); renderCloudAgent(); renderProviders(); renderCatalog(); renderPolicy(); renderReliability();
     refreshHealth();
   } catch (err) {
     showErrors(['Failed to load settings: ' + err.message]);

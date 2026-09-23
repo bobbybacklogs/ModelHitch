@@ -30,6 +30,14 @@ npx modelhitch stop
 | `GET /v1/usage`, `GET /usage` | Usage JSON and HTML dashboard |
 | `POST /v1/usage/reset` | Reset usage history |
 
+### Cursor Cloud Agent lane (opt-in)
+
+Disabled by default. When `cloudAgent.enabled` is true and `CURSOR_API_KEY` (or `keys.cursor-cloud`) is set, route explicitly as `cursor-cloud/<model>`. The bridge spawns or resumes agents via `https://api.cursor.com/v1`. Client `tools` are dropped on this route.
+
+```bash
+npx modelhitch bridge --cloud-agent-lane --cloud-agent-repo https://github.com/org/repo --cloud-agent-ref main
+```
+
 Use `http://127.0.0.1:3939/v1` for OpenAI-style clients. Use `http://127.0.0.1:3939` for clients that append Anthropic or Gemini paths.
 
 ## Claude Code

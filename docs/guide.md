@@ -393,6 +393,32 @@ then send OpenAI-shaped generation requests to `POST /v1/images/generations`. Re
 base64 image data in `data[].b64_json`. Hugging Face is intentionally not exposed by this lane
 because its text-to-image API uses a different request and raw-binary response contract.
 
+### Cursor Cloud Agent lane
+
+The Cloud Agent lane is disabled by default. When enabled, route explicitly as
+`cursor-cloud/<model>` (for example `cursor-cloud/composer-2.5`). The bridge calls
+`https://api.cursor.com/v1` directly — the same API Cursor's companion apps use.
+
+Enable via `/settings` (Cloud Agent lane section) or CLI:
+
+```bash
+export CURSOR_API_KEY="your-user-api-key"
+npx modelhitch bridge \
+  --cloud-agent-lane \
+  --cloud-agent-repo https://github.com/org/repo \
+  --cloud-agent-ref main \
+  --cloud-agent-model composer-2.5
+```
+
+Requirements:
+
+- `cloudAgent.enabled` must be `true`
+- `cloudAgent.repos[]` must include at least one repository URL (or exactly one connected repo cached from the API)
+- Store the user API key as `keys.cursor-cloud` in config or set `CURSOR_API_KEY` in the environment (service-account keys: env only)
+- Client-side `tools` in the wire request are dropped; the cloud VM runs its own tool surface
+
+There is no automatic routing to cloud agents in this release — use an explicit model prefix only.
+
 Environment controls:
 
 | Variable | Default | Purpose |

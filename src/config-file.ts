@@ -74,6 +74,15 @@ export function defaultConfigTemplate(): ModelHitchConfig {
     },
     cooldown: { type: 'circuit-breaker', failureThreshold: 3, baseTripMs: 15_000, maxTripMs: 120_000 },
     imageGeneration: { enabled: false, providerId: 'openai', model: 'gpt-image-2', quality: 'medium', size: '1024x1024' },
+    cloudAgent: {
+      enabled: false,
+      defaultModel: 'composer-2.5',
+      repos: [],
+      mode: 'agent',
+      autoCreatePR: false,
+      workOnCurrentBranch: false,
+      sessionReuse: 'per-bridge-session',
+    },
   };
 }
 

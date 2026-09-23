@@ -65,7 +65,10 @@ import { MemoryKeyStore } from './storage/memory.js';
 import { CircuitBreaker } from './core/circuit-breaker.js';
 import type { LaneCooldown } from './core/failover.js';
 import type { Provider } from './providers/types.js';
+import { bridgeProviders } from './bridge-providers.js';
 import { defaultProviders } from './registry.js';
+import { validateCursorCloudApiKey, CURSOR_CLOUD_PROVIDER_ID } from './providers/cursor-cloud.js';
+import { CursorCloudSessionStore } from './providers/cursor-cloud-session.js';
 
 /** Provider id → env vars checked (first hit wins) when seeding config.keys. */
 const PROVIDER_KEY_ENV: Record<string, string[]> = {
@@ -82,7 +85,10 @@ const PROVIDER_KEY_ENV: Record<string, string[]> = {
   mistral: ['MISTRAL_API_KEY'],
   moonshot: ['MOONSHOT_API_KEY'],
   zai: ['ZAI_API_KEY'],
+  'cursor-cloud': ['CURSOR_API_KEY'],
 };
+
+const cloudSessionStore = new CursorCloudSessionStore();
 
 /**
  * Load KEY=VALUE pairs from a dotenv-style file into process.env without
@@ -171,6 +177,11 @@ Usage:
   modelhitch bridge --no-image-lane               disable the image generation lane
   modelhitch bridge --image-provider openai       set the image lane provider (openai|gemini)
   modelhitch bridge --image-model gpt-image-2     set the default image model
+  modelhitch bridge --cloud-agent-lane            enable the Cursor Cloud Agent lane
+  modelhitch bridge --no-cloud-agent-lane         disable the Cursor Cloud Agent lane
+  modelhitch bridge --cloud-agent-repo <url>      set cloudAgent.repos[0].url
+  modelhitch bridge --cloud-agent-ref <ref>       set cloudAgent.repos[0].startingRef
+  modelhitch bridge --cloud-agent-model <id>      set cloudAgent.defaultModel
   modelhitch status                              is a background bridge running?
   modelhitch front                               stop the background one, run the bridge in this terminal
   modelhitch stop                                stop the background bridge
@@ -196,7 +207,21 @@ Bridge environment:
   MODELHITCH_HOST           host (default 127.0.0.1)
   MODELHITCH_MAX_BODY_BYTES max request body (default 64 MiB)
   Image generation is disabled by default; enable it via CLI flags or /settings.
+  Cursor Cloud Agent lane is disabled by default; route explicitly as cursor-cloud/<model> after enabling.
+  CURSOR_API_KEY (or keys.cursor-cloud) enables the lane; service-account keys via env only.
 `);
+}
+
+async function validateCloudAgentKey(config: ModelHitchConfig): Promise<void> {
+  if (!config.cloudAgent?.enabled) return;
+  const key = config.keys?.[CURSOR_CLOUD_PROVIDER_ID] ?? process.env.CURSOR_API_KEY;
+  if (!key) return;
+  try {
+    await validateCursorCloudApiKey(key);
+    console.log('Cursor Cloud Agent API key validated (GET /v1/me).');
+  } catch (err) {
+    console.warn(`Cursor Cloud Agent API key validation failed: ${(err as Error).message}`);
+  }
 }
 
 async function runBridge(): Promise<void> {
@@ -215,6 +240,10 @@ async function runBridge(): Promise<void> {
   const imageModel = flagValue('--image-model') ?? undefined;
   const imageQuality = flagValue('--image-quality') ?? undefined;
   const imageSize = flagValue('--image-size') ?? undefined;
+  const cloudFlag = argsHasFlag(['--cloud-agent-lane', '--cloud-agent']) ? true : argsHasFlag(['--no-cloud-agent-lane', '--no-cloud-agent']) ? false : undefined;
+  const cloudRepo = flagValue('--cloud-agent-repo') ?? undefined;
+  const cloudRef = flagValue('--cloud-agent-ref') ?? undefined;
+  const cloudModel = flagValue('--cloud-agent-model') ?? undefined;
 
   const loaded = readConfigFile(configPath); // null when none exists yet
   if (loaded) {
@@ -239,6 +268,21 @@ async function runBridge(): Promise<void> {
       size: imageSize ?? config.imageGeneration?.size ?? '1024x1024',
     };
   }
+  if (cloudFlag !== undefined || cloudRepo !== undefined || cloudRef !== undefined || cloudModel !== undefined) {
+    const existingRepos = config.cloudAgent?.repos ?? [];
+    const repoUrl = cloudRepo ?? existingRepos[0]?.url;
+    const startingRef = cloudRef ?? existingRepos[0]?.startingRef;
+    const repos = repoUrl ? [{ url: repoUrl, ...(startingRef ? { startingRef } : {}) }] : existingRepos;
+    config.cloudAgent = {
+      enabled: cloudFlag ?? config.cloudAgent?.enabled ?? false,
+      defaultModel: cloudModel ?? config.cloudAgent?.defaultModel ?? 'composer-2.5',
+      repos,
+      mode: config.cloudAgent?.mode ?? 'agent',
+      autoCreatePR: false,
+      workOnCurrentBranch: config.cloudAgent?.workOnCurrentBranch ?? false,
+      sessionReuse: config.cloudAgent?.sessionReuse ?? 'per-bridge-session',
+    };
+  }
   // Merge env-sourced keys so a bridge without a written keys block still works
   // (and the settings UI can show which providers already have credentials).
   config.keys = keysFromEnv(config.keys ?? {});
@@ -252,7 +296,7 @@ async function runBridge(): Promise<void> {
 
   // Catalog mode: warm the models.dev source, build the executable provider set.
   let catalogSource: CatalogSource | undefined;
-  let providers: Provider[] = defaultProviders;
+  let baseProviders: Provider[] = defaultProviders;
   let keystore = new MemoryKeyStore();
   const cooldown: LaneCooldown | undefined = buildCooldownFromConfig(config);
   const configCatalog = buildCatalogOptions(config);
@@ -261,19 +305,22 @@ async function runBridge(): Promise<void> {
     try {
       await src.warm();
       catalogSource = src;
-      providers = src.providers();
+      baseProviders = src.providers();
     } catch (err) {
       console.error(`Failed to load the models.dev catalog: ${(err as Error).message}`);
       process.exitCode = 1;
       return;
     }
   }
+  const providers = bridgeProviders(baseProviders, config, cloudSessionStore);
+  await validateCloudAgentKey(config);
 
   const server = createModelHitchServer({
     providers,
     defaultProviderId: config.defaultProviderId ?? 'vercel-ai-gateway',
     defaultModel: config.defaultModel,
     imageGeneration: config.imageGeneration,
+    cloudAgent: config.cloudAgent,
     maxBodyBytes,
     policy: policyFromConfig(config),
     cooldown,
@@ -316,19 +363,22 @@ async function runBridge(): Promise<void> {
         // Apply immediately — hot reload. Optional fields absent from the
         // incoming document must be cleared first: Object.assign alone would
         // keep stale values (e.g. a catalog block the UI just unchecked).
-        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'cooldown', 'imageGeneration'] as const) {
+        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'cooldown', 'imageGeneration', 'cloudAgent'] as const) {
           delete (config as unknown as Record<string, unknown>)[k];
         }
         Object.assign(config, asConfig);
+        config.keys = keysFromEnv(config.keys ?? {});
         try {
           const nextCatalog = buildCatalogOptions(config);
           const wantsCatalog = config.catalog !== undefined;
+          const applyProviders = (base: Provider[]) => bridgeProviders(base, config, cloudSessionStore);
           if (wantsCatalog && !catalogSource) {
             const src = createCatalogSource({ ...nextCatalog, registry: defaultProviders });
             await src.warm();
             catalogSource = src;
+            baseProviders = src.providers();
             server.reconfigure({
-              providers: src.providers(),
+              providers: applyProviders(baseProviders),
               policy: policyFromConfig(config),
               cooldown: buildCooldownFromConfig(config) ?? (catalogSource ? new CircuitBreaker() : undefined),
               catalogSource: src,
@@ -336,12 +386,14 @@ async function runBridge(): Promise<void> {
               defaultProviderId: config.defaultProviderId,
               defaultModel: config.defaultModel,
               imageGeneration: config.imageGeneration,
+              cloudAgent: config.cloudAgent,
             });
           } else if (!wantsCatalog && catalogSource) {
             // Catalog mode switched off — fall back to the built-in registry.
             catalogSource = undefined;
+            baseProviders = defaultProviders;
             server.reconfigure({
-              providers,
+              providers: applyProviders(baseProviders),
               policy: policyFromConfig(config),
               cooldown: buildCooldownFromConfig(config),
               catalogSource: undefined,
@@ -349,10 +401,12 @@ async function runBridge(): Promise<void> {
               defaultProviderId: config.defaultProviderId,
               defaultModel: config.defaultModel,
               imageGeneration: config.imageGeneration,
+              cloudAgent: config.cloudAgent,
             });
           } else {
+            const base = catalogSource ? catalogSource.providers() : baseProviders;
             server.reconfigure({
-              providers: catalogSource ? catalogSource.providers() : providers,
+              providers: applyProviders(base),
               policy: policyFromConfig(config),
               cooldown: buildCooldownFromConfig(config) ?? (catalogSource ? new CircuitBreaker() : undefined),
               apiKeys: config.keys,
@@ -360,8 +414,10 @@ async function runBridge(): Promise<void> {
               defaultProviderId: config.defaultProviderId,
               defaultModel: config.defaultModel,
               imageGeneration: config.imageGeneration,
+              cloudAgent: config.cloudAgent,
             });
           }
+          await validateCloudAgentKey(config);
         } catch (err) {
           return { ok: false, errors: [`Failed to apply config: ${(err as Error).message}`] };
         }
