@@ -171,6 +171,55 @@ export function settingsPageHtml(): string {
     <div class="panel" id="providers"></div>
   </section>
 
+  <section id="opencode-lanes">
+    <div class="section-head"><h2>OpenCode Lanes (Zen &amp; Go)</h2><span class="hint">dual-lane routing for OpenCode Zen (pay-per-use) and OpenCode Go (flat-rate) · auto-wires 4 protocols</span></div>
+    <div class="panel">
+      <div class="prov-head" style="margin-bottom:8px">
+        <span class="dot key-missing" id="opencodeDot"></span>
+        <span class="id">opencode / opencode-go</span>
+        <span class="name">OpenCode AI (Zen &amp; Go)</span>
+        <span class="badge">Zen · /zen/v1</span>
+        <span class="badge">Go · /zen/go/v1</span>
+      </div>
+      <div class="row" style="border-bottom:0">
+        <div class="grow" style="min-width:300px">
+          <label>OPENCODE_API_KEY (shared across Zen &amp; Go)</label>
+          <div class="prov-key" style="margin-top:2px">
+            <input type="password" id="opencodeKey" placeholder="(paste OPENCODE_API_KEY to enable)" autocomplete="off" />
+            <span class="env">OPENCODE_API_KEY</span>
+          </div>
+        </div>
+      </div>
+      <div class="row" style="border-bottom:0; margin-top:8px">
+        <div class="grow">
+          <label>Policy Presets</label>
+          <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:4px">
+            <button class="btn" type="button" id="addZenTrusted">+ Add Zen to Trusted</button>
+            <button class="btn" type="button" id="addGoTrusted">+ Add Go to Trusted</button>
+            <button class="btn" type="button" id="addZenFallback">+ Add Zen to Fallback</button>
+            <button class="btn" type="button" id="addGoFallback">+ Add Go to Fallback</button>
+            <button class="btn" type="button" id="setDefaultZen">Set Zen as Default</button>
+            <button class="btn" type="button" id="setDefaultGo">Set Go as Default</button>
+          </div>
+        </div>
+      </div>
+      <details style="margin-top:14px">
+        <summary>Wire routing reference &amp; model family breakdown (auto-detected)</summary>
+        <table style="margin-top:8px">
+          <thead>
+            <tr><th>Family</th><th>Example IDs</th><th>Wire endpoint</th><th>Format</th></tr>
+          </thead>
+          <tbody>
+            <tr><td class="mono">GPT, Grok, Muse Spark</td><td class="mono">gpt-5.5, gpt-5.3-codex, grok-4.7, muse-spark-1.3</td><td class="mono">POST /v1/responses</td><td>OpenAI Responses (Bearer)</td></tr>
+            <tr><td class="mono">Claude, Qwen</td><td class="mono">claude-sonnet-4-6, claude-opus-4-6, qwen3.7-max</td><td class="mono">POST /v1/messages</td><td>Anthropic Messages (Bearer)</td></tr>
+            <tr><td class="mono">Gemini</td><td class="mono">gemini-3-flash, gemini-3.7-flash</td><td class="mono">POST /v1/models/&lt;id&gt;:generateContent</td><td>Google AI (x-goog-api-key)</td></tr>
+            <tr><td class="mono">DeepSeek, GLM, Kimi, MiniMax, free</td><td class="mono">deepseek-v4-pro, glm-5.1, kimi-k2.6, big-pickle</td><td class="mono">POST /v1/chat/completions</td><td>OpenAI Chat (Bearer)</td></tr>
+          </tbody>
+        </table>
+      </details>
+    </div>
+  </section>
+
   <section>
     <div class="section-head"><h2>Image lane</h2><span class="hint">disabled by default; opt in when you want a dedicated image-generation route</span></div>
     <div class="panel">
@@ -444,7 +493,37 @@ function collectKeys() {
     else if (existing[providerId]) keys[providerId] = existing[providerId]; // preserve untouched masked keys
   });
   collectCloudAgentKey(keys);
+  collectOpenCodeKey(keys);
   return keys;
+}
+
+function renderOpenCode() {
+  var cfg = state.config || {};
+  var keys = cfg.keys || {};
+  var hasKey = !!(keys['opencode'] || keys['opencode-go']);
+  var dot = el('opencodeDot');
+  if (dot) {
+    dot.className = 'dot ' + (hasKey ? 'key-set' : 'key-missing');
+    dot.title = hasKey ? 'OpenCode API key stored locally' : 'No OpenCode API key yet';
+  }
+  var input = el('opencodeKey');
+  if (input) {
+    input.placeholder = hasKey ? '(set — leave blank to keep)' : '(paste OPENCODE_API_KEY to enable)';
+  }
+}
+
+function collectOpenCodeKey(keys) {
+  var input = el('opencodeKey');
+  if (!input) return;
+  var val = input.value.trim();
+  var existing = (state.config && state.config.keys) || {};
+  if (val) {
+    keys['opencode'] = val;
+    keys['opencode-go'] = val;
+  } else {
+    if (existing['opencode']) keys['opencode'] = existing['opencode'];
+    if (existing['opencode-go']) keys['opencode-go'] = existing['opencode-go'];
+  }
 }
 
 // ---- catalog (advanced) --------------------------------------------------
@@ -800,7 +879,7 @@ async function loadAll() {
     state.builtin = cat.builtin || [];
     var models = await api('/v1/models');
     state.models = models.data || [];
-    renderImageGeneration(); renderCloudAgent(); renderWorkspaceTarget(); renderProviders(); renderCatalog(); renderPolicy(); renderReliability();
+    renderImageGeneration(); renderCloudAgent(); renderWorkspaceTarget(); renderProviders(); renderOpenCode(); renderCatalog(); renderPolicy(); renderReliability();
     refreshHealth();
   } catch (err) {
     showErrors(['Failed to load settings: ' + err.message]);
@@ -893,6 +972,48 @@ document.addEventListener('keydown', function (ev) {
     t.value = '';
   }
 });
+function setupOpenCodeListeners() {
+  function addLane(providerId, models, group) {
+    var box = el(group + '-lanes');
+    if (!box) return;
+    var empty = box.querySelector('.empty');
+    if (empty) empty.remove();
+    box.appendChild(laneRow({ providerId: providerId, models: models }, group));
+  }
+
+  var az = el('addZenTrusted');
+  if (az) az.addEventListener('click', function () {
+    addLane('opencode', ['deepseek-v4-pro', 'claude-sonnet-4-6', 'gpt-5.5'], 'trusted');
+  });
+  var ag = el('addGoTrusted');
+  if (ag) ag.addEventListener('click', function () {
+    addLane('opencode-go', ['deepseek-v4-pro'], 'trusted');
+  });
+  var azf = el('addZenFallback');
+  if (azf) azf.addEventListener('click', function () {
+    addLane('opencode', ['deepseek-v4-pro'], 'fallback');
+  });
+  var agf = el('addGoFallback');
+  if (agf) agf.addEventListener('click', function () {
+    addLane('opencode-go', ['deepseek-v4-pro'], 'fallback');
+  });
+  var sdz = el('setDefaultZen');
+  if (sdz) sdz.addEventListener('click', function () {
+    var dp = el('defaultProviderId');
+    if (dp) dp.value = 'opencode';
+    var dm = el('defaultModel');
+    if (dm) dm.value = 'deepseek-v4-pro';
+  });
+  var sdg = el('setDefaultGo');
+  if (sdg) sdg.addEventListener('click', function () {
+    var dp = el('defaultProviderId');
+    if (dp) dp.value = 'opencode-go';
+    var dm = el('defaultModel');
+    if (dm) dm.value = 'deepseek-v4-pro';
+  });
+}
+
+setupOpenCodeListeners();
 setInterval(refreshHealth, 5000);
 loadAll();
 </script>

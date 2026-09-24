@@ -424,6 +424,25 @@ function renderDetail() {
         return '<span class="pill">' + esc(pair[0]) + " · " + fmtI(pair[1].requests) + "</span>";
       }).join("")
     : "";
+
+  var zenTotals = (slice.perProvider && slice.perProvider["opencode"]) ? slice.perProvider["opencode"] : { requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, latencyMs: 0 };
+  var goTotals = (slice.perProvider && slice.perProvider["opencode-go"]) ? slice.perProvider["opencode-go"] : { requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, latencyMs: 0 };
+  var openCodeModels = modelRows.filter(function (pair) {
+    return pair[0].indexOf("opencode/") === 0 || pair[0].indexOf("opencode-go/") === 0;
+  });
+  var openCodeModelsHtml = openCodeModels.length
+    ? openCodeModels.map(function (pair) {
+        var v = pair[1];
+        var isGo = pair[0].indexOf("opencode-go/") === 0;
+        return "<tr><td class=\"mono\">" + esc(pair[0]) + "</td>" +
+          "<td><span class=\"pill " + (isGo ? "" : "warn") + "\">" + (isGo ? "Go · flat-rate" : "Zen · pay-per-use") + "</span></td>" +
+          "<td>" + fmtI(v.requests) + "</td>" +
+          "<td>" + fmtI(v.totalTokens) + "</td>" +
+          "<td>" + (isGo ? "$0 (flat-rate)" : fmtMoney(v.costUsd)) + "</td>" +
+          "<td>" + fmtMs(avgMs(v)) + "</td></tr>";
+      }).join("")
+    : '<tr><td colspan="6" class="empty-state">No OpenCode requests in this range yet — route models via <span class="mono">opencode/&lt;model&gt;</span> (Zen) or <span class="mono">opencode-go/&lt;model&gt;</span> (Go)</td></tr>';
+
   el("detail").innerHTML =
     '<p class="lede">' + esc(spec.label) + " · " + esc(since) + esc(persist) +
     ". Estimated from list prices. Models without a price count as $0. No quota.</p>" +
@@ -435,6 +454,26 @@ function renderDetail() {
       '<div class="stat"><div class="k">Avg latency</div><div class="v">' + fmtMs(avgMs(totals)) + "</div></div>" +
     "</div>" +
     (wires ? '<div class="wires">' + wires + "</div>" : "") +
+    '<div class="panel"><h2>OpenCode Lanes (Zen &amp; Go)</h2>' +
+      '<div class="stats" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin: 8px 0;">' +
+        '<div class="stat">' +
+          '<div class="k">Zen (pay-per-use)</div><div class="v">' + fmtMoney(zenTotals.costUsd) + '</div>' +
+          '<div class="meta" style="color:var(--muted); font-size:11px; margin-top:2px;">' +
+            fmtI(zenTotals.requests) + ' req · ' + fmtI(zenTotals.inputTokens + zenTotals.outputTokens) + ' tok · ' + (zenTotals.requests ? fmtMs(avgMs(zenTotals)) : '0 ms') + ' avg</div>' +
+        '</div>' +
+        '<div class="stat">' +
+          '<div class="k">Go (flat-rate)</div><div class="v">' + fmtI(goTotals.requests) + ' req</div>' +
+          '<div class="meta" style="color:var(--ok); font-size:11px; margin-top:2px;">$0 marginal cost · ' +
+            fmtI(goTotals.inputTokens + goTotals.outputTokens) + ' tok · ' + (goTotals.requests ? fmtMs(avgMs(goTotals)) : '0 ms') + ' avg</div>' +
+        '</div>' +
+        '<div class="stat">' +
+          '<div class="k">OpenCode Status</div><div class="v" style="font-size:14px; margin-top:6px; color:var(--ok)">Dual-lane active</div>' +
+          '<div class="meta" style="color:var(--muted); font-size:11px; margin-top:2px;">Zen (/zen/v1) · Go (/zen/go/v1)</div>' +
+        '</div>' +
+      '</div>' +
+      '<table><thead><tr><th>OpenCode Model</th><th>Lane</th><th>Requests</th><th>Tokens</th><th>Est. cost</th><th>Avg</th></tr></thead><tbody>' +
+        openCodeModelsHtml + '</tbody></table>' +
+    '</div>' +
     '<div class="panel"><h2>Providers</h2><table><thead><tr><th>Provider</th><th>Requests</th><th>Tokens in / out</th><th>Est. cost</th><th>Avg</th></tr></thead><tbody>' +
       body + "</tbody></table></div>" +
     '<div class="panel"><h2>Models</h2><table><thead><tr><th>Model</th><th>Requests</th><th>Tokens</th><th>Est. cost</th><th>Avg</th></tr></thead><tbody>' +
