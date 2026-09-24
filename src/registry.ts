@@ -12,6 +12,8 @@ import {
   mockProvider,
   moonshot,
   ollama,
+  opencode,
+  opencodeGo,
   openai,
   openrouter,
   vercelAiGateway,
@@ -24,6 +26,8 @@ import {
 /** The providers that ship with ModelHitch out of the box. */
 export const defaultProviders: Provider[] = [
   vercelAiGateway,
+  opencode,
+  opencodeGo,
   openai,
   anthropic,
   groq,

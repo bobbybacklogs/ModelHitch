@@ -36,4 +36,16 @@ export {
   type SseEvent,
 } from './cursor-cloud.js';
 export { CursorCloudSessionStore } from './cursor-cloud-session.js';
+export {
+  opencode,
+  opencodeGo,
+  createOpenCodeProvider,
+  detectOpenCodeWire,
+  OPENCODE_ZEN_BASE_URL,
+  OPENCODE_GO_BASE_URL,
+  OPENCODE_DEFAULT_MODEL,
+  OPENCODE_SNAPSHOT_MODELS,
+  type OpenCodeProviderOptions,
+  type OpenCodeWire,
+} from './opencode.js';
 export type { Provider, ModelInfo } from './types.js';

@@ -6,6 +6,8 @@ describe('defaultProviders registry', () => {
     const ids = defaultProviders.map((p) => p.id);
     const expected = [
       'vercel-ai-gateway',
+      'opencode',
+      'opencode-go',
       'openai',
       'anthropic',
       'groq',

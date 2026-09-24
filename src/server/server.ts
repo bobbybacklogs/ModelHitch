@@ -564,7 +564,7 @@ export class OpenAICompatibleServer {
           providers.push({
             id: meta.id,
             name: meta.name,
-            env: meta.env.length ? meta.env : undefined,
+            env: meta.env.length ? meta.env : (providerEnvHints(meta.id).length ? providerEnvHints(meta.id) : undefined),
             modelCount: meta.models.length || undefined,
             minCost: priced.length ? Math.min(...priced) : undefined,
             callable,
@@ -1706,6 +1706,8 @@ function providerEnvHints(providerId: string): string[] {
     mistral: ['MISTRAL_API_KEY'],
     moonshot: ['MOONSHOT_API_KEY'],
     zai: ['ZAI_API_KEY'],
+    opencode: ['OPENCODE_API_KEY'],
+    'opencode-go': ['OPENCODE_API_KEY'],
   };
   return map[providerId] ?? [];
 }

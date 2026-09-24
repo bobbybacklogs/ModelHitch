@@ -42,10 +42,58 @@ import principle_subtract_before_you_add from '../plugins/zstack/skills/zstack/p
 import principle_type_system_discipline from '../plugins/zstack/skills/zstack/principles/type-system-discipline.md';
 
 // References
-import raw_reference_evidence_schema from '../plugins/zstack/skills/zstack/references/evidence-schema.json';
-const reference_evidence_schema = typeof raw_reference_evidence_schema === 'string'
-  ? raw_reference_evidence_schema
-  : JSON.stringify(raw_reference_evidence_schema, null, 2);
+const reference_evidence_schema = JSON.stringify(
+  {
+    $schema: 'http://json-schema.org/draft-07/schema#',
+    title: 'ZStackVerificationEvidence',
+    type: 'object',
+    required: ['timestamp', 'task', 'status', 'checks'],
+    properties: {
+      timestamp: {
+        type: 'string',
+        format: 'date-time',
+      },
+      task: {
+        type: 'string',
+        description: 'Short description of the task or feature verified',
+      },
+      status: {
+        type: 'string',
+        enum: ['passed', 'failed', 'partially_verified'],
+      },
+      principlesCited: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'List of principles that guided the verification decisions',
+      },
+      checks: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['name', 'command', 'passed', 'exitCode'],
+          properties: {
+            name: { type: 'string' },
+            command: { type: 'string' },
+            passed: { type: 'boolean' },
+            exitCode: { type: 'integer' },
+            durationMs: { type: 'number' },
+            outputSnippet: { type: 'string' },
+          },
+        },
+      },
+      metrics: {
+        type: 'object',
+        properties: {
+          modelUsed: { type: 'string' },
+          tokenUsage: { type: 'integer' },
+          latencyMs: { type: 'number' },
+        },
+      },
+    },
+  },
+  null,
+  2,
+);
 
 import reference_feature_map_template from '../plugins/zstack/skills/zstack/references/feature-map.template.md';
 import reference_README from '../plugins/zstack/skills/zstack/references/README.md';
