@@ -63,4 +63,21 @@ describe('skill installer', () => {
 
     expect(readFileSync(join(first!.path, 'SKILL.md'), 'utf8')).toContain('# ModelHitch');
   });
+
+  it('installs zstack and setup-zstack workflow skills across agents', () => {
+    const homeDir = temporaryDirectory();
+    const results = installSkills({ target: 'all', package: 'zstack', homeDir });
+
+    expect(results).toHaveLength(8); // 4 agents * 2 skills (zstack + setup-zstack)
+    const cursorZstack = results.find((r) => r.agent === 'cursor' && r.path.endsWith('zstack'));
+    expect(cursorZstack).toBeDefined();
+    expect(readFileSync(join(cursorZstack!.path, 'SKILL.md'), 'utf8')).toContain('name: z-mode');
+    expect(existsSync(join(cursorZstack!.path, 'playbooks', 'feature.md'))).toBe(true);
+    expect(existsSync(join(cursorZstack!.path, 'principles', 'prove-it-works.md'))).toBe(true);
+    expect(existsSync(join(cursorZstack!.path, 'references', 'evidence-schema.json'))).toBe(true);
+
+    const cursorSetup = results.find((r) => r.agent === 'cursor' && r.path.endsWith('setup-zstack'));
+    expect(cursorSetup).toBeDefined();
+    expect(readFileSync(join(cursorSetup!.path, 'SKILL.md'), 'utf8')).toContain('name: setup-zstack');
+  });
 });
