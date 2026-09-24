@@ -3,11 +3,11 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 describe('release scripts', () => {
-  it('package.json version is 2.2.1', () => {
+  it('package.json version is 2.3.0', () => {
     const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '../package.json'), 'utf8')) as {
       version: string;
     };
-    expect(pkg.version).toBe('2.2.1');
+    expect(pkg.version).toBe('2.3.0');
   });
 
   it('verify typechecks, then builds dist before tests so CLI integration uses a fresh binary', () => {

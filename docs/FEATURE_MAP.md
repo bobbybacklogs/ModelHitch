@@ -2,7 +2,7 @@
 
 Truthful inventory of the **core TypeScript package** (`package.json` `"name": "modelhitch"`, CLI bin `modelhitch`). README and `docs/guide.md` are hints. Grades come from source and the default verify gate, not marketing copy.
 
-Generated against package version **2.2.1**. Re-grade after material API or test changes.
+Generated against package version **2.3.0**. Re-grade after material API or test changes.
 
 ## Grades
 
