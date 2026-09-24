@@ -61,6 +61,7 @@ Same provider-neutral types for chat, streaming, tools, custom providers, and Re
 
 ```bash
 npx modelhitch setup codex    # claude | cursor | vscode | all
+npx modelhitch setup zstack   # install zstack workflow across agents
 ```
 
 Defaults to a personal install. Add `--project`, `--dry-run`, or `--force` as needed.

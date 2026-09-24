@@ -9,6 +9,7 @@ import type { Capabilities } from '../core/types.js';
 import type { Provider } from '../providers/types.js';
 import type { ProviderSource } from '../core/policy.js';
 import { createOpenAICompatibleProvider, type OpenAICompatibleConfig } from '../providers/openai-compatible.js';
+import { OPENCODE_SNAPSHOT_MODELS } from '../providers/opencode.js';
 
 /**
  * Milestone 2 — models.dev catalog integration.
@@ -204,8 +205,21 @@ export function createCatalogSource(options: CatalogSourceOptions = {}): Catalog
       metaById.clear();
       for (const m of providerList) metaById.set(m.id, m);
       for (const p of registry) {
-        if (!metaById.has(p.id)) {
-          metaById.set(p.id, { id: p.id, name: p.name, env: [], models: [] });
+        let entry = metaById.get(p.id);
+        if (!entry) {
+          entry = { id: p.id, name: p.name, env: [], models: [] };
+          metaById.set(p.id, entry);
+        }
+        if ((p.id === 'opencode' || p.id === 'opencode-go') && entry.models.length === 0) {
+          const zenMeta = metaById.get('opencode');
+          if (zenMeta && zenMeta.models.length > 0 && p.id === 'opencode-go') {
+            entry.models = [...zenMeta.models];
+          } else {
+            entry.models = OPENCODE_SNAPSHOT_MODELS.map((id) => ({ id, name: id }));
+          }
+          if (entry.env.length === 0) {
+            entry.env = ['OPENCODE_API_KEY'];
+          }
         }
       }
 

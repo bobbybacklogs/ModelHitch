@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "zstack",
+  "version": "1.0.0",
+  "description": "Verification-first agent operating system powered by OpenCode Zen and OpenCode Go via ModelHitch.",
+  "author": {
+    "name": "Geno Ventures Labs",
+    "url": "https://github.com/genoventures-labs"
+  },
+  "homepage": "https://github.com/bobbybacklogs/zstack#readme",
+  "repository": "https://github.com/bobbybacklogs/zstack",
+  "license": "MIT",
+  "keywords": ["ai", "agents", "pstack", "poteto-mode", "opencode", "verification", "workflow"]
+}

@@ -172,6 +172,7 @@ Usage:
   modelhitch workspace                           open the running bridge /workspace page in a browser
 
   modelhitch setup <agent>                       install agent skills (codex, claude, cursor, vscode, or all)
+  modelhitch setup zstack [agent]                install zstack workflow skills (default: all agents)
 
   modelhitch chat                                send a prompt through a bridge chat session
   modelhitch work                                run a one-shot work order on the bridge
@@ -199,9 +200,11 @@ Bridge flags (with \`bridge\` and \`bridge --background\`):
   --cloud-agent-ref <ref>        cloudAgent.repos[0].startingRef
   --cloud-agent-model <id>       cloudAgent.defaultModel (default composer-2.5)
 
-Setup options (with \`setup <agent>\`):
+Setup options (with \`setup <agent>\` or \`setup zstack [agent]\`):
   modelhitch setup codex                         install to the agent user skill directory
   modelhitch setup all --project                 install project skills for all four agents
+  modelhitch setup zstack                        install zstack workflow to all four agents
+  modelhitch setup zstack cursor --project       install zstack in current project for Cursor
   --project                                      install in the current project instead of user home
   --dry-run                                      show destinations without writing
   --force                                        overwrite files in existing skill directories
@@ -553,22 +556,38 @@ async function runStop(): Promise<void> {
 }
 
 function runSetup(args: string[]): void {
-  const target = args[0];
-  if (!target || !SETUP_TARGETS.includes(target as SetupTarget)) {
-    throw new Error('Choose an agent: codex, claude, cursor, vscode, or all.');
+  let pkg: 'modelhitch' | 'zstack' = 'modelhitch';
+  let targetArg: string | undefined = args[0];
+  let remainingArgs = args.slice(1);
+
+  if (targetArg === 'zstack') {
+    pkg = 'zstack';
+    const next = remainingArgs[0];
+    if (next && SETUP_TARGETS.includes(next as SetupTarget)) {
+      targetArg = next;
+      remainingArgs = remainingArgs.slice(1);
+    } else {
+      targetArg = 'all';
+    }
+  }
+
+  if (!targetArg || !SETUP_TARGETS.includes(targetArg as SetupTarget)) {
+    throw new Error('Choose an agent: codex, claude, cursor, vscode, all (or run: modelhitch setup zstack [agent]).');
   }
   const known = new Set(['--project', '--dry-run', '--force']);
-  const unknown = args.slice(1).filter((arg) => !known.has(arg));
+  const unknown = remainingArgs.filter((arg) => !known.has(arg));
   if (unknown.length > 0) throw new Error(`Unknown setup option: ${unknown[0]}`);
 
-  const dryRun = args.includes('--dry-run');
+  const dryRun = remainingArgs.includes('--dry-run');
   const installed = installSkills({
-    target: target as SetupTarget,
-    scope: args.includes('--project') ? 'project' : 'user',
-    force: args.includes('--force'),
+    target: targetArg as SetupTarget,
+    package: pkg,
+    scope: remainingArgs.includes('--project') ? 'project' : 'user',
+    force: remainingArgs.includes('--force'),
     dryRun,
   });
-  console.log(dryRun ? 'ModelHitch would install:' : 'ModelHitch skills installed:');
+  const label = pkg === 'zstack' ? 'zstack' : 'ModelHitch';
+  console.log(dryRun ? `${label} would install:` : `${label} skills installed:`);
   for (const skill of installed) console.log(`  ${skill.agent.padEnd(7)} ${skill.path}`);
   if (!dryRun) console.log('\nRestart the agent or open a new session so it discovers the skill.');
 }

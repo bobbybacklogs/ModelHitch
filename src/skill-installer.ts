@@ -7,14 +7,18 @@ import claudeIntegrateSkill from '../.claude/skills/modelhitch-integrate/SKILL.m
 import claudeIntegrateReference from '../.claude/skills/modelhitch-integrate/references/api-reference.md';
 import claudeBridgeSkill from '../.claude/skills/modelhitch-bridge/SKILL.md';
 import claudeBridgeReference from '../.claude/skills/modelhitch-bridge/references/operations-reference.md';
+import { zstackSkillFiles, setupZstackSkillFiles } from './zstack-template.js';
 
 export const SETUP_TARGETS = ['codex', 'claude', 'cursor', 'vscode', 'all'] as const;
+export const SETUP_PACKAGES = ['modelhitch', 'zstack'] as const;
 
 export type SetupTarget = (typeof SETUP_TARGETS)[number];
+export type SetupPackage = (typeof SETUP_PACKAGES)[number];
 export type SetupScope = 'user' | 'project';
 
 export interface InstallSkillsOptions {
   target: SetupTarget;
+  package?: SetupPackage;
   scope?: SetupScope;
   force?: boolean;
   dryRun?: boolean;
@@ -58,6 +62,17 @@ const claudeSkills: SkillTemplate[] = [
   },
 ];
 
+const zstackTemplates: SkillTemplate[] = [
+  {
+    name: 'zstack',
+    files: zstackSkillFiles,
+  },
+  {
+    name: 'setup-zstack',
+    files: setupZstackSkillFiles,
+  },
+];
+
 const userRoots = {
   codex: ['.codex', 'skills'],
   claude: ['.claude', 'skills'],
@@ -78,10 +93,16 @@ function agentsFor(target: SetupTarget): Array<Exclude<SetupTarget, 'all'>> {
 
 export function installSkills(options: InstallSkillsOptions): InstalledSkill[] {
   const scope = options.scope ?? 'user';
+  const pkg = options.package ?? 'modelhitch';
   const base = scope === 'user' ? (options.homeDir ?? homedir()) : (options.projectDir ?? process.cwd());
   const roots = scope === 'user' ? userRoots : projectRoots;
   const planned = agentsFor(options.target).flatMap((agent) => {
-    const templates = agent === 'claude' ? claudeSkills : [shared];
+    let templates: SkillTemplate[];
+    if (pkg === 'zstack') {
+      templates = zstackTemplates;
+    } else {
+      templates = agent === 'claude' ? claudeSkills : [shared];
+    }
     return templates.map((template) => {
       const path = join(base, ...roots[agent], template.name);
       return { agent, path, template };

@@ -72,6 +72,8 @@ export interface AnthropicProviderOptions {
    * Keep `false` on the server — this header is a footgun outside the browser.
    */
   dangerouslyAllowBrowser?: boolean;
+  /** Auth header scheme: "x-api-key" (default Anthropic) or "bearer" (Authorization: Bearer <key>). */
+  authScheme?: 'x-api-key' | 'bearer';
   /** Extra headers merged into every request (parity with `OpenAICompatibleConfig.headers`). */
   headers?: Record<string, string>;
   fetchImpl?: typeof fetch;
@@ -92,6 +94,7 @@ export class AnthropicProvider implements Provider {
   private readonly messagesPath: string;
   private readonly apiKeyEnvVar: string;
   private readonly apiKeyEnvFallbacks: string[];
+  private readonly authScheme: 'x-api-key' | 'bearer';
   private readonly dangerouslyAllowBrowser: boolean;
   private readonly headers: Record<string, string> | undefined;
   private readonly fetchImpl: typeof fetch;
@@ -104,6 +107,7 @@ export class AnthropicProvider implements Provider {
     this.messagesPath = opts.messagesPath ?? '/messages';
     this.apiKeyEnvVar = opts.apiKeyEnvVar ?? 'ANTHROPIC_API_KEY';
     this.apiKeyEnvFallbacks = opts.apiKeyEnvFallbacks ?? [];
+    this.authScheme = opts.authScheme ?? 'x-api-key';
     this.dangerouslyAllowBrowser = opts.dangerouslyAllowBrowser ?? false;
     this.headers = opts.headers;
     this.capabilities = {
@@ -256,10 +260,14 @@ export class AnthropicProvider implements Provider {
     const apiKey = this.resolveApiKey(credentials);
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
       ...this.headers,
     };
+    if (this.authScheme === 'bearer') {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    } else {
+      headers['x-api-key'] = apiKey;
+    }
     const sessionId = params.sessionId;
     if (sessionId) {
       if (!headers['x-session-id']) headers['x-session-id'] = sessionId;
