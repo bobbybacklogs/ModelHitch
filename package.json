@@ -7,7 +7,8 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "modelhitch": "dist/cli.js"
+    "modelhitch": "dist/cli.js",
+    "modelhitch-harness": "dist/harness-cli.js"
   },
   "exports": {
     ".": {
@@ -52,6 +53,8 @@
     "example": "tsx examples/quickstart.ts",
     "bridge": "tsx examples/studio-bridge.ts",
     "canary": "tsx examples/canary.ts",
+    "harness": "tsx harness/cli.ts",
+    "harness:tui": "bun harness/cli.ts",
     "prepublishOnly": "npm run verify",
     "gh-release": "node scripts/gh-release.mjs",
     "release": "npm version patch && npm publish && git push origin main --tags && npm run gh-release",

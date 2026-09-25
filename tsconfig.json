@@ -14,6 +14,6 @@
     "sourceMap": true,
     "outDir": "dist"
   },
-  "include": ["src", "examples", "tests"],
+  "include": ["src", "examples", "tests", "harness"],
   "exclude": ["examples/byok-ui", "examples/expo-app", "expo-sdk", "electron-sdk"]
 }
