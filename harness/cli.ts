@@ -111,6 +111,9 @@ async function main(): Promise<void> {
   console.log(
     `[harness] config=${runtime.configPath} playbook=${ctx.playbook} model=${runtime.provider}/${runtime.model}`,
   );
+  // Cheap: loadBihan() is a path check plus a cached import.
+  const { describeSubagents } = await import('./subagents.js');
+  console.log(`[harness] ${await describeSubagents()}`);
 
   let turns = 0;
   for await (const ev of streamHarness(prompt, harnessOpts)) {

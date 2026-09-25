@@ -631,7 +631,7 @@ export async function executeHarnessTool(
         return await runOpencode(strArg(args, 'message'), { model, agent, timeoutMs }, workspaceDir);
       }
       default:
-        return `Error: unknown tool "${name}". Available: read, write, edit, bash, agy, gh, opencode.`;
+        return `Error: unknown tool "${name}". Available: ${HARNESS_TOOLS.map((t) => t.name).join(', ')}.`;
     }
   } catch (err) {
     return `Error: ${err instanceof Error ? err.message : String(err)}`;

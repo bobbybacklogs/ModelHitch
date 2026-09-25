@@ -3,6 +3,7 @@ import type { ModelMessage } from '../src/index.js';
 import { HARNESS_TOOLS, executeHarnessTool } from './tools.js';
 import { buildSystemPrompt } from './prompt.js';
 import { loadHarnessRuntime } from './runtime.js';
+import { createSubagentRoster } from './subagents.js';
 
 export interface HarnessOptions {
   /** Per-run override in `<provider>/<model>` form (mirrors `modelhitch chat --model`). */
@@ -43,12 +44,23 @@ export async function* streamHarness(
     { role: 'user', content: prompt },
   ];
 
+  // Subagent delegation, when bihan is resolvable. It shares this runtime's
+  // ModelHitch client, so delegated work stays inside the same policy,
+  // failover, and cooldown rather than opening an unmanaged provider path.
+  const subagents = await createSubagentRoster(runtime.client, {
+    model: `${runtime.provider}/${runtime.model}`,
+    workspaceDir,
+  });
+  const tools = subagents ? [...HARNESS_TOOLS, subagents.tool] : HARNESS_TOOLS;
+
   const execute = async (name: string, args: Record<string, unknown>): Promise<string> =>
-    executeHarnessTool(name, args, { workspaceDir });
+    subagents && name === subagents.tool.name
+      ? await subagents.execute(args)
+      : executeHarnessTool(name, args, { workspaceDir });
 
   yield* runToolLoop(
     runtime.client,
-    { provider: runtime.provider, model: runtime.model, messages, tools: HARNESS_TOOLS },
+    { provider: runtime.provider, model: runtime.model, messages, tools },
     execute,
     { maxTurns: options.maxTurns ?? 8 },
   );
