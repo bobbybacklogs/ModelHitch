@@ -14,6 +14,8 @@ export interface HarnessOptions {
   extraSystem?: string;
   noZstack?: boolean;
   workspaceDir?: string;
+  /** Folder of `<name>/agent.md` subagent definitions. `null` disables it. */
+  agentsDir?: string | null;
 }
 
 export interface HarnessResult {
@@ -47,15 +49,17 @@ export async function* streamHarness(
   // Subagent delegation, when bihan is resolvable. It shares this runtime's
   // ModelHitch client, so delegated work stays inside the same policy,
   // failover, and cooldown rather than opening an unmanaged provider path.
+  // The roster is a folder of agent definitions when one is available.
   const subagents = await createSubagentRoster(runtime.client, {
     model: `${runtime.provider}/${runtime.model}`,
     workspaceDir,
+    ...(options.agentsDir !== undefined ? { agentsDir: options.agentsDir } : {}),
   });
-  const tools = subagents ? [...HARNESS_TOOLS, subagents.tool] : HARNESS_TOOLS;
+  const tools = subagents ? [...HARNESS_TOOLS, ...subagents.tools] : HARNESS_TOOLS;
 
   const execute = async (name: string, args: Record<string, unknown>): Promise<string> =>
-    subagents && name === subagents.tool.name
-      ? await subagents.execute(args)
+    subagents && subagents.ownsTool(name)
+      ? await subagents.execute(name, args)
       : executeHarnessTool(name, args, { workspaceDir });
 
   yield* runToolLoop(

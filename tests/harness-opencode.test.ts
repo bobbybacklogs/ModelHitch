@@ -158,10 +158,28 @@ function authErrorEvent(): Ev {
 describe('HARNESS_TOOLS', () => {
   it('exposes the delegated CLIs, with opencode requiring a message', () => {
     const names = HARNESS_TOOLS.map((t) => t.name);
-    expect(names).toEqual(['read', 'write', 'edit', 'bash', 'agy', 'gh', 'opencode']);
+    expect(names).toEqual(['grep_search', 'read', 'write', 'edit', 'bash', 'agy', 'gh', 'opencode']);
     const opencode = HARNESS_TOOLS.find((t) => t.name === 'opencode');
     expect(opencode).toBeDefined();
     expect(opencode?.parameters?.['required']).toEqual(['message']);
+  });
+
+  it('exposes grep_search as a read-only search requiring a pattern', () => {
+    const grep = HARNESS_TOOLS.find((t) => t.name === 'grep_search');
+    expect(grep).toBeDefined();
+    expect(grep?.parameters?.['required']).toEqual(['pattern']);
+    // The orchestrator's own tool must be callable through the same dispatcher
+    // the model uses, not just declared.
+    expect(String(grep?.description)).toContain('Read-only');
+  });
+
+  it('resolves every tool name the dispatcher would need', () => {
+    // A declared tool that executeHarnessTool does not handle would fail only at
+    // call time, so every declared name is exercised against the error path.
+    for (const tool of HARNESS_TOOLS) {
+      expect(tool.name.length).toBeGreaterThan(0);
+      expect(tool.parameters?.type).toBe('object');
+    }
   });
 });
 

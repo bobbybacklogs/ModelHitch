@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
+import { resolve } from 'node:path';
 import { ModelHitch } from '../src/index.js';
 import {
   DEFAULT_SUBAGENTS,
@@ -23,6 +24,19 @@ const maybe = bihanAvailable ? it : it.skip;
 
 function mockClient(): ModelHitch {
   return new ModelHitch({ defaultProviderId: 'mock', defaultModel: 'mock-model' });
+}
+
+/**
+ * Most tests here pin the built-in roster, so they disable folder discovery with
+ * `agentsDir: null`. Library-backed behaviour is covered separately.
+ */
+async function builtinRoster(overrides: Record<string, unknown> = {}) {
+  return createSubagentRoster(mockClient(), {
+    model: 'mock/mock-model',
+    workspaceDir: process.cwd(),
+    agentsDir: null,
+    ...overrides,
+  });
 }
 
 afterEach(() => vi.unstubAllEnvs());
@@ -138,59 +152,48 @@ describe('toFlatDefinition', () => {
   });
 });
 
-describe('subagent roster', () => {
+describe('subagent roster (built-ins)', () => {
   maybe('exposes one subagent tool declaring the registered specialists', async () => {
-    const roster = await createSubagentRoster(mockClient(), {
-      model: 'mock/mock-model',
-      workspaceDir: process.cwd(),
-    });
+    const roster = await builtinRoster();
 
     expect(roster).not.toBeNull();
     expect(roster!.tool.name).toBe('subagent');
+    expect(roster!.source.kind).toBe('builtin');
     expect(roster!.names).toEqual(['Scout', 'Builder', 'Verifier']);
     expect(roster!.tool.parameters!['required']).toEqual(['agent', 'task']);
     const description = String(roster!.tool.description);
-    for (const name of roster!.names) expect(description).toContain(`"${name}"`);
+    for (const name of roster!.names) expect(description).toContain(name);
   });
 
   maybe('delegates to a named subagent and returns its answer', async () => {
-    const roster = await createSubagentRoster(mockClient(), {
-      model: 'mock/mock-model',
-      workspaceDir: process.cwd(),
-    });
+    const roster = await builtinRoster();
 
-    const out = await roster!.execute({ agent: 'Scout', task: 'survey the repo' });
+    const out = await roster!.execute('subagent', { agent: 'Scout', task: 'survey the repo' });
 
     // The mock provider echoes the task back, proving the subagent's own loop ran.
     expect(out).toContain('survey the repo');
   });
 
   maybe('rejects an unknown subagent without throwing', async () => {
-    const roster = await createSubagentRoster(mockClient(), {
-      model: 'mock/mock-model',
-      workspaceDir: process.cwd(),
-    });
+    const roster = await builtinRoster();
 
-    const out = await roster!.execute({ agent: 'Nobody', task: 'x' });
+    const out = await roster!.execute('subagent', { agent: 'Nobody', task: 'x' });
     expect(out).toContain('unknown subagent "Nobody"');
     expect(out).toContain('Scout');
   });
 
   maybe('rejects a dispatch missing its task', async () => {
-    const roster = await createSubagentRoster(mockClient(), {
-      model: 'mock/mock-model',
-      workspaceDir: process.cwd(),
-    });
-    expect(await roster!.execute({ agent: 'Scout' })).toContain('needs both');
+    const roster = await builtinRoster();
+    expect(await roster!.execute('subagent', { agent: 'Scout' })).toContain('needs both');
   });
 
-  maybe('accepts a custom agent list', async () => {
-    const roster = await createSubagentRoster(mockClient(), {
-      model: 'mock/mock-model',
-      workspaceDir: process.cwd(),
+  maybe('accepts a custom agent list, which overrides the library and built-ins', async () => {
+    const roster = await builtinRoster({
+      agentsDir: undefined,
       agents: [{ name: 'Only', role: 'Solo', instructions: 'do it', tools: 'readonly' }],
     });
     expect(roster!.names).toEqual(['Only']);
+    expect(roster!.source.kind).toBe('explicit');
   });
 
   maybe('ships read-only, shell, and full tool tiers', async () => {
@@ -210,15 +213,13 @@ describe('subagent roster', () => {
   });
 
   maybe('wires the tool tiers for real, not just in the spec', async () => {
-    const roster = await createSubagentRoster(mockClient(), {
-      model: 'mock/mock-model',
-      workspaceDir: process.cwd(),
-    });
+    const roster = await builtinRoster();
 
     // Only `readonly` is an enforceable restriction: no edit tool AND no shell.
     const scout = roster!.toolNamesFor('Scout');
     expect(scout).toContain('read_file');
     expect(scout).toContain('list_files');
+    expect(scout).toContain('grep_search');
     expect(scout).not.toContain('write_file');
     expect(scout).not.toContain('run_command');
 
@@ -235,13 +236,145 @@ describe('subagent roster', () => {
     expect(builder).toContain('run_command');
   });
 
+  maybe('ownsTool distinguishes its tools from the harness tools', async () => {
+    const roster = await builtinRoster();
+    expect(roster!.ownsTool('subagent')).toBe(true);
+    expect(roster!.ownsTool('find_subagent')).toBe(false); // built-ins: no catalogue
+    expect(roster!.ownsTool('bash')).toBe(false);
+  });
+
   maybe('returns null (not a throw) when bihan is unavailable', async () => {
     vi.stubEnv('HARNESS_BIHAN_DIR', 'D:\\definitely\\not\\here');
     const roster = await createSubagentRoster(mockClient(), {
       model: 'mock/mock-model',
       workspaceDir: process.cwd(),
+      agentsDir: null,
     });
     // Either it found an installed bihan (fine) or it degraded to null.
     expect(roster === null || roster.tool.name === 'subagent').toBe(true);
+  });
+});
+
+describe('subagent roster (agent library)', () => {
+  const FIXTURES = resolve(__dirname, 'fixtures', 'agents');
+
+  maybe('loads agents from a folder instead of the built-ins', async () => {
+    const roster = await createSubagentRoster(mockClient(), {
+      model: 'mock/mock-model',
+      workspaceDir: process.cwd(),
+      agentsDir: FIXTURES,
+    });
+
+    expect(roster!.source).toEqual({ kind: 'library', dir: resolve(FIXTURES) });
+    expect(roster!.names).toContain('alpha');
+    expect(roster!.names).toContain('beta');
+    expect(roster!.names).not.toContain('Scout');
+    // The orchestrator definition excludes itself.
+    expect(roster!.names).not.toContain('orchestrator');
+  });
+
+  maybe('exposes find_subagent only for a library roster', async () => {
+    const roster = await createSubagentRoster(mockClient(), {
+      model: 'mock/mock-model',
+      workspaceDir: process.cwd(),
+      agentsDir: FIXTURES,
+    });
+
+    expect(roster!.tools.map((t) => t.name)).toEqual(['subagent', 'find_subagent']);
+    expect(roster!.ownsTool('find_subagent')).toBe(true);
+    const found = await roster!.execute('find_subagent', { query: 'sandbox shell' });
+    expect(found).toContain('delta');
+  });
+
+  maybe('find_subagent reports no match rather than failing', async () => {
+    const roster = await createSubagentRoster(mockClient(), {
+      model: 'mock/mock-model',
+      workspaceDir: process.cwd(),
+      agentsDir: FIXTURES,
+    });
+    expect(await roster!.execute('find_subagent', { query: 'zzzzqqqq' })).toContain('No subagent matched');
+    expect(await roster!.execute('find_subagent', { query: '' })).toContain('non-empty query');
+  });
+
+  maybe('delegates to a library agent', async () => {
+    const roster = await createSubagentRoster(mockClient(), {
+      model: 'mock/mock-model',
+      workspaceDir: process.cwd(),
+      agentsDir: FIXTURES,
+    });
+
+    const out = await roster!.execute('subagent', { agent: 'alpha', task: 'inspect the repo' });
+    expect(out).toContain('inspect the repo');
+  });
+
+  maybe('points at find_subagent when asked for an unknown agent', async () => {
+    const roster = await createSubagentRoster(mockClient(), {
+      model: 'mock/mock-model',
+      workspaceDir: process.cwd(),
+      agentsDir: FIXTURES,
+    });
+    const out = await roster!.execute('subagent', { agent: 'Nobody', task: 'x' });
+    expect(out).toContain('unknown subagent');
+    expect(out).toContain('find_subagent');
+  });
+
+  maybe('grants each library agent its derived tier tools', async () => {
+    const roster = await createSubagentRoster(mockClient(), {
+      model: 'mock/mock-model',
+      workspaceDir: process.cwd(),
+      agentsDir: FIXTURES,
+    });
+
+    // alpha declares only read tools.
+    const alpha = roster!.toolNamesFor('alpha');
+    expect(alpha).toContain('read_file');
+    expect(alpha).toContain('grep_search');
+    expect(alpha).not.toContain('write_file');
+    expect(alpha).not.toContain('run_command');
+
+    // beta declares edits and shell.
+    const beta = roster!.toolNamesFor('beta');
+    expect(beta).toContain('write_file');
+    expect(beta).toContain('run_command');
+
+    // delta is sandboxed, so its declared shell is withheld.
+    const delta = roster!.toolNamesFor('delta');
+    expect(delta).not.toContain('run_command');
+    expect(delta).toContain('grep_search');
+  });
+
+  maybe('reports per-agent descriptors for diagnostics', async () => {
+    const roster = await createSubagentRoster(mockClient(), {
+      model: 'mock/mock-model',
+      workspaceDir: process.cwd(),
+      agentsDir: FIXTURES,
+    });
+
+    const epsilon = roster!.entries.find((e) => e.name === 'epsilon')!;
+    expect(epsilon.unsupportedTools).toEqual(['manage_task']);
+    expect(epsilon.tier).toBe('readonly');
+
+    const delta = roster!.entries.find((e) => e.name === 'delta')!;
+    expect(delta.sandboxed).toBe(true);
+  });
+
+  maybe('falls back to built-ins when the folder does not exist', async () => {
+    const roster = await createSubagentRoster(mockClient(), {
+      model: 'mock/mock-model',
+      workspaceDir: process.cwd(),
+      agentsDir: resolve(FIXTURES, 'nope'),
+    });
+    expect(roster!.source.kind).toBe('builtin');
+    expect(roster!.names).toEqual(['Scout', 'Builder', 'Verifier']);
+  });
+
+  maybe('honours an exclude override', async () => {
+    const roster = await createSubagentRoster(mockClient(), {
+      model: 'mock/mock-model',
+      workspaceDir: process.cwd(),
+      agentsDir: FIXTURES,
+      exclude: [],
+    });
+    expect(roster!.names).toContain('orchestrator');
   });
 });

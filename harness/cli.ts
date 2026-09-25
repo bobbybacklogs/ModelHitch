@@ -32,7 +32,7 @@ async function ask(question: string): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  const flagsWithValues = new Set(['--model', '--config', '--max-turns']);
+  const flagsWithValues = new Set(['--model', '--config', '--max-turns', '--agents-dir']);
   const promptTokens: string[] = [];
   const raw = process.argv.slice(2);
   for (let i = 0; i < raw.length; i++) {
@@ -46,10 +46,11 @@ async function main(): Promise<void> {
   }
   if (has('--help') || has('-h')) {
     console.log(
-      'Usage: modelhitch-harness [run] "<task>" [--model <provider>/<model>] [--config <path>] [--max-turns <n>] [--no-zstack] [--tui] [--plain]',
+      'Usage: modelhitch-harness [run] "<task>" [--model <provider>/<model>] [--config <path>] [--max-turns <n>] [--agents-dir <path>] [--no-zstack] [--no-agents] [--tui] [--plain]',
     );
     console.log('  TUI shows automatically when interactive under bun; --plain forces plaintext, --tui forces the TUI.');
     console.log('  No task? Pipe it in (`echo "fix the bug" | modelhitch-harness`) or type it when asked.');
+    console.log('  --agents-dir points at a folder of <name>/agent.md definitions (default ~/.agents/agents); --no-agents disables them.');
     return;
   }
 
@@ -62,7 +63,7 @@ async function main(): Promise<void> {
   }
   if (!prompt) {
     console.log(
-      'Usage: modelhitch-harness [run] "<task>" [--model <provider>/<model>] [--config <path>] [--max-turns <n>] [--no-zstack] [--tui] [--plain]',
+      'Usage: modelhitch-harness [run] "<task>" [--model <provider>/<model>] [--config <path>] [--max-turns <n>] [--agents-dir <path>] [--no-zstack] [--no-agents] [--tui] [--plain]',
     );
     process.exitCode = 1;
     return;
@@ -72,11 +73,14 @@ async function main(): Promise<void> {
   const configPath = arg('--config');
   const maxTurns = Number(arg('--max-turns') ?? '8');
   const noZstack = has('--no-zstack');
+  // undefined = auto-discover, null = explicitly off.
+  const agentsDir = has('--no-agents') ? null : arg('--agents-dir');
   const harnessOpts = {
     model: modelOverride,
     configPath,
     maxTurns: Number.isFinite(maxTurns) ? maxTurns : 8,
     noZstack,
+    agentsDir,
   };
 
   const forceTui = has('--tui');
@@ -113,7 +117,7 @@ async function main(): Promise<void> {
   );
   // Cheap: loadBihan() is a path check plus a cached import.
   const { describeSubagents } = await import('./subagents.js');
-  console.log(`[harness] ${await describeSubagents()}`);
+  console.log(`[harness] ${await describeSubagents({ agentsDir })}`);
 
   let turns = 0;
   for await (const ev of streamHarness(prompt, harnessOpts)) {

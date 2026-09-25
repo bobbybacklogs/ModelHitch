@@ -1,0 +1,2 @@
+This stray file sits next to the agent directories. The loader must ignore it
+because it is not a directory containing agent.md.

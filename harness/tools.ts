@@ -2,8 +2,29 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname, resolve, relative } from 'node:path';
 import { exec, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import type { ToolDefinition } from '../src/index.js';
+import { GREP_DESCRIPTION, GREP_TOOL_NAME, formatGrepResult, grepWorkspace } from './grep.js';
 
 export const HARNESS_TOOLS: ToolDefinition[] = [
+  {
+    name: GREP_TOOL_NAME,
+    description: GREP_DESCRIPTION,
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Text to search for. Literal unless regex is true.' },
+        path: { type: 'string', description: 'Directory to search, workspace-relative. Defaults to ".".' },
+        include: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Limit to these file extensions, e.g. ["ts","tsx"].',
+        },
+        maxResults: { type: 'integer', description: 'Maximum matches to return. Defaults to 50.' },
+        caseSensitive: { type: 'boolean', description: 'Case-sensitive match. Defaults to false.' },
+        regex: { type: 'boolean', description: 'Treat pattern as a regular expression. Defaults to false.' },
+      },
+      required: ['pattern'],
+    },
+  },
   {
     name: 'read',
     description: 'Read a file from the workspace. Returns UTF-8 text.',
@@ -559,6 +580,19 @@ export async function executeHarnessTool(
   const workspaceDir = resolve(opts.workspaceDir ?? process.cwd());
   try {
     switch (name) {
+      case GREP_TOOL_NAME: {
+        const pattern = strArg(args, 'pattern');
+        const sub = typeof args['path'] === 'string' ? (args['path'] as string) : '.';
+        const result = grepWorkspace({
+          pattern,
+          dir: resolve(workspaceDir, sub),
+          include: Array.isArray(args['include']) ? (args['include'] as string[]) : undefined,
+          maxResults: typeof args['maxResults'] === 'number' ? (args['maxResults'] as number) : undefined,
+          caseSensitive: args['caseSensitive'] === true,
+          regex: args['regex'] === true,
+        });
+        return formatGrepResult(result, pattern);
+      }
       case 'read': {
         const file = resolveWorkspacePath(workspaceDir, strArg(args, 'path'));
         return await readFile(file, 'utf8');

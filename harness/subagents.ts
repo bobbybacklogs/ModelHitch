@@ -2,6 +2,18 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ToolDefinition } from '../src/index.js';
+import { GREP_TOOL_NAME, createGrepTool } from './grep.js';
+import {
+  TIER_TOOLS,
+  loadAgentLibrary,
+  resolveAgentsDir,
+  searchAgents,
+  type AgentLibrary,
+  type LibraryAgent,
+  type SubagentToolTier,
+} from './agent-library.js';
+
+export type { SubagentToolTier } from './agent-library.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -16,13 +28,23 @@ const __dirname = dirname(__filename);
  * harness relies on. Instead we resolve it at runtime the same way
  * `prompt.ts` locates zstack — explicit env var first, then the sibling
  * checkout — and simply offer no subagent tool when it isn't there.
+ *
+ * The roster itself comes from one of three places, in priority order:
+ *   1. an explicit `agents` list (tests, one-off runs),
+ *   2. a folder of `agent.md` definitions (the agency agent library),
+ *   3. the three generic built-ins below.
  */
 
 /** The slice of bihan's surface this adapter uses. */
 interface BihanTool {
   name: string;
-  description: string;
-  toModelHitch(): { name?: string; description?: string; parameters?: Record<string, unknown>; function?: unknown };
+  description?: string;
+  toModelHitch(): {
+    name?: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+    function?: unknown;
+  };
   run(rawArgs: unknown, context: unknown): Promise<unknown>;
 }
 
@@ -121,67 +143,74 @@ export function toFlatDefinition(tool: BihanTool): ToolDefinition {
 
 /**
  * One-line availability summary for the CLI banner, so it is obvious whether
- * subagent delegation is live or silently absent.
+ * subagent delegation is live, and from where.
  */
-export async function describeSubagents(): Promise<string> {
+export async function describeSubagents(options: { agentsDir?: string | null } = {}): Promise<string> {
   const loaded = await loadBihan();
   if (!loaded) {
     return 'subagents=off (bihan not found; install @genoventures-labs/bihan or set HARNESS_BIHAN_DIR)';
   }
-  return `subagents=on (bihan from ${loaded.from})`;
+  const dir = resolveAgentsDir(options.agentsDir);
+  if (!dir) return `subagents=on (bihan from ${loaded.from}; built-in agents only)`;
+
+  const library = loadAgentLibrary({ dir });
+  return `subagents=on (bihan from ${loaded.from}; ${library.agents.length} agents from ${dir})`;
 }
 
 export interface SubagentRoster {
-  /** The single `subagent` tool the orchestrator calls. */
+  /** Tools to add to the orchestrator's tool list. */
+  tools: ToolDefinition[];
+  /** The delegation tool itself; always `tools[0]`. */
   tool: ToolDefinition;
-  /** Registered sub-contractor names, for diagnostics and tests. */
+  /** True when `name` is one of this roster's tools. */
+  ownsTool(name: string): boolean;
+  /** Dispatch a call to one of `tools`. Never throws. */
+  execute(name: string, args: Record<string, unknown>): Promise<string>;
+  /** Registered subagent names. */
   names: string[];
-  /** Run one delegation; never throws — tool errors come back as JSON text. */
-  execute(args: Record<string, unknown>): Promise<string>;
   /** Tool names a registered subagent actually holds, to verify tier wiring. */
   toolNamesFor(agentName: string): string[];
   /** Where bihan was loaded from. */
   from: string;
+  /** Where the roster came from. */
+  source: { kind: 'library'; dir: string } | { kind: 'explicit' } | { kind: 'builtin' };
+  /** One descriptor per registered agent. */
+  entries: Array<{
+    name: string;
+    description: string;
+    tier: SubagentToolTier;
+    sandboxed: boolean;
+    unsupportedTools: string[];
+    sourcePath?: string;
+  }>;
+  /** Non-fatal problems found while loading, e.g. a malformed definition. */
+  warnings: string[];
+  /** The loaded library, when the roster came from a folder. */
+  library?: AgentLibrary;
+}
+
+export interface AgentSpec {
+  name: string;
+  role: string;
+  instructions: string;
+  tools: SubagentToolTier;
 }
 
 export interface SubagentOptions {
   /** Model target subagents inherit, as `provider/model`. */
   model: string;
   workspaceDir: string;
-  /** Registry of agent names -> instructions/roles; defaults to the built-ins. */
-  agents?: Array<{ name: string; role: string; instructions: string; tools: SubagentToolTier }>;
+  /** Explicit agents; overrides both the library and the built-ins. */
+  agents?: AgentSpec[];
+  /** Folder of agent definitions. `undefined` auto-discovers; `null` disables. */
+  agentsDir?: string | null;
   maxDepth?: number;
+  /** Names to leave out of a loaded library. */
+  exclude?: string[];
 }
 
-/**
- * Tool tiers for subagents.
- *
- * Only `readonly` is a real, enforceable restriction: it holds neither a
- * `write_file` tool nor a shell, so it genuinely cannot modify the workspace.
- *
- * `shell`, `write`, and `full` can all modify the workspace — and note that
- * shell access IS write access. A subagent with `run_command` can write files
- * with the shell (`echo x> f.txt`) even though it holds no `write_file` tool.
- * Verified empirically: a `shell`-tier Verifier created a file exactly that
- * way. Tiers therefore describe *intent and least privilege*, not a sandbox;
- * do not treat them as a security boundary.
- *
- * `readonly` — inspect files only. Genuinely cannot write.
- * `shell`    — inspect files and run commands; no edit tool, but the shell can
- *              still write. Use for verification, where it must run the build
- *              and tests but should not be fixing what it checks.
- * `write`    — edit files, no shell.
- * `full`     — edit files and run commands.
- */
-export type SubagentToolTier = 'readonly' | 'shell' | 'write' | 'full';
-
-/** Built-in sub-contractors. */
-export const DEFAULT_SUBAGENTS: Array<{
-  name: string;
-  role: string;
-  instructions: string;
-  tools: SubagentToolTier;
-}> = [
+/** Generic sub-contractors, used when no agent library is available. */
+export const DEFAULT_SUBAGENTS: AgentSpec[] = [
   {
     name: 'Scout',
     role: 'Read-only Reconnaissance',
@@ -210,6 +239,20 @@ export const DEFAULT_SUBAGENTS: Array<{
   },
 ];
 
+/** Descriptions are truncated in the catalogue so 50+ agents stay affordable. */
+const CATALOG_DESCRIPTION_CHARS = 120;
+
+function truncate(text: string, limit: number): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
+}
+
+function buildCatalog(entries: Array<{ name: string; description: string; tier: SubagentToolTier }>): string {
+  return entries
+    .map((entry) => `- ${entry.name} (${entry.tier}): ${truncate(entry.description || '(no description)', CATALOG_DESCRIPTION_CHARS)}`)
+    .join('\n');
+}
+
 /**
  * Build the subagent roster. Returns null when bihan is unavailable, so the
  * harness degrades to its own tools instead of failing to start.
@@ -231,83 +274,209 @@ export async function createSubagentRoster(
     maxSubagentDepth: options.maxDepth ?? 2,
   });
 
-  const fsTools = tools.createFileSystemToolkit({ baseDir: options.workspaceDir });
-  const shellTools = tools.createShellToolkit({ baseDir: options.workspaceDir });
-  const readable = fsTools.filter((t) => (t as { name?: string }).name !== 'write_file');
-
-  const toolsetFor = (tier: SubagentToolTier): unknown[] => {
-    switch (tier) {
-      case 'readonly':
-        return readable;
-      case 'shell':
-        return [...readable, ...shellTools];
-      case 'write':
-        return fsTools;
-      case 'full':
-        return [...fsTools, ...shellTools];
-    }
+  // Resolve the concrete tool objects once, then grant per agent by name.
+  const toolsByName = new Map<string, unknown>();
+  const register = (name: string, tool: unknown): void => {
+    toolsByName.set(name, tool);
   };
+  for (const tool of tools.createFileSystemToolkit({ baseDir: options.workspaceDir })) {
+    register((tool as { name: string }).name, tool);
+  }
+  for (const tool of tools.createShellToolkit({ baseDir: options.workspaceDir })) {
+    register((tool as { name: string }).name, tool);
+  }
+  register(GREP_TOOL_NAME, createGrepTool(options.workspaceDir));
 
-  for (const spec of options.agents ?? DEFAULT_SUBAGENTS) {
+  const warnings: string[] = [];
+  const entries: SubagentRoster['entries'] = [];
+  let library: AgentLibrary | undefined;
+  let source: SubagentRoster['source'];
+
+  /** Register one agent with the toolset its tier implies. */
+  const addAgent = (spec: {
+    name: string;
+    role: string;
+    instructions: string;
+    tier: SubagentToolTier;
+    description?: string;
+    sandboxed?: boolean;
+    unsupportedTools?: string[];
+    sourcePath?: string;
+  }): void => {
+    const granted = TIER_TOOLS[spec.tier];
+    const toolset: unknown[] = [];
+    for (const name of granted) {
+      const tool = toolsByName.get(name);
+      if (tool === undefined) {
+        // A missing tool means the grant and the toolkit disagree; say so rather
+        // than handing the agent a capability that silently does not exist.
+        warnings.push(`${spec.name}: tool "${name}" is not available and was not granted`);
+        continue;
+      }
+      toolset.push(tool);
+    }
+
     bihan.registerAgent({
       name: spec.name,
       role: spec.role,
       instructions: spec.instructions,
-      tools: toolsetFor(spec.tools),
+      tools: toolset,
     });
+
+    entries.push({
+      name: spec.name,
+      description: spec.description ?? spec.role,
+      tier: spec.tier,
+      sandboxed: spec.sandboxed === true,
+      unsupportedTools: spec.unsupportedTools ?? [],
+      sourcePath: spec.sourcePath,
+    });
+  };
+
+  if (options.agents) {
+    source = { kind: 'explicit' };
+    for (const spec of options.agents) {
+      addAgent({ name: spec.name, role: spec.role, instructions: spec.instructions, tier: spec.tools });
+    }
+  } else {
+    const dir = resolveAgentsDir(options.agentsDir);
+    if (dir) {
+      library = loadAgentLibrary({ dir, ...(options.exclude ? { exclude: options.exclude } : {}) });
+      source = { kind: 'library', dir: library.dir };
+      warnings.push(...library.warnings);
+      for (const agent of library.agents) {
+        addAgent({
+          name: agent.name,
+          // The system prompt bihan builds is "You are X, acting as: <role>",
+          // so the description is the most useful thing to put in the role slot.
+          role: truncate(agent.description || agent.name, 200),
+          instructions: agent.body,
+          tier: agent.tier,
+          description: agent.description,
+          sandboxed: agent.sandboxed,
+          unsupportedTools: agent.unsupportedTools,
+          sourcePath: agent.sourcePath,
+        });
+      }
+    } else {
+      source = { kind: 'builtin' };
+      for (const spec of DEFAULT_SUBAGENTS) {
+        addAgent({ name: spec.name, role: spec.role, instructions: spec.instructions, tier: spec.tools });
+      }
+    }
   }
 
-  const names = bihan.getAgents().map((a) => (a as unknown as { name: string }).name);
-  const roster = names.map((n) => `"${n}"`).join(', ');
+  const names = entries.map((entry) => entry.name);
+  const catalogue = buildCatalog(entries);
+  const fromLibrary = source.kind === 'library';
 
-  const tool: ToolDefinition = {
+  const delegationTool: ToolDefinition = {
     name: 'subagent',
     description:
       `Delegate a focused task to a specialized subagent (sub-contractor). It runs its own separate ` +
       `tool loop in this workspace and returns only its final answer, keeping this context clean. ` +
-      `Available subagents: ${roster}. Use it for work that would otherwise flood this conversation ` +
-      `with file contents or command output.`,
+      `Use it for work that would otherwise flood this conversation with file contents or command output.\n\n` +
+      `Available subagents (${names.length}):\n${catalogue}` +
+      (fromLibrary ? `\n\nUse find_subagent(query) if you are unsure which agent fits.` : ''),
     parameters: {
       type: 'object',
       properties: {
-        agent: { type: 'string', description: `Which subagent to dispatch: ${roster}` },
+        agent: { type: 'string', description: 'Which subagent to dispatch, by exact name.' },
         task: {
           type: 'string',
-          description: 'Clear, self-contained instructions and any context the subagent needs.',
+          description:
+            'Clear, self-contained instructions and any context the subagent needs. ' +
+            'Subagent runs are stateless and cannot see this conversation.',
         },
       },
       required: ['agent', 'task'],
     },
   };
 
+  const toolsOut: ToolDefinition[] = [delegationTool];
+
+  /** Find-subagent is only worth its context when there is a real catalogue. */
+  let findTool: ToolDefinition | undefined;
+  if (fromLibrary && library) {
+    findTool = {
+      name: 'find_subagent',
+      description:
+        `Search the ${library.agents.length} available subagents by intent when you are unsure which one to use. ` +
+        `Returns the best-matching agent names with their descriptions.`,
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'What you need done, in a few words.' },
+          limit: { type: 'integer', description: 'Maximum matches to return. Defaults to 8.' },
+        },
+        required: ['query'],
+      },
+    };
+    toolsOut.push(findTool);
+  }
+
+  const nameList = (): string => names.join(', ');
+
+  async function findMatches(args: Record<string, unknown>): Promise<string> {
+    const query = typeof args['query'] === 'string' ? (args['query'] as string) : '';
+    if (query.trim() === '') return 'Error: find_subagent needs a non-empty query.';
+    const limit = typeof args['limit'] === 'number' ? Math.max(1, Math.min(25, args['limit'] as number)) : 8;
+    if (!library) return `Error: no agent library is loaded; available: ${nameList()}.`;
+    const matches = searchAgents(library.agents, query, limit);
+    if (matches.length === 0) {
+      return `No subagent matched "${query}". Available: ${nameList()}.`;
+    }
+    return matches
+      .map((m) => `${m.name} (${m.tier}): ${m.description || '(no description)'}`)
+      .join('\n');
+  }
+
+  async function delegate(args: Record<string, unknown>): Promise<string> {
+    const agent = typeof args['agent'] === 'string' ? (args['agent'] as string) : '';
+    const task = typeof args['task'] === 'string' ? (args['task'] as string) : '';
+    if (!agent || !task) {
+      return `Error: subagent needs both "agent" and "task". Available: ${nameList()}.`;
+    }
+    const target = bihan.getAgent(agent);
+    if (!target) {
+      return (
+        `Error: unknown subagent "${agent}". ` +
+        (findTool ? `Use find_subagent to pick one. ` : '') +
+        `Available: ${nameList()}.`
+      );
+    }
+    try {
+      // asTool() gives the subagent entry point: it runs the subagent's own loop
+      // and returns only its synthesized answer.
+      const out = await target.asTool().run({ task }, { agentName: 'Harness' });
+      return typeof out === 'string' ? out : JSON.stringify(out, null, 2);
+    } catch (err) {
+      return `Error: subagent "${agent}" failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
   return {
-    tool,
+    tools: toolsOut,
+    tool: delegationTool,
     names,
     from: loaded.from,
+    source,
+    entries,
+    warnings,
+    ...(library ? { library } : {}),
+    ownsTool(name: string) {
+      return toolsOut.some((t) => t.name === name);
+    },
+    async execute(name: string, args: Record<string, unknown>) {
+      if (name === delegationTool.name) return delegate(args);
+      if (findTool && name === findTool.name) return findMatches(args);
+      return `Error: unknown subagent tool "${name}".`;
+    },
     toolNamesFor(agentName: string) {
       const agent = bihan.getAgent(agentName) as unknown as
         | { getTools(): Array<{ name: string }> }
         | undefined;
       return agent ? agent.getTools().map((t) => t.name) : [];
-    },
-    async execute(args) {
-      const agent = typeof args['agent'] === 'string' ? (args['agent'] as string) : '';
-      const task = typeof args['task'] === 'string' ? (args['task'] as string) : '';
-      if (!agent || !task) {
-        return `Error: subagent needs both "agent" and "task". Available: ${roster}.`;
-      }
-      const target = bihan.getAgent(agent);
-      if (!target) {
-        return `Error: unknown subagent "${agent}". Available: ${roster || '(none registered)'}.`;
-      }
-      try {
-        // asTool() gives the debounced subagent entry point: it runs the
-        // subagent's own loop and returns only its synthesized answer.
-        const out = await target.asTool().run({ task }, { agentName: 'Harness' });
-        return typeof out === 'string' ? out : JSON.stringify(out, null, 2);
-      } catch (err) {
-        return `Error: subagent "${agent}" failed: ${err instanceof Error ? err.message : String(err)}`;
-      }
     },
   };
 }

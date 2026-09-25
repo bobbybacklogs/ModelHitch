@@ -1,0 +1,1 @@
+A directory with no agent.md inside must be skipped silently.
