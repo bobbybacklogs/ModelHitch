@@ -1,0 +1,18 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "hitch-openai",
+  "version": "1.0.0",
+  "description": "OpenAI-compatible Hitch API tools: list models and chat completions via Bearer auth.",
+  "author": {
+    "name": "hitch-openai contributors"
+  },
+  "license": "MIT",
+  "keywords": [
+    "hitch",
+    "openai",
+    "chat",
+    "models",
+    "mcp",
+    "genoventures"
+  ]
+}
