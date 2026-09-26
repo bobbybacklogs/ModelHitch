@@ -241,7 +241,7 @@ npx modelhitch settings
 | **Image lane** | Off by default — enable in settings or with `--image-lane` |
 | **Runtime** | Bridge needs Node 22.5+ (SQLite); library supports Node 18+ |
 
-[Bridge guide →](./docs/guide.md#local-agent-bridge)
+[Bridge guide →](./docs/guide.md#local-agent-bridge) · [agent-runtime scaffold (Eve-shaped filesystem-first durable agent) →](./agent-runtime/README.md)
 
 ## Development
 
