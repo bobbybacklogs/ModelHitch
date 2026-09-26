@@ -1,0 +1,15 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "hitch-openai": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["./server/index.js"],
+      "env": {
+        "HITCH_API_KEY": "${HITCH_API_KEY}",
+        "HITCH_BASE_URL": "${HITCH_BASE_URL}",
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}"
+      }
+    }
+  }
+}

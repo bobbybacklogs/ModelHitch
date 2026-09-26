@@ -1,0 +1,16 @@
+{
+  "name": "hitch-openai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenAI-compatible Hitch API MCP server packaged as a Cursor Agent Plugin.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "print-tools": "node server/index.js --print-tools",
+    "self-test": "node server/index.js --self-test",
+    "smoke": "node scripts/smoke.js"
+  }
+}
