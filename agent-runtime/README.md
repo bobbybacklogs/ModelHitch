@@ -1,8 +1,8 @@
 # agent-runtime
 
 Phase 0 of an **Eve-shaped** (filesystem-first durable agent) runtime, owned
-inside ModelHitch. Docs only in this PR — zero runtime code, zero new npm
-deps, no CLI, no executable fixtures.
+inside ModelHitch. Phase 1 adds the first real slice: discover / validate /
+manifest emit for agent fixture directories.
 
 ## Intent
 
@@ -24,12 +24,27 @@ streaming, failover, and usage telemetry on `127.0.0.1:3939`.
 Forge-of-record origin: **GitHub `bobbybacklogs/ModelHitch`** (primary once
 the forge slug is confirmed; do not invent Origin URLs until then).
 
+## CLI (Phase 1)
+
+Discover / validate / manifest emit for an agent fixture directory:
+
+```sh
+# prints the JSON manifest to stdout, writes it to .build/ as well
+node agent-runtime/bin/info.mjs agent-runtime/fixtures/minimal-agent --out agent-runtime/.build/minimal-agent.manifest.json
+
+# or via npm script
+npm run runtime-info -- agent-runtime/fixtures/minimal-agent --out agent-runtime/.build/minimal-agent.manifest.json
+```
+
+Exit codes: `0` when validation passes, `1` when the shape is invalid (each
+problem is reported on stderr), `2` on usage errors.
+
 ## Phase map (sketch, 0–7)
 
 | Phase | Focus | Ships |
 | --- | --- | --- |
-| 0 | Scaffold | `agent-runtime/**` architecture docs only (this PR) |
-| 1 | Runtime contract | Hooks, event stream, agent-work-unit shapes — no durable store yet |
+| 0 | Scaffold | `agent-runtime/**` architecture docs only |
+| 1 | Discover/validate/manifest | `agent-runtime/{lib,bin,fixtures,tests}` — inspectable manifest for an agent dir; no durable store yet |
 | 2 | Filesystem compiler | Workdir → plan / task-graph / sandbox manifest compile step |
 | 3 | Durable sessions | Session lifecycle on disk, pause / resume, rollback points |
 | 4 | App / sandbox split | Host-app isolation from agent sandbox, capability gates |
@@ -37,16 +52,16 @@ the forge slug is confirmed; do not invent Origin URLs until then).
 | 6 | Harness operability | Supervisor, heartbeat, kill, offline restart — the *agent-work-unit* sense |
 | 7 | Hardening | Crash-resume guarantees, sandbox hardening, conformance, docs |
 
-Phases 1–7 are **sketches**. Nothing commits to them yet; each takes its own
+Phases 2–7 are **sketches**. Nothing commits to them yet; each takes its own
 scoped PR with its own acceptance.
 
-## Non-goals (this PR)
+## Non-goals (Phase 1 PR)
 
-- No runtime code, no new npm deps, no CLI, no fixtures that execute.
+- No durable sessions, Workflow, sandbox, Cloudflare, E2B, subagents-as-sessions, channels/schedules/connections.
 - No `/harness/` directory anywhere.
 - No changes to `src/` (library, bridge, providers, daemon, server).
 - No touch of client SDKs, `.agents/`, `.claude/`, `.cursor-plugin/`, `plugins/`, `conformance/`.
-- **No claim of crash-resume durability or sandbox support in Phase 0** — those are later phases.
+- No claim of crash-resume durability or sandbox support in Phase 1 — those are later phases.
 - No use of the name "Eve" (Vercel's). Say "Eve-shaped" or "filesystem-first durable agent".
 
 ## Never-touch list

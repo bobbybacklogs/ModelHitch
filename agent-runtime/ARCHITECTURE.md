@@ -1,7 +1,9 @@
-# Agent Runtime — Architecture (Phase 0 concepts map)
+# Agent Runtime — Architecture (Phase 1 concepts map)
 
-> Status: **docs only**. Phase 0 maps concepts to future `agent-runtime/`
-> modules. Nothing here is implemented; nothing here claims runtime behavior.
+> Status: **Phase 1 implemented (discover / validate / manifest)**. Phase 0
+> mapped concepts to future modules; Phase 1 ships the first real slice under
+> `agent-runtime/{lib,bin,fixtures,tests}`. Full runtime behavior (sessions,
+> durability) is still later-phase.
 
 **Forge-of-record origin:** GitHub `bobbybacklogs/ModelHitch` (primary once
 the forge slug is confirmed; no invented Origin URLs).
@@ -21,8 +23,8 @@ explicitly do **not** use its name, folder, package, or branding here.
 
 | Concept | Shape | Future home (agent-runtime modules, sketch) | Notes |
 | --- | --- | --- | --- |
-| **Filesystem compiler** | Workdir + session files compile into a runnable plan/task graph you can diff | `compiler/` | Eve's filesystem-as-source-of-truth is the inspiration. Output is a first-class artifact, not magic state |
-| **Durable session** | Session state as plain files (context, narrative, memory, checkpoint refs) | `session/` | Phase 3. Phase 0 makes no durability claim |
+| **Filesystem compiler** | Workdir + session files compile into a runnable plan/task graph you can diff | `compiler/` | Phase 2. Phase 1 only discovers files and emits a manifest |
+| **Durable session** | Session state as plain files (context, narrative, memory, checkpoint refs) | `session/` | Phase 3. Phase 1 makes no durability claim |
 | **App / sandbox split** | Host app and agent sandbox are separate surfaces with a controlled boundary | `sandbox/`, `app-host/` | Phase 4. Phase 0 makes no sandbox claim |
 | **Subagents-as-sessions** | A subagent is a nested session with its own filesystem-backed context | `session/`, `subagent/` | Phase 5 |
 | **Harness operability** | Supervisor, heartbeat, kill, offline restart — the **agent-work-unit** sense of "harness" | `harness/` (runtime-internal; **not** a top-level `/harness/`) | Phase 6. We say *harness operability*, never a `/harness/` tree |
@@ -38,13 +40,14 @@ explicitly do **not** use its name, folder, package, or branding here.
 - **Not this product:** the name Eve, its folder/package structure, its
   branding, and any claim of being a fork of vercel/eve.
 
-## 3. Non-architecture decisions (Phase 0)
+## 3. Non-architecture decisions (Phase 1)
 
 - No `/harness/` directory. Harness concepts live inside this package if/when
   they are implemented (Phase 6), not as a repo-wide top-level folder.
 - No sandbox or crash-resume durability claims yet.
-- No runtime code: no hooks, no events, no compiled plans. Phase 1 defines the
-  runtime contract; Phase 2 defines the filesystem compiler; Phase 3+ build
+- Phase 1 runs no agent code: it discovers agent files, validates the required
+  shape (`instructions.md` + a typed entry point), and emits an inspectable
+  JSON manifest. Phase 2 defines the filesystem compiler; Phase 3+ builds
   durability and isolation.
 
 ## 4. Relationship to existing ModelHitch surfaces
