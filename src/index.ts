@@ -64,7 +64,7 @@ export {
   type CapabilityRequirements,
   type SkippedCapabilityLane,
 } from './core/capabilities.js';
-export { parseRetryAfter } from './core/headers.js';
+export { parseRetryAfter, extractNoFallback, NO_FALLBACK_HEADER } from './core/headers.js';
 export {
   OPENAI_COMPAT_GATEWAY_CATALOG_DEFAULT_MAX_TOKENS,
   OPENAI_COMPAT_MAX_TOKENS_CEILING,

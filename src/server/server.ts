@@ -66,6 +66,7 @@ import {
 import { clearConversations, findConversationWithToolCall, rememberConversation } from './conversation-state.js';
 import { normalizeBodyImages } from './local-images.js';
 import { extractSessionId } from '../core/session.js';
+import { extractNoFallback } from '../core/headers.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
 import type { CloudAgentConfig, ImageGenerationConfig } from '../config.js';
 import {
@@ -772,13 +773,14 @@ export class OpenAICompatibleServer {
     const credentials = await this.resolveCredentials(provider.id);
     let params = mapRequest(body, model);
     const incomingSession = extractSessionId(req.headers);
+    const noFallback = extractNoFallback(req.headers);
     if (incomingSession) params.sessionId = incomingSession;
     if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
 
     if (body.stream === true) {
       this.log(`  -> ${provider.id}/${model} (stream)`);
-      await this.writeStream(res, provider, params, credentials, model);
+      await this.writeStream(res, provider, params, credentials, model, noFallback);
       return;
     }
 
@@ -788,6 +790,7 @@ export class OpenAICompatibleServer {
     const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+      noFallback,
     );
     this.reportUsage(
       { providerId: target.provider.id, model: target.model, wire: 'chat-completions', streamed: false },
@@ -809,6 +812,7 @@ export class OpenAICompatibleServer {
     params: ChatParams,
     credentials: ProviderCredentials,
     model: string,
+    noFallback = false,
   ): Promise<void> {
     const controller = new AbortController();
     const id = `chatcmpl-${randomUUID()}`;
@@ -833,7 +837,7 @@ export class OpenAICompatibleServer {
         this.failoverContext(this.streamCodes(), targets, (target) => {
           usageInfo.providerId = target.providerId;
           usageInfo.model = target.model;
-        }),
+        }, noFallback),
       ),
       usageInfo,
       startedAt,
@@ -950,6 +954,7 @@ export class OpenAICompatibleServer {
     const credentials = await this.resolveCredentials(provider.id);
     let params = mapResponsesRequest(body, model);
     const incomingSession = extractSessionId(req.headers);
+    const noFallback = extractNoFallback(req.headers);
     if (incomingSession) params.sessionId = incomingSession;
     if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
@@ -985,7 +990,7 @@ export class OpenAICompatibleServer {
 
     if (body.stream === true) {
       this.log(`  -> ${provider.id}/${model} (responses stream)`);
-      await this.writeResponsesStream(res, provider, params, credentials, model);
+      await this.writeResponsesStream(res, provider, params, credentials, model, noFallback);
       return;
     }
 
@@ -995,6 +1000,7 @@ export class OpenAICompatibleServer {
     const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+      noFallback,
     );
     this.reportUsage(
       { providerId: target.provider.id, model: target.model, wire: 'responses', streamed: false },
@@ -1014,6 +1020,7 @@ export class OpenAICompatibleServer {
     params: ChatParams,
     credentials: ProviderCredentials,
     model: string,
+    noFallback = false,
   ): Promise<void> {
     const controller = new AbortController();
     // Abort the upstream call if the client disconnects mid-stream.
@@ -1032,7 +1039,7 @@ export class OpenAICompatibleServer {
         this.failoverContext(this.streamCodes(), targets, (target) => {
           usageInfo.providerId = target.providerId;
           usageInfo.model = target.model;
-        }),
+        }, noFallback),
       ),
       usageInfo,
       Date.now(),
@@ -1098,13 +1105,14 @@ export class OpenAICompatibleServer {
     const credentials = await this.resolveCredentials(provider.id);
     let params = mapAnthropicRequest(body, model);
     const incomingSession = extractSessionId(req.headers);
+    const noFallback = extractNoFallback(req.headers);
     if (incomingSession) params.sessionId = incomingSession;
     if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
 
     if (body.stream === true) {
       this.log(`  -> ${provider.id}/${model} (anthropic stream)`);
-      await this.writeAnthropicStream(res, provider, params, credentials, model, body);
+      await this.writeAnthropicStream(res, provider, params, credentials, model, body, noFallback);
       return;
     }
 
@@ -1114,6 +1122,7 @@ export class OpenAICompatibleServer {
     const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+      noFallback,
     );
     this.reportUsage(
       { providerId: target.provider.id, model: target.model, wire: 'messages', streamed: false },
@@ -1131,6 +1140,7 @@ export class OpenAICompatibleServer {
     credentials: ProviderCredentials,
     model: string,
     body: AnthropicRequest,
+    noFallback = false,
   ): Promise<void> {
     const controller = new AbortController();
     // Abort the upstream call if the client disconnects mid-stream.
@@ -1149,7 +1159,7 @@ export class OpenAICompatibleServer {
         this.failoverContext(this.streamCodes(), targets, (target) => {
           usageInfo.providerId = target.providerId;
           usageInfo.model = target.model;
-        }),
+        }, noFallback),
       ),
       usageInfo,
       Date.now(),
@@ -1230,13 +1240,14 @@ export class OpenAICompatibleServer {
     const credentials = await this.resolveCredentials(provider.id);
     let params = mapGeminiRequest(body, model);
     const incomingSession = extractSessionId(req.headers);
+    const noFallback = extractNoFallback(req.headers);
     if (incomingSession) params.sessionId = incomingSession;
     if (this.options.defaultModel && !modelFromPath && !body.model) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
 
     if (stream) {
       this.log(`  -> ${provider.id}/${model} (gemini stream)`);
-      await this.writeGeminiStream(res, provider, params, credentials, model, body);
+      await this.writeGeminiStream(res, provider, params, credentials, model, body, noFallback);
       return;
     }
 
@@ -1246,6 +1257,7 @@ export class OpenAICompatibleServer {
     const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+      noFallback,
     );
     this.reportUsage(
       { providerId: target.provider.id, model: target.model, wire: 'gemini', streamed: false },
@@ -1263,6 +1275,7 @@ export class OpenAICompatibleServer {
     credentials: ProviderCredentials,
     model: string,
     body: GeminiRequest,
+    noFallback = false,
   ): Promise<void> {
     const controller = new AbortController();
     // Abort the upstream call if the client disconnects mid-stream.
@@ -1281,7 +1294,7 @@ export class OpenAICompatibleServer {
         this.failoverContext(this.streamCodes(), targets, (target) => {
           usageInfo.providerId = target.providerId;
           usageInfo.model = target.model;
-        }),
+        }, noFallback),
       ),
       usageInfo,
       Date.now(),
@@ -1522,27 +1535,35 @@ export class OpenAICompatibleServer {
   private withFailover<T>(
     targets: ResolvedLane[],
     call: (lane: ResolvedLane) => Promise<T>,
+    noFallback = false,
   ): Promise<{ value: T; target: ResolvedLane }> {
     const codes = this.policy ? (this.policy.retryableCodes ?? DEFAULT_RETRYABLE_CODES) : retryableCodesFor(this.options.autoMode);
     return withFailover(
       targets,
       (lane) => call(lane),
-      this.failoverContext(codes, targets, () => undefined),
+      this.failoverContext(codes, targets, () => undefined, noFallback),
     );
   }
 
   /**
    * Shared failover context for the streaming wires. `onLane` updates the
    * per-request usage info to the lane that took over.
+   *
+   * `noFallback` (from the `x-hitch-no-fallback` request header) pins the
+   * walk to the primary lane so the caller owns failover; the first error
+   * propagates instead of failing over transparently.
    */
   private failoverContext(
     codes: readonly (import('../core/errors.js').ModelHitchErrorCode)[],
     targets: ResolvedLane[],
     onLaneChange: (target: FailoverTarget) => void,
+    noFallback = false,
   ) {
     return {
       codes,
-      maxAttempts: this.policy ? targets.length : maxAttemptsFor(this.options.autoMode, Math.max(targets.length - 1, 0)),
+      maxAttempts: noFallback
+        ? 1
+        : this.policy ? targets.length : maxAttemptsFor(this.options.autoMode, Math.max(targets.length - 1, 0)),
       onFailover: (event: FailoverEvent) => {
         onLaneChange(event.to);
         this.emitFailover(event);

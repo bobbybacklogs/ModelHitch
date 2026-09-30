@@ -4,6 +4,27 @@
  */
 
 /**
+ * Opt-out of bridge auto-mode failover. When a client sends
+ * `x-hitch-no-fallback: 1` (or `true`/`yes`), the bridge attempts only the
+ * requested lane and propagates its error, so the caller owns failover.
+ * Absent (or any other value) keeps the default transparent-failover
+ * behavior. Safe to send to older bridges — unknown headers are ignored.
+ */
+export const NO_FALLBACK_HEADER = 'x-hitch-no-fallback';
+
+const NO_FALLBACK_TRUTHY = new Set(['1', 'true', 'yes']);
+
+/** True when the request opts out of bridge auto-mode failover. */
+export function extractNoFallback(
+  headers: Record<string, string | string[] | undefined> | undefined,
+): boolean {
+  if (!headers) return false;
+  const val = headers[NO_FALLBACK_HEADER];
+  const first = Array.isArray(val) ? val[0] : val;
+  return !!first && NO_FALLBACK_TRUTHY.has(first.trim().toLowerCase());
+}
+
+/**
  * Parse a `Retry-After` header into milliseconds.
  *
  * Supports both forms the header allows:
