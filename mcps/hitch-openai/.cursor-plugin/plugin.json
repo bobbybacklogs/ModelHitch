@@ -1,0 +1,36 @@
+{
+  "name": "hitch-openai",
+  "displayName": "Hitch OpenAI Compat",
+  "version": "1.0.0",
+  "description": "OpenAI-compatible Hitch API tools: list models and chat completions via Bearer auth.",
+  "author": {
+    "name": "hitch-openai contributors"
+  },
+  "license": "MIT",
+  "keywords": [
+    "hitch",
+    "openai",
+    "chat",
+    "models",
+    "mcp",
+    "genoventures"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./mcp.json",
+  "variables": {
+    "type": "object",
+    "properties": {
+      "HITCH_API_KEY": {
+        "type": "string",
+        "title": "Hitch API key",
+        "description": "Bearer token for https://hitch.genoventures.com/v1 (or HITCH_BASE_URL). Required for chat; preferred over OPENAI_API_KEY."
+      },
+      "HITCH_BASE_URL": {
+        "type": "string",
+        "title": "Hitch base URL",
+        "description": "Optional OpenAI-compat base URL including /v1. Default: https://hitch.genoventures.com/v1. Trailing slash is stripped; do not append an extra /v1."
+      }
+    },
+    "required": ["HITCH_API_KEY"]
+  }
+}

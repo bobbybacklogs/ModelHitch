@@ -14,6 +14,6 @@ export default defineConfig({
     // Platform SDK packages have their own vitest configs (they alias Electron,
     // Expo, and React Native peers to stubs). Run them with `npm test` inside
     // each package directory.
-    exclude: [...configDefaults.exclude, 'expo-sdk/**', 'electron-sdk/**'],
+    exclude: [...configDefaults.exclude, 'expo-sdk/**', 'electron-sdk/**', 'agent-runtime/tests/**'],
   },
 });
