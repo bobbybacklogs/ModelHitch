@@ -1,4 +1,5 @@
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -239,8 +240,27 @@ export function parseFrontmatter(text: string): Frontmatter {
       continue;
     }
 
+    // A plain scalar can continue on the next line, indented. This is ordinary
+    // YAML and it shows up constantly in practice: a description long enough to
+    // wrap gets written that way, and treating the continuation as junk both
+    // warned and silently truncated the text to its first line. Fold it the way
+    // YAML does, with a single space per break.
+    const continuation: string[] = [];
+    while (i < end) {
+      const next = lines[i] as string;
+      if (next.trim() === '') break;
+      if (!/^\s/.test(next)) break;
+      if (next.trimStart().startsWith('#')) {
+        i++;
+        continue;
+      }
+      continuation.push(next.trim());
+      i++;
+    }
+
     const unquoted = unquote(rawValue);
-    data[key] = unquoted === '' || unquoted === '~' || unquoted === 'null' ? '' : unquoted;
+    const scalar = unquoted === '' || unquoted === '~' || unquoted === 'null' ? '' : unquoted;
+    data[key] = continuation.length === 0 ? scalar : [scalar, ...continuation].join(' ');
   }
 
   return { data, body, warnings };
@@ -486,4 +506,350 @@ export function searchAgents(agents: LibraryAgent[], query: string, limit = 8): 
   }
 
   return scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)).slice(0, limit);
+}
+
+/* ------------------------------------------------------------------ *
+ * Semantic search
+ * ------------------------------------------------------------------ */
+
+/**
+ * An embedder: one vector per input text, in the order given.
+ *
+ * Provider-neutral on purpose. This harness must not import a vendor SDK or
+ * hard-code a model id, so the caller injects whatever embedder it already
+ * holds, and a caller holding none keeps the lexical path unchanged.
+ */
+export type EmbedFn = (texts: string[]) => Promise<number[][]>;
+
+export interface SemanticSearchDeps {
+  /**
+   * Injected embedder. Provider-neutral on purpose: this harness must not import
+   * a vendor SDK or hard-code a model id.
+   */
+  embed?: EmbedFn;
+  /** Identity of the embedder, part of the cache key. Defaults to 'default'. */
+  embedderId?: string;
+  /** Where vectors are cached. Defaults to `<harness state dir>/embeddings`. */
+  cacheDir?: string;
+  /** Called once with a warning when semantic search is unavailable or fails. */
+  log?: (message: string) => void;
+  /** Character budget for the body text before embedding. Defaults to 4000. */
+  bodyChars?: number;
+  /** Weight of the semantic score in the blend (0..1). Defaults to 0.8. */
+  semanticWeight?: number;
+}
+
+/**
+ * Body characters fed to the embedder per agent.
+ *
+ * A real library is 50+ agents and ~440 KB of prose, and embedding every body
+ * whole would cost far more than a routing decision is worth. These definitions
+ * state what the agent owns in their opening section, so the first 4000
+ * characters carry the intent that matters and the rest is procedure.
+ */
+const EMBED_BODY_CHARS = 4000;
+
+/**
+ * Semantic share of the blended score.
+ *
+ * Weighted toward semantics, because the whole point is matching an intent that
+ * shares no vocabulary with the query, but not all the way: an exact name hit
+ * should still be able to win, and the lexical share separates agents the
+ * embedder finds equally close.
+ */
+const EMBED_SEMANTIC_WEIGHT = 0.8;
+
+/**
+ * Where vectors live when the caller does not say: `<state>/embeddings`.
+ *
+ * The state directory is resolved here rather than imported from the session
+ * module, because agent-library is a leaf the session layer imports and reaching
+ * back into it would be a cycle.
+ */
+export function defaultEmbeddingCacheDir(): string {
+  const configured = process.env['HARNESS_STATE_DIR'];
+  const stateDir =
+    configured !== undefined && configured.trim() !== ''
+      ? resolve(configured)
+      : join(homedir(), '.modelhitch', 'harness');
+  return join(stateDir, 'embeddings');
+}
+
+/**
+ * Cache file name for one embedder.
+ *
+ * Ids arrive from configuration, so anything that could not be a path segment is
+ * folded to "_" instead of being allowed to escape the cache directory.
+ */
+function cacheFileName(embedderId: string): string {
+  return embedderId.replace(/[^A-Za-z0-9._-]+/g, '_') || 'default';
+}
+
+/**
+ * Key for one cached vector: sha256 over the embedder id and the exact text.
+ *
+ * The id is inside the hash because a cache directory outlives whichever
+ * embedder filled it, and a vector from another model is not comparable, so the
+ * two must never collide. The NUL separator keeps "a"+"bc" distinct from
+ * "ab"+"c".
+ */
+function embeddingKey(embedderId: string, text: string): string {
+  return createHash('sha256').update(`${embedderId}\u0000${text}`, 'utf8').digest('hex');
+}
+
+/** True for a non-empty vector of finite numbers, the only shape usable here. */
+function isVector(value: unknown): value is number[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((entry) => typeof entry === 'number' && Number.isFinite(entry))
+  );
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Read the cache, or an empty one.
+ *
+ * Every failure mode here (absent file, unreadable file, truncated JSON, a
+ * hand-edited shape) resolves to "no cache", because a cache is a cost
+ * optimisation and never a reason for a search to fail. Individual junk entries
+ * are dropped rather than poisoning the whole file.
+ */
+function readEmbeddingCache(path: string): Record<string, number[]> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return {};
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+
+  const cache: Record<string, number[]> = {};
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (isVector(value)) cache[key] = value;
+  }
+  return cache;
+}
+
+/**
+ * Persist the cache, best effort.
+ *
+ * A read-only directory or a full disk costs one extra embed next run, which is
+ * far cheaper than failing a search, so nothing here is allowed to throw.
+ */
+function writeEmbeddingCache(path: string, cache: Record<string, number[]>): void {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(cache), 'utf8');
+  } catch {
+    /* best effort by design */
+  }
+}
+
+/**
+ * Loggers already warned.
+ *
+ * The warning is once per logger per process rather than once per process: a
+ * long-lived harness builds several rosters, and a warning swallowed for the
+ * second caller would hide exactly the degradation this exists to surface.
+ * Keying on the logger keeps a loop from flooding without doing that.
+ */
+const warnedLoggers = new WeakSet<object>();
+
+function warnOnce(deps: SemanticSearchDeps, text: string): void {
+  const log = deps.log;
+  if (!log || warnedLoggers.has(log)) return;
+  warnedLoggers.add(log);
+  try {
+    log(text);
+  } catch {
+    // A logger that throws must not take the search down with it.
+  }
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return EMBED_SEMANTIC_WEIGHT;
+  return Math.min(1, Math.max(0, value));
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  // Equal widths are arranged by the caller; a mismatch here would mean the
+  // embedder is not honouring its own contract, and scoring that as 0 similarity
+  // is safer than reading past the end of either vector.
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i] as number;
+    const y = b[i] as number;
+    dot += x * y;
+    normA += x * x;
+    normB += y * y;
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+/**
+ * Reject an embedder response that cannot be trusted, before it reaches scoring.
+ *
+ * A short or non-numeric batch is a bug in the embedder, not a ranking signal,
+ * so it takes the same fallback path as a rejection rather than silently
+ * scoring every agent as 0.
+ */
+function assertVectors(value: unknown, expected: number): asserts value is number[][] {
+  const list: unknown[] | null = Array.isArray(value) ? value : null;
+  if (!list || list.length !== expected || !list.every(isVector)) {
+    throw new Error(`embedder returned ${list ? list.length : 'no'} usable vectors for ${expected} texts`);
+  }
+}
+
+/**
+ * Rank agents by intent, with the lexical score as a tiebreak.
+ *
+ * `searchAgents` matches literal words, so a query that describes the task in
+ * different vocabulary than the definition ("change how the records are shaped"
+ * against "database migrations") finds nothing. Embeddings close that gap. The
+ * lexical path is kept alongside it rather than replaced, because it is free,
+ * it never fails, and an exact name hit is still the strongest signal available.
+ *
+ * Returns exactly what `searchAgents` returns, so callers such as the subagent
+ * roster need no change and can switch between the two freely.
+ */
+export async function searchAgentsSemantic(
+  agents: LibraryAgent[],
+  query: string,
+  limit = 8,
+  deps: SemanticSearchDeps = {},
+): Promise<AgentMatch[]> {
+  // An empty library or an empty query is not a semantic problem, so it is
+  // answered before the embedder or the cache is touched at all.
+  if (agents.length === 0 || query.trim() === '') return [];
+
+  /** The lexical path, and the promise that it never throws. */
+  const lexical = (): AgentMatch[] => {
+    try {
+      return searchAgents(agents, query, limit);
+    } catch (err) {
+      warnOnce(deps, `semantic search is off and keyword search failed: ${errorText(err)}`);
+      return [];
+    }
+  };
+
+  const embed = deps.embed;
+  if (!embed) {
+    warnOnce(deps, 'semantic search is off (no embedder injected); using keyword search');
+    return lexical();
+  }
+
+  const embedderId = deps.embedderId ?? 'default';
+  const semanticWeight = clamp01(deps.semanticWeight ?? EMBED_SEMANTIC_WEIGHT);
+  const bodyChars = Math.max(0, deps.bodyChars ?? EMBED_BODY_CHARS);
+  const cachePath = join(deps.cacheDir ?? defaultEmbeddingCacheDir(), `${cacheFileName(embedderId)}.json`);
+
+  // Name, description and body together are what identifies the agent's task;
+  // the body is cut to a character budget first so one 40 KB definition cannot
+  // dominate the cost of the batch. The query is embedded as-is, with no
+  // stemming or rewriting, so the vector describes what the caller actually
+  // asked for. Embeddings go through the injected function only.
+  const texts = agents.map((agent) => `${agent.name}\n${agent.description}\n${agent.body.slice(0, bodyChars)}`);
+  const keys = texts.map((text) => embeddingKey(embedderId, text));
+  const queryKey = embeddingKey(embedderId, query);
+
+  const cache = readEmbeddingCache(cachePath);
+  const vectors: Array<number[] | undefined> = keys.map((key) => cache[key]);
+  let queryVector: number[] | undefined = cache[queryKey];
+  let dirty = false;
+
+  try {
+    // One batched call covers every agent still missing a vector plus the query.
+    // The query is cached like any other text, which is what makes a repeated
+    // search free rather than merely cheap.
+    const missing: number[] = [];
+    for (let i = 0; i < vectors.length; i++) {
+      if (!isVector(vectors[i])) missing.push(i);
+    }
+
+    if (missing.length > 0 || !isVector(queryVector)) {
+      const batch = [...missing.map((i) => texts[i] ?? ''), ...(isVector(queryVector) ? [] : [query])];
+      const out = await embed(batch);
+      assertVectors(out, batch.length);
+      missing.forEach((index, position) => {
+        const vector = out[position] as number[];
+        vectors[index] = vector;
+        const key = keys[index];
+        if (key !== undefined) {
+          cache[key] = vector;
+          dirty = true;
+        }
+      });
+      if (!isVector(queryVector)) {
+        const fresh = out[out.length - 1] as number[];
+        queryVector = fresh;
+        cache[queryKey] = fresh;
+        dirty = true;
+      }
+    }
+
+    if (!isVector(queryVector)) throw new Error('no query vector');
+
+    // A cached vector left by an embedder of another width cannot be compared
+    // with the query. That invalidates the entry, not the search, so only the
+    // offending entries are re-embedded.
+    const stale: number[] = [];
+    for (let i = 0; i < vectors.length; i++) {
+      const vector = vectors[i];
+      if (isVector(vector) && vector.length !== queryVector.length) stale.push(i);
+    }
+    if (stale.length > 0) {
+      const out = await embed(stale.map((i) => texts[i] ?? ''));
+      assertVectors(out, stale.length);
+      stale.forEach((index, position) => {
+        const vector = out[position] as number[];
+        vectors[index] = vector;
+        const key = keys[index];
+        if (key !== undefined) {
+          cache[key] = vector;
+          dirty = true;
+        }
+      });
+    }
+
+    if (dirty) writeEmbeddingCache(cachePath, cache);
+  } catch (err) {
+    warnOnce(deps, `semantic search failed (${errorText(err)}); using keyword search`);
+    return lexical();
+  }
+
+  const queryVec = queryVector;
+  if (!queryVec) return lexical(); // unreachable: the block above either sets it or falls back
+
+  // Raw lexical scores, taken one agent at a time through the same function the
+  // caller would otherwise use. Scoring agents individually keeps a duplicate
+  // name from being credited with another agent's score.
+  const lexicalScores = agents.map((agent) => searchAgents([agent], query, 1)[0]?.score ?? 0);
+  let maxLexical = 0;
+  for (const score of lexicalScores) {
+    if (score > maxLexical) maxLexical = score;
+  }
+
+  const matches: AgentMatch[] = agents.map((agent, index) => {
+    const vector = vectors[index];
+    const semantic = isVector(vector) ? cosineSimilarity(vector, queryVec) : 0;
+    // Normalised against the best lexical score in the library so the two halves
+    // of the blend are on the same 0..1 scale regardless of query length.
+    const lexicalShare = maxLexical > 0 ? (lexicalScores[index] ?? 0) / maxLexical : 0;
+    return {
+      name: agent.name,
+      description: agent.description,
+      tier: agent.tier,
+      score: semantic * semanticWeight + lexicalShare * (1 - semanticWeight),
+    };
+  });
+
+  return matches.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)).slice(0, limit);
 }

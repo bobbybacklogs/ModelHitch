@@ -419,6 +419,92 @@ Requirements:
 
 There is no automatic routing to cloud agents in this release — use an explicit model prefix only.
 
+### Pinning a provider
+
+`--provider <id>` pins the whole bridge to one provider for the life of that process:
+
+```bash
+npx modelhitch bridge --background --provider opencode-go
+npx modelhitch status          # shows "provider: pinned to opencode-go"
+```
+
+Routing rules while pinned:
+
+- The pinned provider is the lane for **every** request, including one that names a different
+  provider — `openai/gpt-5.4` becomes `opencode-go/gpt-5.4` (the model id survives; only the
+  provider changes).
+- The route the pin displaced is the **first fallback**, followed by the configured policy lanes.
+  A pinned provider that is rate-limited, out of credit, or erroring therefore rotates on to a
+  working provider instead of failing the request.
+- A bare request uses the configured `defaultModel` unless it is namespaced to another provider
+  (`openai/gpt-5.4`), in which case the pinned provider's own default model is used.
+- Unknown ids are rejected before the bridge starts, with the available provider ids listed.
+
+Without `--provider`, routing is unchanged. The pin is runtime-only: it is never written to
+`~/.modelhitch/config.json`, and restarting without the flag restores the configured rotation.
+
+### OpenCode Console BYOK
+
+[Console BYOK](https://opencode.ai/v2/docs/console/byok/) links a provider account you already pay
+for to an OpenCode workspace. Console stores the provider credential and exposes one gateway URL
+per connection:
+
+```
+https://opencode.ai/inference/custom/<connection_id>
+```
+
+Members and integrations call that URL with a Console **service-account key**; Console swaps it for
+the connection's credential before forwarding, so the provider secret never leaves the workspace.
+Four schemas are supported, each with its own path under the connection URL: `/chat/completions`,
+`/responses`, `/messages`, and `/models/<model>:generateContent`.
+
+ModelHitch serves one Console connection as one provider lane, `opencode-byok-<slug>`:
+
+```bash
+# rotate across every connection configured in /settings
+npx modelhitch bridge --background --opencode-byok
+
+# pin one connection for this process
+npx modelhitch bridge --background --provider opencode-byok-deepseek
+
+# configure entirely from the CLI
+npx modelhitch bridge \
+  --opencode-byok \
+  --opencode-byok-connection conn_abc123 --opencode-byok-models deepseek-chat,deepseek-reasoner \
+  --opencode-byok-connection conn_def456 --opencode-byok-schema anthropic --opencode-byok-models claude-sonnet-4-6 \
+  --opencode-byok-mode rotation
+```
+
+`/settings` → **OpenCode Console BYOK** is the primary surface. It stores `opencodeByok` in the
+config document:
+
+| Field | Meaning |
+| --- | --- |
+| `enabled` | Master switch. Off = no BYOK providers, no BYOK lanes |
+| `mode` | `rotation` (spread across every connection) or `pinned` (one connection first) |
+| `pinnedConnectionId` / `pinnedModel` | Primary lane when `mode` is `pinned` |
+| `connections[]` | `id` (Console API URL or bare `conn_…`), optional `label`, `baseUrl`, `schema`, `models`, `enabled` |
+| `syncFromOpenCode` | Seed empty model lists from the local OpenCode install |
+
+Rotation puts every enabled connection × model at the front of the lane plan; the configured
+policy stays directly behind it as the safety net. Pinned leads with the pinned connection and its
+remaining models, then the configured policy — a depleted connection still falls through to
+another provider. Both modes cost nothing when the block is off.
+
+If a connection's model list is empty and `syncFromOpenCode` is on, the bridge reads the local
+OpenCode install (`~/.local/share/opencode/auth.json`, `opencode.db` credential rows and recent
+`providerID`/`modelID` message history, `~/.config/opencode/opencode.json[c]`) and rotates the
+models you actually run there. **Import from OpenCode** in `/settings` does the same interactively
+and shows what it found; `--opencode-byok-import` prints the discovered providers and seeds them
+into the config file before exiting. Console mints opaque connection ids that no local file
+records, so an import seeds the provider names and models — replace each id with its Console
+connection id (or paste the Console API URL) before relying on it.
+
+Credentials: Console BYOK reuses the OpenCode key from settings. Resolution order is
+`keys.opencode-byok` → the connection's own `keys.opencode-byok-<slug>` (the per-provider card in
+`/settings` → Providers) → `keys.opencode` → `keys.opencode-go` → `OPENCODE_API_KEY`. The bridge
+never sends the incoming client Authorization header upstream; it resolves the key locally.
+
 ### Bridge CLI commands
 
 These commands talk to a running bridge (start one with `modelhitch bridge` or
@@ -529,6 +615,25 @@ free or unknown pricing reports zero and is not proof that billing cannot occur.
 Handle `ModelHitchError.code` instead of parsing provider strings. Stable codes include
 `missing-api-key`, `invalid-api-key`, `rate-limited`, `model-not-found`, `provider-not-found`,
 `provider-error`, `network-error`, `bad-request`, and `capability-unavailable`.
+
+### What triggers failover
+
+A lane is replaced by the next lane in the resolved list when the failure is lane-local and
+transient. Detection checks the HTTP status first, then the normalized code:
+
+| Trigger | Why it rotates |
+| --- | --- |
+| `status === 429` | The provider is rate limiting this lane. Checked by status because adapters surface 429s as `bad-request` with the status preserved. |
+| `status === 402` | The lane's account cannot fund the request. Providers arrive here for both "no credit" and "the requested `max_tokens` exceeds what the account can afford", and another lane can serve the same request. Checked by status because providers surface 402 as `bad-request`. |
+| `rate-limited`, `provider-error`, `network-error` | The default retryable codes, for failures that carry no usable status. |
+
+Failures that are not lane-local never rotate: `bad-request` without a 402 or 429 status,
+`model-not-found`, and `invalid-api-key`. A lane with no key at all is skipped silently instead.
+Aborts and cancellations are never retried. Failover happens only before any content is emitted, so
+a lane that dies mid-stream propagates its error rather than duplicating output.
+
+Narrow or widen the code set per invocation with `retryableCodes` on an `AutoModeOptions` object or
+on a policy. The status check for 429 and 402 applies regardless of that list.
 
 Create an OpenAI-compatible integration with `createOpenAICompatibleProvider`. For another wire
 protocol, implement the `Provider` interface with `chat`, `stream`, `capabilities`, and optionally

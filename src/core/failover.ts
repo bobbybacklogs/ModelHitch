@@ -10,6 +10,12 @@ import { ModelHitchError, type ModelHitchErrorCode } from './errors.js';
  * - **any** error carrying `status === 429`, regardless of code — the
  *   Anthropic streaming adapter currently surfaces 429s as `bad-request`
  *   with the status preserved.
+ * - **any** error carrying `status === 402` — a lane whose account cannot fund
+ *   the request is a lane-local condition, exactly like a rate limit. Providers
+ *   arrive at 402 for both "no credit" and "max_tokens above what the account
+ *   can afford", and both are answered by trying a different lane that can
+ *   serve the request. Providers commonly surface 402 as `bad-request`, so the
+ *   status has to be checked directly rather than through the code.
  *
  * Aborts and user cancellations are not `ModelHitchError`s, so they are never
  * retried. Failover only happens *before* content is emitted — a lane that
@@ -74,13 +80,20 @@ export const DEFAULT_FAILOVER_LANES: FailoverTarget[] = [
   { providerId: 'openai', model: 'gpt-5.4' },
 ];
 
+/**
+ * Statuses that always trigger failover regardless of the normalized code.
+ * 429 is a rate limit; 402 is a lane-local credit or budget refusal. Both mean
+ * "this lane cannot serve the request right now", which is what rotation is for.
+ */
+const ALWAYS_RETRYABLE_STATUSES = new Set([402, 429]);
+
 /** True when the error should trigger a failover to the next lane. */
 export function isRetryableError(
   err: unknown,
   codes: readonly ModelHitchErrorCode[] = DEFAULT_RETRYABLE_CODES,
 ): boolean {
   if (!(err instanceof ModelHitchError)) return false;
-  if (err.status === 429) return true;
+  if (err.status !== undefined && ALWAYS_RETRYABLE_STATUSES.has(err.status)) return true;
   return codes.includes(err.code);
 }
 

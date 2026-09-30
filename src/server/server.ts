@@ -65,7 +65,7 @@ import {
 } from './responses.js';
 import { clearConversations, findConversationWithToolCall, rememberConversation } from './conversation-state.js';
 import { normalizeBodyImages } from './local-images.js';
-import { extractSessionId } from '../core/session.js';
+import { resolveOutboundSessionId } from '../core/session.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
 import type { CloudAgentConfig, ImageGenerationConfig } from '../config.js';
 import {
@@ -78,6 +78,8 @@ import { safeJsonParse } from '../core/json.js';
 import { modelhitchHome } from '../config-file.js';
 import { WorkspaceStore } from '../workspace/store.js';
 import { handleWorkspaceHttp } from './workspace-http.js';
+import type { OpenCodeLocalState } from '../opencode-byok.js';
+import { OPENCODE_BYOK_KEY_ENV } from '../providers/opencode-byok.js';
 
 export interface ModelHitchServerOptions {
   /** Providers to serve. Defaults to the built-in set. */
@@ -160,6 +162,20 @@ export interface ModelHitchServerOptions {
   usagePersistence?: boolean | string;
   /** Persist chat sessions and work orders. Defaults to `<modelhitchHome>/workspace`. */
   workspaceStore?: WorkspaceStore;
+  /**
+   * Pin every request to one provider (`modelhitch bridge --provider <id>`).
+   *
+   * The pinned provider becomes the primary lane for every request — including
+   * requests that name a different provider — and the lane plan it displaced
+   * becomes the fallback, so a depleted or erroring pinned provider still
+   * rotates on to a working one. Unset, routing is exactly what it was.
+   */
+  pinnedProviderId?: string;
+  /**
+   * Supplies the local OpenCode snapshot backing `GET /v1/opencode-state`
+   * (the settings UI "Import from OpenCode" action). Unset = 501.
+   */
+  openCodeState?: () => OpenCodeLocalState;
 }
 
 /** One completed inference request, as reported to the `onUsage` hook. */
@@ -200,6 +216,21 @@ function geminiImageConfig(size: string): { aspectRatio: string; imageSize: '1K'
 interface ResolvedLane extends FailoverTarget {
   provider: Provider;
   credentials: ProviderCredentials;
+}
+
+/**
+ * A request's routing decision.
+ *
+ * `provider`/`model` are the lanes the request will actually try first. When a
+ * provider pin overrode what the client asked for, `displaced` records the
+ * client's own route so it can be tried immediately after the pinned lane
+ * instead of being dropped — the pin prefers one provider without making the
+ * rest of the bridge unreachable.
+ */
+interface RoutedRequest {
+  provider: Provider;
+  model: string;
+  displaced?: FailoverTarget;
 }
 
 /**
@@ -291,6 +322,8 @@ export class OpenAICompatibleServer {
     cloudAgent?: CloudAgentConfig;
     keystore?: KeyStore;
     staticModels?: Record<string, string[]>;
+    pinnedProviderId?: string;
+    openCodeState?: () => OpenCodeLocalState;
   }): void {
     if (partial.providers) this.providers = partial.providers;
     if (partial.catalogSource !== undefined) {
@@ -329,6 +362,79 @@ export class OpenAICompatibleServer {
     }
     if (partial.keystore !== undefined) this.options.keystore = partial.keystore;
     if (partial.staticModels !== undefined) this.options.staticModels = partial.staticModels;
+    if (partial.pinnedProviderId !== undefined) this.options.pinnedProviderId = partial.pinnedProviderId || undefined;
+    if (partial.openCodeState !== undefined) this.options.openCodeState = partial.openCodeState;
+  }
+
+  /** The provider a `--provider` pin routes through, when it still exists. */
+  private pinnedProvider(): Provider | undefined {
+    const id = this.options.pinnedProviderId;
+    if (!id) return undefined;
+    return this.providerFor(id) ?? this.providers.find((p) => p.id === id);
+  }
+
+  /**
+   * Route a request, honoring a provider pin.
+   *
+   * With no pin this is exactly `routeModel`. With a pin, the pinned provider
+   * takes the model the client asked for (minus a foreign `provider/` prefix)
+   * and the client's own route — or the configured default when the request is
+   * bare — becomes a fallback lane, so the pin costs one preference, not the
+   * whole rotation.
+   */
+  private routeRequest(modelInput: string | undefined): RoutedRequest {
+    const natural = routeModel(modelInput, this.providers, this.options.defaultProviderId);
+    const pinned = this.pinnedProvider();
+    if (!pinned || pinned.id === natural.provider.id) {
+      return { provider: natural.provider, model: natural.model };
+    }
+    const requested = typeof modelInput === 'string' && modelInput.trim() ? natural.model : undefined;
+    return {
+      provider: pinned,
+      model: requested ?? this.pinnedDefaultModel(pinned),
+      displaced: { providerId: natural.provider.id, model: natural.model },
+    };
+  }
+
+  /**
+   * The model a pinned provider serves when the request names none: the
+   * configured `defaultModel` when it is not namespaced to some *other*
+   * provider, otherwise the pinned provider's own default.
+   */
+  private pinnedDefaultModel(pinned: Provider): string {
+    const configured = this.options.defaultModel;
+    if (configured) {
+      const foreign = this.providers.some((p) => p.id !== pinned.id && configured.startsWith(`${p.id}/`));
+      if (!foreign) return configured;
+    }
+    return pinned.defaultModel;
+  }
+
+  /**
+   * The ordered lane list for a routed request: the primary lane, then the
+   * route a pin displaced (if any), then the policy/auto-mode lanes.
+   */
+  private async lanesForRoute(route: RoutedRequest, credentials?: ProviderCredentials): Promise<ResolvedLane[]> {
+    const lanes: ResolvedLane[] = [
+      {
+        providerId: route.provider.id,
+        model: route.model,
+        provider: route.provider,
+        credentials: credentials ?? (await this.resolveCredentials(route.provider.id)),
+      },
+    ];
+    if (route.displaced) {
+      const provider = this.providerFor(route.displaced.providerId);
+      if (provider) {
+        lanes.push({
+          ...route.displaced,
+          provider,
+          credentials: await this.resolveCredentials(route.displaced.providerId),
+        });
+      }
+    }
+    lanes.push(...(await this.laneTargetsFor(route.provider, route.model)));
+    return lanes;
   }
 
   /** Start listening. `port` defaults to 0 (ephemeral). */
@@ -382,7 +488,8 @@ export class OpenAICompatibleServer {
 
     if (method === 'GET' && (path === '/health' || path === '/healthz')) {
       this.log(`${method} ${path} 200`);
-      this.sendJson(res, 200, { status: 'ok' });
+      const pinnedProviderId = this.pinnedProvider()?.id;
+      this.sendJson(res, 200, pinnedProviderId ? { status: 'ok', pinnedProviderId } : { status: 'ok' });
       return;
     }
 
@@ -513,6 +620,27 @@ export class OpenAICompatibleServer {
       const cd = this.cooldown;
       if (cd instanceof CircuitBreaker) health.push(...cd.snapshot());
       this.sendJson(res, 200, health);
+      return;
+    }
+
+    // Local OpenCode install snapshot: which providers/models the user runs in
+    // OpenCode. Backs the settings page "Import from OpenCode" action, which
+    // seeds BYOK connection model lists from real OpenCode usage.
+    if (method === 'GET' && path === '/v1/opencode-state') {
+      this.log(`${method} ${path} ->`);
+      if (!this.options.openCodeState) {
+        this.sendJson(res, 501, {
+          error: { message: 'OpenCode state import is not available on this bridge.', type: 'not_implemented', code: 'not_implemented' },
+        });
+        return;
+      }
+      try {
+        this.sendJson(res, 200, this.options.openCodeState());
+      } catch (err) {
+        this.sendJson(res, 500, {
+          error: { message: `Could not read the local OpenCode install: ${(err as Error).message}`, type: 'server_error', code: 'opencode_state_failed' },
+        });
+      }
       return;
     }
 
@@ -767,25 +895,24 @@ export class OpenAICompatibleServer {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'messages' array.", { status: 400 });
     }
     this.assertCloudAgentModel(body.model);
-    const { provider, model } = routeModel(body.model, this.providers, this.options.defaultProviderId);
+    const route = this.routeRequest(body.model);
+    const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
     let params = mapRequest(body, model);
-    const incomingSession = extractSessionId(req.headers);
-    if (incomingSession) params.sessionId = incomingSession;
-    if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
+    params.sessionId = resolveOutboundSessionId(req.headers, params.messages);
+    if (!this.options.pinnedProviderId && this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
 
     if (body.stream === true) {
       this.log(`  -> ${provider.id}/${model} (stream)`);
-      await this.writeStream(res, provider, params, credentials, model);
+      await this.writeStream(res, route, params, credentials);
       return;
     }
 
     this.log(`  -> ${provider.id}/${model}`);
     const startedAt = Date.now();
-    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params);
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
     );
@@ -805,11 +932,11 @@ export class OpenAICompatibleServer {
    */
   private async writeStream(
     res: ServerResponse,
-    provider: Provider,
+    route: RoutedRequest,
     params: ChatParams,
     credentials: ProviderCredentials,
-    model: string,
   ): Promise<void> {
+    const { provider, model } = route;
     const controller = new AbortController();
     const id = `chatcmpl-${randomUUID()}`;
     const created = Math.floor(Date.now() / 1000);
@@ -822,8 +949,7 @@ export class OpenAICompatibleServer {
       if (!res.writableEnded) controller.abort();
     });
 
-    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params, { streaming: true });
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params, { streaming: true });
     const usageInfo = { providerId: provider.id, model, wire: 'chat-completions' as const, streamed: true };
     const stream = this.trackStream(
       withFailoverStream(
@@ -945,13 +1071,13 @@ export class OpenAICompatibleServer {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'input' array or 'instructions'.", { status: 400 });
     }
     this.assertCloudAgentModel(body.model);
-    const { provider, model } = routeModel(body.model, this.providers, this.options.defaultProviderId);
+    const route = this.routeRequest(body.model);
+    const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
     let params = mapResponsesRequest(body, model);
-    const incomingSession = extractSessionId(req.headers);
-    if (incomingSession) params.sessionId = incomingSession;
-    if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
+    params.sessionId = resolveOutboundSessionId(req.headers, params.messages);
+    if (!this.options.pinnedProviderId && this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
 
     // Stateful continuation: the client sliced prior turns out and references
@@ -985,14 +1111,13 @@ export class OpenAICompatibleServer {
 
     if (body.stream === true) {
       this.log(`  -> ${provider.id}/${model} (responses stream)`);
-      await this.writeResponsesStream(res, provider, params, credentials, model);
+      await this.writeResponsesStream(res, route, params, credentials);
       return;
     }
 
     this.log(`  -> ${provider.id}/${model} (responses)`);
     const startedAt = Date.now();
-    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params);
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
     );
@@ -1010,19 +1135,18 @@ export class OpenAICompatibleServer {
   /** Stream a normalized provider stream out as Responses API SSE events. */
   private async writeResponsesStream(
     res: ServerResponse,
-    provider: Provider,
+    route: RoutedRequest,
     params: ChatParams,
     credentials: ProviderCredentials,
-    model: string,
   ): Promise<void> {
+    const { provider, model } = route;
     const controller = new AbortController();
     // Abort the upstream call if the client disconnects mid-stream.
     res.on('close', () => {
       if (!res.writableEnded) controller.abort();
     });
 
-    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params, { streaming: true });
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params, { streaming: true });
     const usageInfo = { providerId: provider.id, model, wire: 'responses' as const, streamed: true };
     const stream = this.trackStream(
       withFailoverStream(
@@ -1093,25 +1217,24 @@ export class OpenAICompatibleServer {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'messages' array.", { status: 400 });
     }
     this.assertCloudAgentModel(body.model);
-    const { provider, model } = routeModel(body.model, this.providers, this.options.defaultProviderId);
+    const route = this.routeRequest(body.model);
+    const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
     let params = mapAnthropicRequest(body, model);
-    const incomingSession = extractSessionId(req.headers);
-    if (incomingSession) params.sessionId = incomingSession;
-    if (this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
+    params.sessionId = resolveOutboundSessionId(req.headers, params.messages);
+    if (!this.options.pinnedProviderId && this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
 
     if (body.stream === true) {
       this.log(`  -> ${provider.id}/${model} (anthropic stream)`);
-      await this.writeAnthropicStream(res, provider, params, credentials, model, body);
+      await this.writeAnthropicStream(res, route, params, credentials, body);
       return;
     }
 
     this.log(`  -> ${provider.id}/${model} (anthropic)`);
     const startedAt = Date.now();
-    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params);
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
     );
@@ -1126,20 +1249,19 @@ export class OpenAICompatibleServer {
   /** Stream a normalized provider stream out as Anthropic Messages SSE events. */
   private async writeAnthropicStream(
     res: ServerResponse,
-    provider: Provider,
+    route: RoutedRequest,
     params: ChatParams,
     credentials: ProviderCredentials,
-    model: string,
     body: AnthropicRequest,
   ): Promise<void> {
+    const { provider, model } = route;
     const controller = new AbortController();
     // Abort the upstream call if the client disconnects mid-stream.
     res.on('close', () => {
       if (!res.writableEnded) controller.abort();
     });
 
-    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params, { streaming: true });
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params, { streaming: true });
     const usageInfo = { providerId: provider.id, model, wire: 'messages' as const, streamed: true };
     const stream = this.trackStream(
       withFailoverStream(
@@ -1225,25 +1347,24 @@ export class OpenAICompatibleServer {
     // The model lives in the URL path for the Google wire; body.model (if any)
     // is a fallback for clients that send it anyway.
     this.assertCloudAgentModel(modelFromPath || body.model);
-    const { provider, model } = routeModel(modelFromPath || body.model, this.providers, this.options.defaultProviderId);
+    const route = this.routeRequest(modelFromPath || body.model);
+    const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
     let params = mapGeminiRequest(body, model);
-    const incomingSession = extractSessionId(req.headers);
-    if (incomingSession) params.sessionId = incomingSession;
-    if (this.options.defaultModel && !modelFromPath && !body.model) params.model = this.options.defaultModel;
+    params.sessionId = resolveOutboundSessionId(req.headers, params.messages);
+    if (!this.options.pinnedProviderId && this.options.defaultModel && !modelFromPath && !body.model) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
 
     if (stream) {
       this.log(`  -> ${provider.id}/${model} (gemini stream)`);
-      await this.writeGeminiStream(res, provider, params, credentials, model, body);
+      await this.writeGeminiStream(res, route, params, credentials, body);
       return;
     }
 
     this.log(`  -> ${provider.id}/${model} (gemini)`);
     const startedAt = Date.now();
-    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params);
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params);
     const { value: result, target } = await this.withFailover(targets, (lane) =>
       lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
     );
@@ -1258,20 +1379,19 @@ export class OpenAICompatibleServer {
   /** Stream a normalized provider stream out as Google `:streamGenerateContent` SSE. */
   private async writeGeminiStream(
     res: ServerResponse,
-    provider: Provider,
+    route: RoutedRequest,
     params: ChatParams,
     credentials: ProviderCredentials,
-    model: string,
     body: GeminiRequest,
   ): Promise<void> {
+    const { provider, model } = route;
     const controller = new AbortController();
     // Abort the upstream call if the client disconnects mid-stream.
     res.on('close', () => {
       if (!res.writableEnded) controller.abort();
     });
 
-    const primary: ResolvedLane = { providerId: provider.id, model, provider, credentials };
-    const targets = this.requireCapableTargets([primary, ...(await this.laneTargetsFor(provider, model))], params, { streaming: true });
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params, { streaming: true });
     const usageInfo = { providerId: provider.id, model, wire: 'gemini' as const, streamed: true };
     const stream = this.trackStream(
       withFailoverStream(
@@ -1692,6 +1812,9 @@ export class OpenAICompatibleServer {
 
 /** Env var hints for the settings UI when models.dev catalog mode is off. */
 function providerEnvHints(providerId: string): string[] {
+  // Console BYOK connections share the Console service-account key with the
+  // Zen/Go lanes, so every `opencode-byok-*` provider points at the same var.
+  if (providerId.startsWith('opencode-byok-')) return [OPENCODE_BYOK_KEY_ENV];
   const map: Record<string, string[]> = {
     openai: ['OPENAI_API_KEY'],
     anthropic: ['ANTHROPIC_API_KEY'],

@@ -71,3 +71,19 @@ export function deriveSessionId(messages: ModelMessage[] | undefined, fallbackSe
 
   return 'mh-sess-' + hash1 + hash2;
 }
+
+/**
+ * Resolve the session id attached to outbound provider requests.
+ *
+ * A client-supplied session header always wins. Otherwise one is derived from
+ * the conversation so every upstream request carries a stable, replay-safe
+ * session id. OpenCode Go depends on this: it rejects requests without a
+ * session header outright (`MissingSessionID`), and Zen uses the id to route and
+ * cache efficiently.
+ */
+export function resolveOutboundSessionId(
+  headers: Record<string, string | string[] | undefined> | undefined,
+  messages: ModelMessage[] | undefined,
+): string {
+  return extractSessionId(headers) ?? deriveSessionId(messages);
+}

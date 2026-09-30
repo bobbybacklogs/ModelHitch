@@ -1,8 +1,28 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { dirname, resolve, relative } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { exec, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import type { ToolDefinition } from '../src/index.js';
 import { GREP_DESCRIPTION, GREP_TOOL_NAME, formatGrepResult, grepWorkspace } from './grep.js';
+import {
+  DECLINE_MESSAGE,
+  buildApprovalPreview,
+  isMutatingToolCall,
+  type ApprovalHandler,
+} from './approval.js';
+import type { Snapshotter } from './snapshot.js';
+import type { ReadCache } from './read-cache.js';
+import { resolveWorkspacePath } from './workspace.js';
+import type { RiskClassifier } from './risk.js';
+import {
+  declined,
+  error,
+  ok,
+  outcomeFromText,
+  resultFromText,
+  timeout,
+  truncated,
+  type ToolResult,
+} from './result.js';
 
 export const HARNESS_TOOLS: ToolDefinition[] = [
   {
@@ -27,7 +47,9 @@ export const HARNESS_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'read',
-    description: 'Read a file from the workspace. Returns UTF-8 text.',
+    description:
+      'Read a file from the workspace. Returns UTF-8 text. Reading the same unchanged file again ' +
+      'returns a short "unchanged since turn N" line instead of the body.',
     parameters: {
       type: 'object',
       properties: { path: { type: 'string', description: 'Workspace-relative file path' } },
@@ -120,19 +142,42 @@ export const HARNESS_TOOLS: ToolDefinition[] = [
   },
 ];
 
-function resolveWorkspacePath(workspaceDir: string, p: string): string {
-  const abs = resolve(workspaceDir, p);
-  const rel = relative(workspaceDir, abs);
-  if (rel.startsWith('..') || resolve(rel) === rel) {
-    throw new Error(`Path escapes workspace: ${p}`);
-  }
-  return abs;
-}
-
 function strArg(args: Record<string, unknown>, key: string): string {
   const v = args[key];
   if (typeof v !== 'string') throw new Error(`Tool arg "${key}" must be a string`);
   return v;
+}
+
+/** Everything `executeHarnessTool` needs beyond the call itself. */
+export interface ToolExecutionOptions {
+  workspaceDir?: string;
+  /** Cancels the call: a timeout, or Ctrl-C. */
+  signal?: AbortSignal;
+  /** When set, mutating calls are shown and confirmed before they run. */
+  onApproval?: ApprovalHandler;
+  /** When set, pre-change bytes are copied aside for `/undo` and `--undo`. */
+  snapshot?: Snapshotter;
+  /**
+   * Labels the risk of a mutating call before the gate asks.
+   *
+   * Advisory only: it adds a field to the request and never decides anything
+   * here. `--auto-approve-safe` is implemented by the handler, not by this.
+   */
+  risk?: RiskClassifier;
+  /**
+   * The per-run read cache, when the caller has one. `index.ts` builds one per
+   * run and passes it here; a caller that omits it reads the file every time,
+   * which is what this did before the cache existed.
+   */
+  readCache?: ReadCache;
+  /**
+   * The model turn this call belongs to, when the caller knows it.
+   *
+   * Used only for the "unchanged since turn N" line. The batch executor knows
+   * the turn, the serial path does not, and a wrong number is worse than none —
+   * so an absent turn degrades the wording instead of inventing a count.
+   */
+  turn?: number;
 }
 
 /**
@@ -265,7 +310,7 @@ export function killTree(child: ChildProcess): void {
  */
 async function runOpencode(
   message: string,
-  opts: { model?: string; agent?: string; timeoutMs: number },
+  opts: { model?: string; agent?: string; timeoutMs: number; signal?: AbortSignal },
   workspaceDir: string,
 ): Promise<string> {
   const model = resolveOpencodeModel(opts.model);
@@ -293,6 +338,14 @@ async function runOpencode(
       killTree(child);
       finish(`Error: opencode timed out after ${opts.timeoutMs}ms\n${summarizeOpencode(stdout).slice(-2000)}`);
     }, opts.timeoutMs);
+    // The caller's signal (a tool budget, or Ctrl-C) must reach the process
+    // tree: abandoning the promise without killing the child leaves an agentic
+    // CLI editing the workspace after the run has moved on.
+    const onAbort = (): void => {
+      killTree(child);
+      finish('Error: opencode was interrupted before it finished');
+    };
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout?.on('data', (d: Buffer) => {
       stdout += d.toString();
     });
@@ -301,10 +354,12 @@ async function runOpencode(
     });
     child.on('error', (err) => {
       clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
       finish(`Error: failed to start opencode: ${err.message}`);
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
       const scan = scanOpencode(stdout);
       // A rate limit is the one failure worth remembering: opencode retries it
       // until the run dies, so without a cooldown every retry repeats the wait.
@@ -452,7 +507,12 @@ export function summarizeOpencode(stdout: string): string {
  * disabled, stdin closed. Read-only friendly; write commands work too and
  * return gh's own output (or its error) as the result string.
  */
-async function runGh(ghArgs: string[], timeoutMs: number, workspaceDir: string): Promise<string> {
+async function runGh(
+  ghArgs: string[],
+  timeoutMs: number,
+  workspaceDir: string,
+  signal?: AbortSignal,
+): Promise<string> {
   return await new Promise<string>((res) => {
     const child = spawn(
       'gh',
@@ -473,6 +533,11 @@ async function runGh(ghArgs: string[], timeoutMs: number, workspaceDir: string):
       killTree(child);
       finish(`Error: gh timed out after ${timeoutMs}ms\n${stdout.slice(-2000)}`);
     }, timeoutMs);
+    const onAbort = (): void => {
+      killTree(child);
+      finish('Error: gh was interrupted before it finished');
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout?.on('data', (d: Buffer) => {
       stdout += d.toString();
     });
@@ -481,10 +546,12 @@ async function runGh(ghArgs: string[], timeoutMs: number, workspaceDir: string):
     });
     child.on('error', (err) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       finish(`Error: failed to start gh: ${err.message}`);
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       const out = `${stdout}${stderr ? `\n[stderr]\n${stderr}` : ''}`.slice(0, 20_000);
       if (code !== 0) finish(`Error: gh exited ${code ?? '?'}\n${out}`);
       else finish(out || '(no output)');
@@ -501,7 +568,12 @@ async function runGh(ghArgs: string[], timeoutMs: number, workspaceDir: string):
  * One-shot Antigravity call. argv-based (no shell), stream-json internally so
  * the 25k-token init blob never reaches model context — only answer + usage.
  */
-async function runAgy(prompt: string, timeoutMs: number, workspaceDir: string): Promise<string> {
+async function runAgy(
+  prompt: string,
+  timeoutMs: number,
+  workspaceDir: string,
+  signal?: AbortSignal,
+): Promise<string> {
   const line =
     JSON.stringify({ event: 'user', message: { role: 'user', content: prompt } }) + '\n';
   return await new Promise<string>((res) => {
@@ -522,6 +594,11 @@ async function runAgy(prompt: string, timeoutMs: number, workspaceDir: string): 
       killTree(child);
       finish(`Error: agy timed out after ${timeoutMs}ms\n${stdout.slice(-2000)}`);
     }, timeoutMs);
+    const onAbort = (): void => {
+      killTree(child);
+      finish('Error: agy was interrupted before it finished');
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout?.on('data', (d: Buffer) => {
       stdout += d.toString();
     });
@@ -530,10 +607,12 @@ async function runAgy(prompt: string, timeoutMs: number, workspaceDir: string): 
     });
     child.on('error', (err) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       finish(`Error: failed to start agy: ${err.message}`);
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       let response = '';
       let usage = '';
       let status = '';
@@ -572,13 +651,50 @@ async function runAgy(prompt: string, timeoutMs: number, workspaceDir: string): 
   });
 }
 
+/**
+ * Run one tool call.
+ *
+ * Returns an explicit envelope rather than a bare string. The envelope's `text`
+ * is byte-for-byte what the model receives, so nothing downstream changes; the
+ * `outcome` is what the harness and the UI use to stop guessing from
+ * substrings. Where a helper below still returns a plain string — the delegated
+ * CLI wrappers, which parse their own JSON — `resultFromText` classifies it
+ * through the documented fallback.
+ */
 export async function executeHarnessTool(
   name: string,
   args: Record<string, unknown>,
-  opts: { workspaceDir?: string } = {},
-): Promise<string> {
+  opts: ToolExecutionOptions = {},
+): Promise<ToolResult> {
   const workspaceDir = resolve(opts.workspaceDir ?? process.cwd());
+  const signal = opts.signal;
+  const snapshot = opts.snapshot;
+  const readCache = opts.readCache;
+  const turn = opts.turn;
   try {
+    // Any mutating call may have changed any file, so the whole cache goes
+    // before the call runs rather than after it returns. A decline writes
+    // nothing and a failure may still have written something, and telling those
+    // apart is more fragile than dropping entries that cost one read each to
+    // rebuild. `approval.ts` stays the one authority on what mutates.
+    if (readCache !== undefined && isMutatingToolCall(name, args)) readCache.invalidate();
+    // The gate runs before the tool body, so a decline cannot leave a partially
+    // written file or a half-run command behind. The model gets a plain string
+    // back and can adapt, rather than an error it can only retry.
+    if (opts.onApproval && isMutatingToolCall(name, args)) {
+      const preview = await buildApprovalPreview(name, args, { workspaceDir });
+      // Classified before the question, because a label that arrives after the
+      // human has decided is worth nothing.
+      const risk = await opts.risk?.classify(name, args, preview);
+      const approved = await opts.onApproval({ tool: name, args, preview, ...(risk ? { risk } : {}) });
+      if (!approved) return declined(DECLINE_MESSAGE, 'the human declined this change');
+    }
+    if (signal?.aborted === true) {
+      // Aborted before it started: reported as a timeout, not an error, so the
+      // model reads "this did not run" rather than "this is broken".
+      return timeout(`Error: ${name} was cancelled before it started`);
+    }
+
     switch (name) {
       case GREP_TOOL_NAME: {
         const pattern = strArg(args, 'pattern');
@@ -590,35 +706,71 @@ export async function executeHarnessTool(
           maxResults: typeof args['maxResults'] === 'number' ? (args['maxResults'] as number) : undefined,
           caseSensitive: args['caseSensitive'] === true,
           regex: args['regex'] === true,
+          ...(signal ? { signal } : {}),
         });
-        return formatGrepResult(result, pattern);
+        const text = formatGrepResult(result, pattern);
+        // The grep result already knows which of these happened; reading it is
+        // the whole reason the envelope exists. A search cut short by an abort
+        // must not look like a complete one that merely found fewer matches.
+        if (result.error !== undefined) return error(text);
+        if (result.aborted === true) return timeout(text, 'the search was cancelled');
+        if (result.truncated) return truncated(text, 'the match list was capped');
+        return ok(text);
       }
       case 'read': {
-        const file = resolveWorkspacePath(workspaceDir, strArg(args, 'path'));
-        return await readFile(file, 'utf8');
+        const label = strArg(args, 'path');
+        const file = resolveWorkspacePath(workspaceDir, label);
+        if (readCache === undefined) return ok(await readFile(file, 'utf8'));
+        // A repeat read keeps the `ok` outcome: nothing went wrong, the model
+        // simply already has these bytes. Nothing goes in `note` either — the
+        // notice text says everything a human needs, and a UI-only copy would be
+        // a second thing to keep in step with it.
+        const text = await readCache.read(file, {
+          label,
+          ...(turn === undefined ? {} : { turn }),
+          load: (): Promise<string> => readFile(file, 'utf8'),
+        });
+        return ok(text);
       }
       case 'write': {
         const file = resolveWorkspacePath(workspaceDir, strArg(args, 'path'));
         const content = strArg(args, 'content');
+        // Capture before the write, never after: undo wants the state the run
+        // started from.
+        snapshot?.capture(file);
         await mkdir(dirname(file), { recursive: true });
         await writeFile(file, content, 'utf8');
-        return `Wrote ${args['path']} (${content.length} chars)`;
+        return ok(`Wrote ${args['path']} (${content.length} chars)`);
       }
       case 'edit': {
         const file = resolveWorkspacePath(workspaceDir, strArg(args, 'path'));
         const oldString = strArg(args, 'oldString');
         const newString = strArg(args, 'newString');
         const current = await readFile(file, 'utf8');
-        if (!current.includes(oldString)) return `Error: oldString not found in ${args['path']}`;
+        if (!current.includes(oldString)) return error(`Error: oldString not found in ${args['path']}`);
+        snapshot?.capture(file);
         await writeFile(file, current.replace(oldString, newString), 'utf8');
-        return `Edited ${args['path']}`;
+        return ok(`Edited ${args['path']}`);
       }
       case 'bash': {
         const command = strArg(args, 'command');
         const timeoutMs =
           typeof args['timeoutMs'] === 'number' ? (args['timeoutMs'] as number) : 30_000;
         const stdin = typeof args['stdin'] === 'string' ? (args['stdin'] as string) : '';
-        return await new Promise<string>((res) => {
+        // A shell can touch anything, so this records the gap instead of
+        // pretending the snapshot covers it.
+        snapshot?.note(
+          'run_command may modify paths the harness never sees; only write/edit targets are ' +
+            `captured (command: ${command.slice(0, 200)})`,
+        );
+        const text = await new Promise<string>((res) => {
+          let done = false;
+          const finish = (msg: string): void => {
+            if (done) return;
+            done = true;
+            signal?.removeEventListener('abort', onAbort);
+            res(msg);
+          };
           const child = exec(
             command,
             {
@@ -629,10 +781,17 @@ export async function executeHarnessTool(
             },
             (err, stdout, stderr) => {
               const out = `${stdout}${stderr ? `\n[stderr]\n${stderr}` : ''}`.slice(0, 20_000);
-              if (err) res(`Exit ${err.code ?? '?'}: ${err.message}\n${out}`);
-              else res(out || '(no output)');
+              if (err) finish(`Exit ${err.code ?? '?'}: ${err.message}\n${out}`);
+              else finish(out || '(no output)');
             },
           );
+          // `exec`'s own timeout kills only the direct child, so an interrupt
+          // has to walk the tree the same way the delegated CLIs do.
+          function onAbort(): void {
+            killTree(child);
+            finish('Error: bash was interrupted before it finished');
+          }
+          signal?.addEventListener('abort', onAbort, { once: true });
           // exec leaves stdin open: a child awaiting input would hang until
           // timeout. Feed `stdin` when given, otherwise close it for EOF.
           try {
@@ -642,32 +801,49 @@ export async function executeHarnessTool(
             /* stdin already gone — child doesn't want it */
           }
         });
+        // `exec` caps the capture at maxBuffer and the slice above caps the
+        // result; either way a successful call can be a partial view.
+        const outcome = outcomeFromText(text);
+        const capped = outcome === 'ok' && text.length >= 20_000;
+        return capped
+          ? truncated(`${text}\n[output truncated at 20000 chars]`, 'the command produced more output than was kept')
+          : resultFromText(text);
       }
       case 'agy': {
         const timeoutMs =
           typeof args['timeoutMs'] === 'number' ? (args['timeoutMs'] as number) : 120_000;
-        return await runAgy(strArg(args, 'prompt'), timeoutMs, workspaceDir);
+        snapshot?.note('agy runs its own agentic loop in the workspace; its writes are not captured');
+        return resultFromText(await runAgy(strArg(args, 'prompt'), timeoutMs, workspaceDir, signal));
       }
       case 'gh': {
         const rawArgs = args['args'];
         if (!Array.isArray(rawArgs) || rawArgs.some((a) => typeof a !== 'string')) {
-          return 'Error: gh "args" must be an array of strings.';
+          return error('Error: gh "args" must be an array of strings.');
         }
         const timeoutMs =
           typeof args['timeoutMs'] === 'number' ? (args['timeoutMs'] as number) : 60_000;
-        return await runGh(rawArgs as string[], timeoutMs, workspaceDir);
+        return resultFromText(await runGh(rawArgs as string[], timeoutMs, workspaceDir, signal));
       }
       case 'opencode': {
         const timeoutMs =
           typeof args['timeoutMs'] === 'number' ? (args['timeoutMs'] as number) : 180_000;
         const model = typeof args['model'] === 'string' ? (args['model'] as string) : undefined;
         const agent = typeof args['agent'] === 'string' ? (args['agent'] as string) : undefined;
-        return await runOpencode(strArg(args, 'message'), { model, agent, timeoutMs }, workspaceDir);
+        snapshot?.note(
+          'opencode runs its own agentic loop in the workspace; its writes are not captured',
+        );
+        return resultFromText(await runOpencode(
+          strArg(args, 'message'),
+          { model, agent, timeoutMs, ...(signal ? { signal } : {}) },
+          workspaceDir,
+        ));
       }
       default:
-        return `Error: unknown tool "${name}". Available: ${HARNESS_TOOLS.map((t) => t.name).join(', ')}.`;
+        return error(
+          `Error: unknown tool "${name}". Available: ${HARNESS_TOOLS.map((t) => t.name).join(', ')}.`,
+        );
     }
   } catch (err) {
-    return `Error: ${err instanceof Error ? err.message : String(err)}`;
+    return error(`Error: ${err instanceof Error ? err.message : String(err)}`);
   }
 }

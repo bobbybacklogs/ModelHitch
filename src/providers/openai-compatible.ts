@@ -15,6 +15,11 @@ import type {
   Usage,
 } from '../core/types.js';
 import { safeJsonParse } from '../core/json.js';
+import {
+  DsmlStreamGuard,
+  recoverMessageToolCalls,
+  toolSchemaFromDefinitions,
+} from '../core/dsml.js';
 import { bodyToAsyncIterable, parseSSE, requireBody } from '../core/stream.js';
 import type { ModelInfo, Provider } from './types.js';
 
@@ -47,6 +52,13 @@ export interface OpenAICompatibleConfig {
   capabilities?: Partial<Capabilities>;
   /** Extra headers to send with every request. */
   headers?: Record<string, string>;
+  /**
+   * Outbound header names that carry the per-conversation session id, in
+   * priority order. Defaults to `['x-session-id', 'x-conversation-id']`.
+   * Providers that require their own header name (OpenCode Go requires
+   * `x-opencode-session` to route and cache efficiently) prepend it here.
+   */
+  sessionHeaders?: string[];
   /** Injectable fetch for tests and edge runtimes. */
   fetchImpl?: typeof fetch;
   /**
@@ -416,10 +428,7 @@ export class OpenAICompatibleProvider implements Provider {
     if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
     const sessionId = params.sessionId ?? undefined;
-    if (sessionId) {
-      if (!headers['x-session-id']) headers['x-session-id'] = sessionId;
-      if (!headers['x-conversation-id']) headers['x-conversation-id'] = sessionId;
-    }
+    applySessionHeaders(headers, sessionId, this.config.sessionHeaders ?? DEFAULT_SESSION_HEADERS);
     if (!headers['User-Agent'] && !headers['user-agent']) {
       headers['User-Agent'] = 'ModelHitch/2.0';
     }
@@ -466,13 +475,24 @@ export class OpenAICompatibleProvider implements Provider {
     const toolCalls = toToolCalls(message.tool_calls);
     const content = typeof message.content === 'string' ? message.content : '';
     const reasoningContent = typeof message.reasoning_content === 'string' ? message.reasoning_content : undefined;
+
+    // DeepSeek V4 models sometimes emit tool calls as DSML markup inside the text
+    // channel instead of populating tool_calls; recover them so callers never see
+    // raw markup. Only applies when the provider returned no real tool calls.
+    const recovery = recoverMessageToolCalls(
+      { content, toolCalls: toolCalls as Array<{ id: string; name: string; arguments: Record<string, unknown> }> | undefined },
+      toolSchemaFromDefinitions(params.tools),
+    );
+    const finalContent = typeof recovery.content === 'string' ? recovery.content : '';
+    const finalToolCalls = recovery.toolCalls;
+
     const result: ModelMessage =
-      toolCalls && toolCalls.length > 0
-        ? { role: 'assistant', content, toolCalls, ...(reasoningContent ? { reasoningContent } : {}) }
-        : { role: 'assistant', content: String(content ?? ''), ...(reasoningContent ? { reasoningContent } : {}) };
+      finalToolCalls && finalToolCalls.length > 0
+        ? { role: 'assistant', content: finalContent, toolCalls: finalToolCalls, ...(reasoningContent ? { reasoningContent } : {}) }
+        : { role: 'assistant', content: finalContent, ...(reasoningContent ? { reasoningContent } : {}) };
     return {
       message: result,
-      finishReason: mapFinishReason(choice?.finish_reason),
+      finishReason: recovery.recovered ? 'tool_calls' : mapFinishReason(choice?.finish_reason),
       usage: toUsage(data.usage),
       raw: data,
     };
@@ -495,6 +515,11 @@ export class OpenAICompatibleProvider implements Provider {
     }
     const body = requireBody(res, this.id);
     const toolAcc = new Map<string, { id: string; name: string; args: string }>();
+    // Guards the text channel against DSML markup; holds back a short tail so
+    // markers split across chunks are still recovered.
+    const dsmlGuard = new DsmlStreamGuard(toolSchemaFromDefinitions(params.tools));
+    let sawDsmlToolCalls = false;
+    let flushed = false;
 
     for await (const payload of parseSSE(bodyToAsyncIterable(body))) {
       const chunk = safeJsonParse<OpenAIStreamChunk | null>(payload, null);
@@ -504,7 +529,8 @@ export class OpenAICompatibleProvider implements Provider {
       const delta = choice.delta ?? {};
 
       if (typeof delta.content === 'string' && delta.content) {
-        yield { type: 'text-delta', text: delta.content };
+        const safeText = dsmlGuard.push(delta.content);
+        if (safeText) yield { type: 'text-delta', text: safeText };
       }
 
       // DeepSeek thinking mode streams the chain-of-thought under
@@ -536,11 +562,34 @@ export class OpenAICompatibleProvider implements Provider {
         if (choice.finish_reason === 'tool_calls') {
           for (const acc of toolAcc.values()) yield { type: 'tool-call-end', id: acc.id };
         }
+        const finish = dsmlGuard.finish();
+        if (finish.text) yield { type: 'text-delta', text: finish.text };
+        if (finish.detected && finish.toolCalls.length > 0 && toolAcc.size === 0) {
+          sawDsmlToolCalls = true;
+          for (const call of finish.toolCalls) {
+            yield { type: 'tool-call-start', id: call.id, name: call.name };
+            yield { type: 'tool-call-args-delta', id: call.id, argsDelta: JSON.stringify(call.arguments) };
+            yield { type: 'tool-call-end', id: call.id };
+          }
+        }
         const usage = toUsage(chunk.usage);
-        yield usage
-          ? { type: 'finish', finishReason: mapFinishReason(choice.finish_reason), usage }
-          : { type: 'finish', finishReason: mapFinishReason(choice.finish_reason) };
+        const reason = sawDsmlToolCalls ? 'tool_calls' : mapFinishReason(choice.finish_reason);
+        yield usage ? { type: 'finish', finishReason: reason, usage } : { type: 'finish', finishReason: reason };
+        flushed = true;
       }
+    }
+
+    // Providers occasionally end the stream without a finish_reason; never drop
+    // text the guard is still holding.
+    if (!flushed) {
+      const finish = dsmlGuard.finish();
+      if (finish.text) yield { type: 'text-delta', text: finish.text };
+      for (const call of finish.toolCalls) {
+        yield { type: 'tool-call-start', id: call.id, name: call.name };
+        yield { type: 'tool-call-args-delta', id: call.id, argsDelta: JSON.stringify(call.arguments) };
+        yield { type: 'tool-call-end', id: call.id };
+      }
+      yield { type: 'finish', finishReason: finish.toolCalls.length > 0 ? 'tool_calls' : 'stop' };
     }
   }
 
@@ -584,4 +633,23 @@ export class OpenAICompatibleProvider implements Provider {
 
 export function createOpenAICompatibleProvider(config: OpenAICompatibleConfig): Provider {
   return new OpenAICompatibleProvider(config);
+}
+
+/** Default outbound session header names when a provider does not override them. */
+export const DEFAULT_SESSION_HEADERS = ['x-session-id', 'x-conversation-id'] as const;
+
+/**
+ * Populate every configured session header with the request's session id.
+ * Headers already present in the provider's static header map win, so an
+ * operator can hard-pin a session through configuration.
+ */
+export function applySessionHeaders(
+  headers: Record<string, string>,
+  sessionId: string | undefined,
+  sessionHeaders: readonly string[] = DEFAULT_SESSION_HEADERS,
+): void {
+  if (!sessionId) return;
+  for (const name of sessionHeaders) {
+    if (!headers[name]) headers[name] = sessionId;
+  }
 }

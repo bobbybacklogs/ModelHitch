@@ -43,13 +43,44 @@ function configPathFrom(opts: { configPath?: string }): string {
 export async function loadHarnessRuntime(opts: {
   configPath?: string;
   modelOverride?: string;
+  /**
+   * Suppress the "no config yet" hint. The doctor reports the same fact in its
+   * own report, so printing it here as well would say it twice.
+   */
+  hintOnMissing?: boolean;
 } = {}): Promise<HarnessRuntime> {
   const configPath = configPathFrom(opts);
   const loaded = readConfigFile(configPath);
+  if (loaded === null && opts.hintOnMissing !== false) {
+    // A first run with no config fails deep inside provider resolution, with an
+    // error that says nothing about the missing file. One line here turns that
+    // into an instruction.
+    process.stderr.write(
+      `[harness] no config at ${configPath} — run \`mhh setup\` to create one, or \`mhh doctor\` to check the setup\n`,
+    );
+  }
   const config: ModelHitchConfig = loaded ?? defaultConfigTemplate();
+  return await buildRuntime({ config, configPath, ...(opts.modelOverride !== undefined ? { modelOverride: opts.modelOverride } : {}) });
+}
+
+/**
+ * Build a runtime from a config document that is not on disk yet.
+ *
+ * `setup` needs this: it must prove a candidate credential works *before*
+ * writing anything, so it cannot go through `loadHarnessRuntime`, which by
+ * definition reads a file. Keeping the wiring in one place means the wizard
+ * verifies against exactly the client a run would build.
+ */
+export async function buildRuntime(opts: {
+  config: ModelHitchConfig;
+  configPath: string;
+  /** Per-run override in `<provider>/<model>` form. */
+  modelOverride?: string;
+}): Promise<HarnessRuntime> {
+  const config = opts.config;
   const { errors } = validateConfig(config);
   if (errors.length) {
-    throw new Error(`Invalid ModelHitch config at ${configPath}:\n  - ${errors.join('\n  - ')}`);
+    throw new Error(`Invalid ModelHitch config at ${opts.configPath}:\n  - ${errors.join('\n  - ')}`);
   }
 
   const keystore = new MemoryKeyStore();
@@ -74,5 +105,5 @@ export async function loadHarnessRuntime(opts: {
     ...(buildCatalogOptions(config) ? { catalog: buildCatalogOptions(config) } : {}),
   });
 
-  return { client, config, configPath, provider, model };
+  return { client, config, configPath: opts.configPath, provider, model };
 }

@@ -194,6 +194,13 @@ describe('settings bridge endpoints', () => {
     expect(html).toContain('Lane health');
     expect(html).toContain('workspaceTargetValue');
     expect(html).toContain('owned_by');
+    // OpenCode Console BYOK section (connection editor + rotation/pin controls).
+    expect(html).toContain('OpenCode Console BYOK');
+    for (const id of ['byokEnabled', 'byokMode', 'byokPin', 'byokPinModel', 'byokKey', 'byokImport', 'byok-connections']) {
+      expect(html).toContain(`id="${id}"`);
+    }
+    expect(html).toContain('opencodeByok: collectOpenCodeByok()');
+    expect(html).toContain('/v1/opencode-state');
   });
 
   it("serves an inline script that actually parses (template escape-rot guard)", () => {
@@ -396,6 +403,95 @@ describe('settings bridge endpoints', () => {
       expect(res.status).toBe(501);
     } finally {
       await bare.close();
+    }
+  });
+});
+
+// ---- OpenCode Console BYOK -------------------------------------------------
+
+describe('opencodeByok config validity', () => {
+  const connection = { id: 'conn_abc', label: 'deepseek', models: ['deepseek-chat'] };
+
+  it('accepts a rotation block and a pinned block', () => {
+    expect(
+      validateConfig({
+        version: 1,
+        policy: { trusted: [{ providerId: 'opencode' }], fallback: [] },
+        opencodeByok: {
+          enabled: true,
+          mode: 'rotation',
+          connections: [connection, { id: 'conn_def', schema: 'anthropic', models: ['claude-sonnet-4-6'] }],
+          syncFromOpenCode: true,
+        },
+      }).errors,
+    ).toEqual([]);
+    expect(
+      validateConfig({
+        version: 1,
+        policy: { trusted: [{ providerId: 'opencode' }], fallback: [] },
+        opencodeByok: {
+          enabled: true,
+          mode: 'pinned',
+          pinnedConnectionId: 'conn_abc',
+          pinnedModel: 'deepseek-chat',
+          connections: [connection],
+        },
+      }).errors,
+    ).toEqual([]);
+  });
+
+  it('rejects a pin that names no connection and colliding lane ids', () => {
+    const bad = validateConfig({
+      version: 1,
+      opencodeByok: { enabled: true, mode: 'pinned', connections: [{ id: 'conn_a' }, { id: 'conn-a' }] },
+    });
+    expect(bad.errors.join('\n')).toMatch(/pinnedConnectionId is not set/);
+    expect(bad.errors.join('\n')).toMatch(/collides with another connection/);
+  });
+
+  it('rejects an unknown schema and empty connection ids', () => {
+    const bad = validateConfig({
+      version: 1,
+      opencodeByok: { enabled: true, connections: [{ id: '  ' }, { id: 'conn_x', schema: 'websocket' as never }] },
+    });
+    expect(bad.errors.join('\n')).toMatch(/must be a non-empty connection id/);
+    expect(bad.errors.join('\n')).toMatch(/schema must be one of/);
+  });
+
+  it('warns when the block is on with nothing to serve', () => {
+    const warned = validateConfig({ version: 1, opencodeByok: { enabled: true, connections: [{ id: 'conn_a', enabled: false }] } });
+    expect(warned.errors).toEqual([]);
+    expect(warned.warnings.join('\n')).toMatch(/no connection is enabled/);
+  });
+});
+
+describe('GET /v1/opencode-state', () => {
+  it('returns 501 when the bridge has no OpenCode reader', async () => {
+    const bare = createModelHitchServer({ defaultProviderId: 'mock' });
+    const info = await bare.listen(0, '127.0.0.1');
+    try {
+      const res = await fetch(`${info.url}/v1/opencode-state`);
+      expect(res.status).toBe(501);
+    } finally {
+      await bare.close();
+    }
+  });
+
+  it('returns the local OpenCode snapshot when one is wired', async () => {
+    const snapshot = {
+      found: true,
+      sources: ['/home/u/.local/share/opencode/auth.json'],
+      warnings: [],
+      providers: [{ providerId: 'deepseek', models: ['deepseek-chat'] }],
+    };
+    const server = createModelHitchServer({ defaultProviderId: 'mock', openCodeState: () => snapshot });
+    const info = await server.listen(0, '127.0.0.1');
+    try {
+      const res = await fetch(`${info.url}/v1/opencode-state`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual(snapshot);
+    } finally {
+      await server.close();
     }
   });
 });

@@ -14,6 +14,7 @@ import { bytesToBase64 } from '../core/base64.js';
 import { safeJsonParse } from '../core/json.js';
 import { parseRetryAfter } from '../core/headers.js';
 import { bodyToAsyncIterable, parseSSE, requireBody } from '../core/stream.js';
+import { applySessionHeaders, DEFAULT_SESSION_HEADERS } from './openai-compatible.js';
 import type { ModelInfo, Provider } from './types.js';
 
 interface AnthropicContentBlock {
@@ -72,10 +73,24 @@ export interface AnthropicProviderOptions {
    * Keep `false` on the server — this header is a footgun outside the browser.
    */
   dangerouslyAllowBrowser?: boolean;
-  /** Auth header scheme: "x-api-key" (default Anthropic) or "bearer" (Authorization: Bearer <key>). */
-  authScheme?: 'x-api-key' | 'bearer';
+  /**
+   * Auth header scheme:
+   * - `x-api-key` (default Anthropic): the Anthropic-native header
+   * - `bearer`: `Authorization: Bearer <key>`
+   * - `bearer-and-x-api-key`: both, for an Anthropic-shaped endpoint that only
+   *   reads `x-api-key` while the rest of its wire family reads `Authorization`
+   *   (OpenCode Zen / Go). Upstream ignores the header it does not read, so
+   *   sending both is safe and saves a per-provider special case.
+   */
+  authScheme?: 'x-api-key' | 'bearer' | 'bearer-and-x-api-key';
   /** Extra headers merged into every request (parity with `OpenAICompatibleConfig.headers`). */
   headers?: Record<string, string>;
+  /**
+   * Outbound header names that carry the per-conversation session id, in
+   * priority order. Providers that require their own header name (OpenCode Go
+   * requires `x-opencode-session`) prepend it here.
+   */
+  sessionHeaders?: string[];
   fetchImpl?: typeof fetch;
 }
 
@@ -94,9 +109,10 @@ export class AnthropicProvider implements Provider {
   private readonly messagesPath: string;
   private readonly apiKeyEnvVar: string;
   private readonly apiKeyEnvFallbacks: string[];
-  private readonly authScheme: 'x-api-key' | 'bearer';
+  private readonly authScheme: 'x-api-key' | 'bearer' | 'bearer-and-x-api-key';
   private readonly dangerouslyAllowBrowser: boolean;
   private readonly headers: Record<string, string> | undefined;
+  private readonly sessionHeaders: string[] | undefined;
   private readonly fetchImpl: typeof fetch;
 
   constructor(opts: AnthropicProviderOptions = {}) {
@@ -110,6 +126,7 @@ export class AnthropicProvider implements Provider {
     this.authScheme = opts.authScheme ?? 'x-api-key';
     this.dangerouslyAllowBrowser = opts.dangerouslyAllowBrowser ?? false;
     this.headers = opts.headers;
+    this.sessionHeaders = opts.sessionHeaders;
     this.capabilities = {
       streaming: true,
       toolCalling: true,
@@ -263,16 +280,13 @@ export class AnthropicProvider implements Provider {
       'anthropic-version': '2023-06-01',
       ...this.headers,
     };
-    if (this.authScheme === 'bearer') {
+    if (this.authScheme === 'bearer' || this.authScheme === 'bearer-and-x-api-key') {
       headers['Authorization'] = `Bearer ${apiKey}`;
-    } else {
+    }
+    if (this.authScheme === 'x-api-key' || this.authScheme === 'bearer-and-x-api-key') {
       headers['x-api-key'] = apiKey;
     }
-    const sessionId = params.sessionId;
-    if (sessionId) {
-      if (!headers['x-session-id']) headers['x-session-id'] = sessionId;
-      if (!headers['x-conversation-id']) headers['x-conversation-id'] = sessionId;
-    }
+    applySessionHeaders(headers, params.sessionId, this.sessionHeaders ?? DEFAULT_SESSION_HEADERS);
     if (!headers['User-Agent'] && !headers['user-agent']) {
       headers['User-Agent'] = 'ModelHitch/2.0';
     }

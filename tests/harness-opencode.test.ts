@@ -19,6 +19,13 @@ import {
   tripOpencodeCooldown,
 } from '../harness/tools.js';
 
+/** The executor returns `{ text, outcome }`; these cases assert on the text. */
+const toolText = async (
+  name: string,
+  args: Record<string, unknown>,
+  opts?: Parameters<typeof executeHarnessTool>[2],
+): Promise<string> => (await executeHarnessTool(name, args, opts)).text;
+
 /**
  * The `opencode` tool shells out to `opencode run --format json` and boils the
  * JSON event stream down to prose for the harness. These tests pin that
@@ -352,7 +359,7 @@ describe('opencode model selection', () => {
 
   it('surfaces the unpinned refusal to the caller', async () => {
     vi.stubEnv('HARNESS_OPENCODE_MODEL', '');
-    const out = await executeHarnessTool('opencode', { message: 'hi' }, { workspaceDir: tmpdir() });
+    const out = await toolText('opencode', { message: 'hi' }, { workspaceDir: tmpdir() });
     expect(out).toContain('needs an explicit model');
   });
 
@@ -401,7 +408,7 @@ describe('opencode rate-limit cooldown', () => {
     const model = 'opencode/rate-limited-model';
     tripOpencodeCooldown(model);
     const t0 = Date.now();
-    const out = await executeHarnessTool(
+    const out = await toolText(
       'opencode',
       { message: 'hi', model },
       { workspaceDir: tmpdir() },
@@ -430,7 +437,7 @@ describe('opencode tool (live)', () => {
     async () => {
       const dir = mkdtempSync(join(tmpdir(), 'harness-live-'));
       try {
-        const out = await executeHarnessTool(
+        const out = await toolText(
           'opencode',
           { message: 'reply with the single word: wrapped', model, timeoutMs: 180_000 },
           { workspaceDir: dir },

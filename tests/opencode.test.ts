@@ -324,6 +324,44 @@ describe('OpenCode streaming', () => {
       { type: 'finish', finishReason: 'stop', usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } },
     ]);
   });
+
+  it('keys the whole tool call on one id, so streamed arguments reach the call', async () => {
+    // Responses names the function call twice: the item (`fc_…`) on
+    // `output_item.added`, and the call (`call_…`) alongside it. Only the item id
+    // is repeated on `function_call_arguments.delta`, while a consumer joins a
+    // chunk to its `tool-call-start` by the id that start carried. Emitting the
+    // item id on the deltas therefore appends the arguments to nothing and the
+    // call arrives as `{}` — every tool call the model makes is then rejected for
+    // a missing argument, which is what a reader sees as "the tool ran in 0ms".
+    const sseLines = [
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read"}}',
+      'data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\\"path\\":"}',
+      'data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"\\"a.json\\"}"}',
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read"}}',
+      'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}',
+    ];
+    const { fetchImpl } = mockOpenCodeFetch({ sseLines });
+    const provider = createOpenCodeProvider({ fetchImpl });
+
+    const chunks = [];
+    for await (const chunk of provider.stream(
+      { model: 'gpt-5.5', messages: [{ role: 'user', content: 'read a.json' }] },
+      { apiKey: 'zen-key' },
+    )) {
+      chunks.push(chunk);
+    }
+
+    const ids = chunks.filter((c) => c.type !== 'finish' && c.type !== 'text-delta').map((c) => (c as { id: string }).id);
+    expect(new Set(ids).size).toBe(1);
+    expect(ids[0]).toBe('call_1');
+
+    // The id is only useful if it joins the accumulated arguments to their call.
+    const args = chunks
+      .filter((c) => c.type === 'tool-call-args-delta')
+      .map((c) => (c as { argsDelta: string }).argsDelta)
+      .join('');
+    expect(JSON.parse(args)).toEqual({ path: 'a.json' });
+  });
 });
 
 describe('OpenCode cost and pricing', () => {

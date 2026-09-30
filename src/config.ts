@@ -6,6 +6,8 @@ import { validatePolicy } from './core/policy.js';
 import { CircuitBreaker } from './core/circuit-breaker.js';
 import { MemoryLaneCooldown } from './core/cooldown.js';
 import type { CatalogSourceOptions } from './catalog/source.js';
+import type { OpenCodeByokSchema } from './providers/opencode-byok.js';
+import { openCodeByokProviderId } from './providers/opencode-byok.js';
 
 /**
  * Milestone 5 — the serializable settings surface.
@@ -74,6 +76,57 @@ export interface ImageGenerationConfig {
   size?: string;
 }
 
+/**
+ * One OpenCode Console BYOK connection (https://opencode.ai/v2/docs/console/byok/).
+ *
+ * Console stores a provider credential for the workspace and hands back exactly
+ * one gateway URL per connection. ModelHitch serves each connection as its own
+ * provider lane, so a connection can be rotated, pinned, cooled, and selected
+ * with `bridge --provider <id>` like any built-in provider.
+ *
+ * Credentials deliberately live in `keys`, never here: `serializeConfig` masks
+ * `keys` on every read, so a plaintext key in this block would leak through
+ * `GET /v1/config`.
+ */
+export interface OpenCodeByokConnection {
+  /** Console connection id (`conn_…`) or a full gateway URL. */
+  id: string;
+  /** Display label for the lane. */
+  label?: string;
+  /** Overrides the derived `https://opencode.ai/inference/custom/<id>` URL. */
+  baseUrl?: string;
+  /** Console API schema; `auto` (default) detects the wire from the model family. */
+  schema?: OpenCodeByokSchema;
+  /** Model ids enabled on the connection — the rotation pool. */
+  models?: string[];
+  /** Off = kept in the document but out of the provider set and out of rotation. */
+  enabled?: boolean;
+}
+
+/** Rotation/pin policy for the Console BYOK connections. */
+export interface OpenCodeByokConfig {
+  /** Master switch. Off = no BYOK providers, no BYOK lanes. */
+  enabled: boolean;
+  /**
+   * `rotation` spreads requests across every enabled connection + model;
+   * `pinned` keeps the primary lane on one connection and uses the rest of the
+   * plan only when it is depleted or erroring. Default: `rotation`.
+   */
+  mode?: 'rotation' | 'pinned';
+  /** Connection pinned when `mode` is `pinned`. */
+  pinnedConnectionId?: string;
+  /** Model pinned when `mode` is `pinned`; defaults to the connection's first model. */
+  pinnedModel?: string;
+  /** Console BYOK connections. */
+  connections: OpenCodeByokConnection[];
+  /**
+   * Seed empty connection model lists from the models the user actually runs in
+   * their local OpenCode install (recent usage + auth/config), so the BYOK
+   * rotation follows the OpenCode model choices instead of a guessed list.
+   */
+  syncFromOpenCode?: boolean;
+}
+
 export interface ModelHitchConfig {
   /** Document version — currently 1. */
   version: 1;
@@ -91,6 +144,8 @@ export interface ModelHitchConfig {
   imageGeneration?: ImageGenerationConfig;
   /** Cursor Cloud Agent lane (explicit cursor-cloud/… routes only). */
   cloudAgent?: CloudAgentConfig;
+  /** OpenCode Console BYOK connections (one provider lane each). */
+  opencodeByok?: OpenCodeByokConfig;
   /** Per-provider API keys. Persisted locally; masked on read. */
   keys?: Record<string, string>;
   /** Default composer target on /workspace: "rotation" or "provider/model". */
@@ -103,6 +158,9 @@ export interface ConfigValidation {
 }
 
 export const CONFIG_VERSION = 1 as const;
+
+/** Console API schemas accepted by `opencodeByok.connections[].schema`. */
+export const OPENCODE_BYOK_SCHEMAS: readonly OpenCodeByokSchema[] = ['auto', 'chat-completions', 'responses', 'anthropic', 'google'];
 
 /** A config with every secret value replaced by a masked hint. */
 export interface MaskedConfig extends Omit<ModelHitchConfig, 'keys'> {
@@ -295,6 +353,72 @@ export function validateConfig(config: unknown): ConfigValidation {
 
   if (cfg.keys !== undefined && (!cfg.keys || typeof cfg.keys !== 'object')) {
     errors.push('keys must be an object of providerId -> API key.');
+  }
+
+  if (cfg.opencodeByok !== undefined) {
+    const b = cfg.opencodeByok;
+    if (!b || typeof b !== 'object') {
+      errors.push('opencodeByok must be an object.');
+    } else {
+      if (typeof b.enabled !== 'boolean') errors.push('opencodeByok.enabled must be a boolean.');
+      if (b.mode !== undefined && b.mode !== 'rotation' && b.mode !== 'pinned') {
+        errors.push('opencodeByok.mode must be "rotation" or "pinned".');
+      }
+      if (b.syncFromOpenCode !== undefined && typeof b.syncFromOpenCode !== 'boolean') {
+        errors.push('opencodeByok.syncFromOpenCode must be a boolean.');
+      }
+      if (b.connections !== undefined && !Array.isArray(b.connections)) {
+        errors.push('opencodeByok.connections must be an array.');
+      } else {
+        const seenIds = new Set<string>();
+        for (const [i, connection] of (b.connections ?? []).entries()) {
+          const label = `opencodeByok.connections[${i}]`;
+          if (!connection || typeof connection !== 'object' || typeof connection.id !== 'string' || !connection.id.trim()) {
+            errors.push(`${label}.id must be a non-empty connection id or gateway URL.`);
+            continue;
+          }
+          const laneId = openCodeByokProviderId(connection.id, connection.label);
+          if (seenIds.has(laneId)) {
+            errors.push(`${label}: connection "${connection.id}" collides with another connection (both become provider "${laneId}").`);
+          }
+          seenIds.add(laneId);
+          if (connection.label !== undefined && (typeof connection.label !== 'string' || !connection.label.trim())) {
+            errors.push(`${label}.label must be a non-empty string when set.`);
+          }
+          if (connection.baseUrl !== undefined && (typeof connection.baseUrl !== 'string' || !connection.baseUrl.trim())) {
+            errors.push(`${label}.baseUrl must be a non-empty URL when set.`);
+          }
+          if (connection.schema !== undefined && !OPENCODE_BYOK_SCHEMAS.includes(connection.schema)) {
+            errors.push(`${label}.schema must be one of ${OPENCODE_BYOK_SCHEMAS.join(', ')}.`);
+          }
+          if (connection.models !== undefined) {
+            if (!Array.isArray(connection.models) || connection.models.some((m) => typeof m !== 'string' || !m.trim())) {
+              errors.push(`${label}.models must be an array of non-empty model ids.`);
+            }
+          }
+          if (connection.enabled !== undefined && typeof connection.enabled !== 'boolean') {
+            errors.push(`${label}.enabled must be a boolean.`);
+          }
+        }
+        const usable = (b.connections ?? []).filter((c) => c && c.enabled !== false && typeof c?.id === 'string' && c.id.trim());
+        if (b.enabled && usable.length === 0) {
+          warnings.push('opencodeByok.enabled is true but no connection is enabled — the bridge will not serve any BYOK lane.');
+        }
+        if (b.mode === 'pinned') {
+          if (!b.pinnedConnectionId) {
+            errors.push('opencodeByok.mode is "pinned" but opencodeByok.pinnedConnectionId is not set.');
+          } else if (!usable.some((c) => c.id === b.pinnedConnectionId)) {
+            errors.push(`opencodeByok.pinnedConnectionId "${b.pinnedConnectionId}" does not match an enabled connection.`);
+          }
+        }
+        if (b.pinnedModel !== undefined && (typeof b.pinnedModel !== 'string' || !b.pinnedModel.trim())) {
+          errors.push('opencodeByok.pinnedModel must be a non-empty model id when set.');
+        }
+      }
+      if (b.enabled && b.connections !== undefined && !(b.connections ?? []).some((c) => (c?.models ?? []).length > 0) && !b.syncFromOpenCode) {
+        warnings.push('opencodeByok connections have no models and syncFromOpenCode is off — each lane will fall back to the provider default model.');
+      }
+    }
   }
 
   if (cfg.defaultWorkspaceTarget !== undefined) {

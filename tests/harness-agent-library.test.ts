@@ -96,6 +96,26 @@ describe('parseFrontmatter', () => {
     expect(data['name']).toBe('crlf');
     expect(body).toBe('body');
   });
+
+  it('folds a plain scalar continued on the next line', () => {
+    // Ordinary YAML, and what a model writes whenever a description wraps.
+    // Ignoring the continuation both warned and truncated the text.
+    const { data, warnings } = parseFrontmatter(
+      '---\nname: wrapped\ndescription: Use when you need to verify that a file exists and contains\n' +
+        '  specific expected content.\ntools:\n  - view_file\n---\nbody\n',
+    );
+    expect(data['description']).toBe(
+      'Use when you need to verify that a file exists and contains specific expected content.',
+    );
+    expect(data['tools']).toEqual(['view_file']);
+    expect(warnings).toEqual([]);
+  });
+
+  it('still reports an indented line that continues nothing', () => {
+    const { warnings } = parseFrontmatter('---\nname: x\n\n  dangling line\ntools:\n  - view_file\n---\nbody\n');
+    expect(warnings.join(' ')).toContain('unexpected indented line');
+    expect(warnings.join(' ')).not.toContain('description');
+  });
 });
 
 describe('mapDeclaredTools', () => {

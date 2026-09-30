@@ -26,9 +26,45 @@ import type { ChatResult, ModelMessage, StreamChunk, ToolCall, Usage } from './c
  */
 export type ToolExecutor = (name: string, args: Record<string, unknown>) => string | Promise<string>;
 
+/**
+ * A turn's tool calls, handed over together.
+ *
+ * The default path executes calls one at a time, in order, and that is the right
+ * default: it is the only ordering that is always correct. A caller that knows
+ * more — that some calls are read-only and safe to overlap, say — can supply
+ * this hook and own the scheduling. The hook is responsible for yielding one
+ * result per call; anything it does not yield is reported to the model as a
+ * failure rather than silently dropped.
+ */
+export type BatchToolExecutor = (
+  calls: ToolCall[],
+  context: { turn: number; execute: ToolExecutor },
+) => AsyncGenerator<{ call: ToolCall; output: string }>;
+
+/**
+ * Rewrite the history before a model call.
+ *
+ * The loop owns `messages` and a caller cannot reach them mid-run, so a feature
+ * that must shrink the history — context compaction — needs a seam here rather
+ * than a workaround. The returned array replaces the history in place, so the
+ * `done` event reports the history the run actually finished with.
+ *
+ * Whatever the rewriter returns must still be a valid conversation: an assistant
+ * message carrying tool calls has to keep the `tool` messages that answer them,
+ * or the next provider call is rejected.
+ */
+export type HistoryRewriter = (
+  messages: ModelMessage[],
+  context: { turn: number },
+) => ModelMessage[] | Promise<ModelMessage[]>;
+
 export interface ToolLoopOptions {
   /** Maximum model turns before the loop stops (default 8). */
   maxTurns?: number;
+  /** Owns scheduling when a turn enqueues several calls. See `BatchToolExecutor`. */
+  executeMany?: BatchToolExecutor;
+  /** Rewrites the history before each model call. See `HistoryRewriter`. */
+  beforeTurn?: HistoryRewriter;
 }
 
 export type ToolLoopEvent =
@@ -109,6 +145,14 @@ export async function* runToolLoop(
 
   for (let turn = 1; turn <= maxTurns; turn++) {
     turns = turn;
+    if (options.beforeTurn) {
+      const rewritten = await options.beforeTurn(messages, { turn });
+      // In place, deliberately: this array's identity is what the `done` event
+      // reports, so replacing it would leave a run reporting a history it no
+      // longer sent.
+      messages.length = 0;
+      messages.push(...rewritten);
+    }
     const { result, chunks } = await streamTurn(client, input, messages);
     // Live passthrough first — callers render text deltas / tool progress as
     // they stream in.
@@ -126,6 +170,31 @@ export async function* runToolLoop(
 
     const toolCalls = result.message.role === 'assistant' ? result.message.toolCalls : undefined;
     if (!toolCalls?.length) break;
+
+    if (options.executeMany) {
+      // The hook owns ordering and concurrency; the loop owns determinism. Every
+      // result is collected before any is yielded, so the `tool` events and the
+      // messages land in the order the model asked for them however the hook
+      // chose to schedule the work.
+      const outputs = new Map<string, string>();
+      for await (const { call, output } of options.executeMany(toolCalls, { turn, execute: executeTool })) {
+        outputs.set(call.id, output);
+      }
+      for (const call of toolCalls) {
+        const output = outputs.get(call.id);
+        if (output === undefined) {
+          // A hook that skipped a call must not silently drop it: the model
+          // would see an assistant turn asking for work that never happened.
+          const missing = `Error: ${call.name} produced no result (the batch executor skipped it)`;
+          yield { type: 'tool', turn, call, output: missing };
+          messages.push({ role: 'tool', content: missing, toolCallId: call.id });
+          continue;
+        }
+        yield { type: 'tool', turn, call, output };
+        messages.push({ role: 'tool', content: output, toolCallId: call.id });
+      }
+      continue;
+    }
 
     for (const call of toolCalls) {
       const output = await executeTool(call.name, call.arguments);

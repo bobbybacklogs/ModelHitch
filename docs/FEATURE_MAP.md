@@ -61,6 +61,8 @@ Must exit 0 without provider keys. Provider unit tests inject stub `fetch`. Brid
 | Provider env-var fallback (`OPENAI_API_KEY`, …) | **Proven (verify)** | Hosted OpenAI-compatible tests assert `missing-api-key` when the env var is unset (`tests/gemini.test.ts`, `tests/moonshot.test.ts`, …) |
 | Vercel AI Gateway credential order: `AI_GATEWAY_API_KEY` → `VERCEL_OIDC_TOKEN` → `VERCEL_TOKEN` → Vercel CLI `auth.json` | **Proven (verify)** | `tests/vercel-ai-gateway.test.ts` (env + fake CLI paths; live gateway **Unverified**) |
 | `LocalStorageKeyStore` (browser BYOK) | **Code-inspected** | `src/storage/local-storage.ts` exported; only constructor existence in `tests/browser-entry.test.ts`. No get/set/delete tests (Node has no `localStorage`). |
+| OpenCode Console BYOK credentials: shared Console service-account key (`keys.opencode-byok` → `keys.opencode` → `keys.opencode-go` → `OPENCODE_API_KEY`) with a per-connection override | **Proven (verify)** | Precedence chain in `tests/opencode-byok.test.ts`; end-to-end against a local fake Console upstream in `tests/cli-bridge-flags.test.ts` |
+| Live OpenCode Console connection (`https://opencode.ai/inference/custom/<conn_…>`) | **Unverified (env-gated)** | Needs a real Console workspace + service-account key. Default verify points the connection at `127.0.0.1` through `baseUrl` |
 | Live BYOK against a real provider | **Unverified (env-gated)** | Needs a real key. `examples/quickstart.ts` / `npm run canary`. |
 
 ## Providers (built-in registry)
@@ -102,6 +104,9 @@ Live hosted inference and local-runtime inference are **not** in default verify.
 | `CircuitBreaker` trip / half-open / snapshot | **Proven (verify)** | `tests/circuit-breaker.test.ts` |
 | `MemoryLaneCooldown` + Retry-After | **Proven (verify)** | Cooldown used from policy/settings tests; `parseRetryAfter` via failover/breaker |
 | Catalog merge: registry wins; auto-build OpenAI-compatible adapters; usability errors | **Proven (verify)** with fixture JSON | `tests/catalog.test.ts` |
+| OpenCode Console BYOK rotation: every enabled connection × model becomes a lane at the front of `trusted`, the configured policy stays behind as the safety net | **Proven (verify)** | `tests/opencode-byok.test.ts` (`applyOpenCodeByokPlan`), `tests/cli-bridge-flags.test.ts` (end-to-end lane) |
+| OpenCode Console BYOK pin: one connection (and model) leads, its remaining models and the configured policy follow as fallback | **Proven (verify)** | `tests/opencode-byok.test.ts` |
+| `bridge --provider <id>` pin: the pinned provider serves even requests that name another provider, the displaced route becomes the first fallback, and a depleted pin still rotates on | **Proven (verify)** | `tests/provider-pin.test.ts` (in-process server), `tests/cli-bridge-flags.test.ts` (built CLI) |
 | Live models.dev catalog download | **Unverified (env-gated)** | Needs network to `https://models.dev` |
 
 ## Browser and React
@@ -127,10 +132,14 @@ Live hosted inference and local-runtime inference are **not** in default verify.
 | `GET /v1/usage`, `GET /usage` dashboard HTML, `POST /v1/usage/reset` | **Proven (verify)** | `tests/auto-mode.test.ts`, `tests/usage.test.ts` |
 | `GET/PUT /v1/config` (masked secrets; no masked write-back) | **Proven (verify)** | `tests/settings.test.ts` |
 | `GET /v1/lane-health`, `GET /v1/catalog` | **Proven (verify)** | `tests/settings.test.ts` |
+| `GET /v1/opencode-state` (local OpenCode snapshot; 501 without a reader) | **Proven (verify)** | `tests/settings.test.ts`; reader itself in `tests/opencode-byok.test.ts` |
+| `/healthz` reports `pinnedProviderId` while a pin is active | **Proven (verify)** | `tests/provider-pin.test.ts` |
+| `opencodeByok` block in `/v1/config` (connection editor, rotation/pin controls, import button) | **Proven (verify)** for the document + served HTML; **Unverified** for the rendered UI | `tests/settings.test.ts` (`validateConfig`, page HTML ids, inline-script parse guard). No browser/DOM test |
 | Image lane `POST /v1/images/generations` (OpenAI + Gemini mapping), **off by default** | **Proven (verify)** with stub `imageFetch` | `tests/settings.test.ts`. Live image APIs **Unverified (env-gated)** |
 | Usage SQLite persistence (`node:sqlite`) | **Proven (verify)** on Node 22.5+ | `tests/usage-storage.test.ts`. Library still supports Node 18 without persistence |
 | Cost estimates | **Proven (verify)** as a lookup table | `tests/cost.test.ts`. README already warns estimates are best-effort |
 | CLI `bridge --background` / pid / log / `status` / `stop` | **Proven (verify)** | `tests/daemon.test.ts` (builds CLI, spawns background mock bridge) |
+| CLI `bridge --provider <id>` (pin, unknown-id rejection) and the `--opencode-byok*` flag family | **Proven (verify)** | `tests/cli-bridge-flags.test.ts` spawns the built CLI against a local fake upstream; `--help` tokens in `tests/cli-help.test.ts` |
 | CLI `setup` skill install (codex/claude/cursor/vscode, user/project, dry-run, force) | **Proven (verify)** | `tests/skill-installer.test.ts` (in-process; not the `dist/cli.js setup` argv path) |
 | CLI `--help` / `--version` / `config` / `front` | **Code-inspected** | `src/cli.ts` |
 | CLI `settings` OpenTUI | **Code-inspected** form mapping; **Unverified (env-gated)** live TUI | `tests/settings-form.test.ts`; TUI requires Bun + TTY (`src/cli.ts`) |

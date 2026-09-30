@@ -4,6 +4,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { GREP_TOOL_NAME, createGrepTool, formatGrepResult, grepWorkspace } from '../harness/grep.js';
 import { executeHarnessTool } from '../harness/tools.js';
 
+/** The executor returns `{ text, outcome }`; these cases assert on the text. */
+const toolText = async (
+  name: string,
+  args: Record<string, unknown>,
+  opts?: Parameters<typeof executeHarnessTool>[2],
+): Promise<string> => (await executeHarnessTool(name, args, opts)).text;
+
 /**
  * `grep_search` is the most commonly declared tool in the agency agent library
  * (49 of 57 agents), so it needs a real implementation — otherwise the only way
@@ -229,12 +236,12 @@ describe('grep_search through the harness dispatcher', () => {
   it('is actually wired, not merely declared', async () => {
     // Declaring a tool that the dispatcher does not handle would fail only at
     // call time, so this drives the real dispatch path.
-    const out = await executeHarnessTool('grep_search', { pattern: 'deep needle' }, { workspaceDir: SANDBOX });
+    const out = await toolText('grep_search', { pattern: 'deep needle' }, { workspaceDir: SANDBOX });
     expect(out).toContain('src/nested/c.ts');
   });
 
   it('resolves the search directory against the workspace', async () => {
-    const out = await executeHarnessTool(
+    const out = await toolText(
       'grep_search',
       { pattern: 'needle', path: 'src/nested' },
       { workspaceDir: SANDBOX },
@@ -244,7 +251,7 @@ describe('grep_search through the harness dispatcher', () => {
   });
 
   it('honours include and caseSensitive through the dispatcher', async () => {
-    const out = await executeHarnessTool(
+    const out = await toolText(
       'grep_search',
       { pattern: 'NEEDLE', include: ['ts'], caseSensitive: true },
       { workspaceDir: SANDBOX },
@@ -253,7 +260,7 @@ describe('grep_search through the harness dispatcher', () => {
   });
 
   it('returns an error string rather than throwing on a bad path', async () => {
-    const out = await executeHarnessTool('grep_search', { pattern: 'x', path: 'nope' }, { workspaceDir: SANDBOX });
+    const out = await toolText('grep_search', { pattern: 'x', path: 'nope' }, { workspaceDir: SANDBOX });
     expect(out).toContain('Error');
   });
 });

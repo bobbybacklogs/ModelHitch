@@ -42,13 +42,18 @@ import {
   readConfigFile,
   writeConfigFile,
 } from './config-file.js';
-import type { ModelHitchConfig } from './config.js';
+import type { ModelHitchConfig, OpenCodeByokConnection } from './config.js';
+import { OPENCODE_BYOK_SCHEMAS } from './config.js';
+import type { OpenCodeByokSchema } from './providers/opencode-byok.js';
 import { MemoryKeyStore } from './storage/memory.js';
 import { CircuitBreaker } from './core/circuit-breaker.js';
 import type { LaneCooldown } from './core/failover.js';
 import type { Provider } from './providers/types.js';
 import { bridgeProviders } from './bridge-providers.js';
 import { defaultProviders } from './registry.js';
+import { applyOpenCodeByokPlan, describeOpenCodeByokPlan, openCodeByokApiKeys } from './opencode-byok.js';
+import type { OpenCodeLocalState } from './opencode-byok.js';
+import { readOpenCodeLocalState } from './opencode-state.js';
 import { validateCursorCloudApiKey, CURSOR_CLOUD_PROVIDER_ID } from './providers/cursor-cloud.js';
 import { CursorCloudSessionStore } from './providers/cursor-cloud-session.js';
 
@@ -147,6 +152,96 @@ function argsHasFlag(flags: string[]): boolean {
   return flags.some((flag) => process.argv.includes(flag));
 }
 
+/**
+ * Split `--flag=value` into its parts. Returns the bare flag name plus the
+ * inline value (undefined for the space-separated form).
+ */
+function splitFlag(arg: string): { name: string; inline?: string } {
+  if (!arg.startsWith('--')) return { name: arg };
+  const eq = arg.indexOf('=');
+  if (eq <= 2) return { name: arg };
+  return { name: arg.slice(0, eq), inline: arg.slice(eq + 1) };
+}
+
+/**
+ * Parse the repeatable Console BYOK connection flags in argv order, so
+ * `--opencode-byok-connection <id> --opencode-byok-models a,b` scopes the
+ * models to the connection that immediately precedes them.
+ */
+function openCodeByokConnectionsFromArgs(argv: string[] = process.argv): OpenCodeByokConnection[] {
+  const connections: OpenCodeByokConnection[] = [];
+  const last = () => connections[connections.length - 1];
+  for (let i = 0; i < argv.length; i++) {
+    const { name, inline } = splitFlag(argv[i] ?? '');
+    if (!name.startsWith('--opencode-byok')) continue;
+    const next = argv[i + 1];
+    const spaced = inline === undefined && next !== undefined && !next.startsWith('--') ? next : undefined;
+    const value = inline ?? spaced;
+    const consumed = spaced !== undefined;
+    switch (name) {
+      case '--opencode-byok-connection':
+        if (value) connections.push({ id: value, enabled: true });
+        if (consumed) i++;
+        break;
+      case '--opencode-byok-label':
+        if (value && last()) last()!.label = value;
+        if (consumed) i++;
+        break;
+      case '--opencode-byok-models':
+        if (value && last()) last()!.models = value.split(',').map((m) => m.trim()).filter(Boolean);
+        if (consumed) i++;
+        break;
+      case '--opencode-byok-schema':
+        if (value && last() && OPENCODE_BYOK_SCHEMAS.includes(value as OpenCodeByokSchema)) {
+          last()!.schema = value as OpenCodeByokSchema;
+        }
+        if (consumed) i++;
+        break;
+      case '--opencode-byok-connection-url':
+        if (value && last()) last()!.baseUrl = value;
+        if (consumed) i++;
+        break;
+      default:
+        break;
+    }
+  }
+  return connections;
+}
+
+/** Replace same-id connections in place, append the rest. */
+function mergeOpenCodeByokConnections(
+  existing: readonly OpenCodeByokConnection[],
+  incoming: readonly OpenCodeByokConnection[],
+): OpenCodeByokConnection[] {
+  const out = existing.map((connection) => ({ ...connection }));
+  for (const connection of incoming) {
+    const index = out.findIndex((candidate) => candidate.id === connection.id);
+    if (index === -1) out.push({ ...connection });
+    else out[index] = { ...out[index], ...connection };
+  }
+  return out;
+}
+
+/**
+ * Turn the local OpenCode snapshot into BYOK connection candidates: one per
+ * provider the user actually runs, carrying the models they actually chose.
+ * The id is the OpenCode provider name, which the user replaces with the
+ * Console connection id — Console mints opaque `conn_…` ids that no local file
+ * records, so the name is the best join key available offline.
+ */
+function openCodeImportConnections(state: OpenCodeLocalState | undefined): OpenCodeByokConnection[] {
+  if (!state?.found) return [];
+  return state.providers
+    .filter((provider) => provider.models.length > 0)
+    .map((provider) => ({
+      id: provider.providerId,
+      label: `${provider.providerId} (from OpenCode)`,
+      schema: 'auto' as OpenCodeByokSchema,
+      models: provider.models,
+      enabled: true,
+    }));
+}
+
 function usage(): void {
   console.log(`ModelHitch v${VERSION} — plug-and-play BYOK integration layer.
   hitched at https://github.com/genoventures-labs/ModelHitch
@@ -187,6 +282,9 @@ Chat and work flags:
   --base-url <url>                               bridge base URL (default http://127.0.0.1:3939, or MODELHITCH_PORT)
 
 Bridge flags (with \`bridge\` and \`bridge --background\`):
+  --provider <id>                pin the bridge to one provider until it is restarted
+                                 (the lane the pin displaces stays as fallback, so a
+                                 depleted or erroring pin still rotates on)
   --config <file>                config file (default ~/.modelhitch/config.json)
   --image-lane                   enable image generation lane (alias: --image-generation)
   --no-image-lane                disable image lane (alias: --no-image-generation)
@@ -199,6 +297,22 @@ Bridge flags (with \`bridge\` and \`bridge --background\`):
   --cloud-agent-repo <url>       cloudAgent.repos[0].url
   --cloud-agent-ref <ref>        cloudAgent.repos[0].startingRef
   --cloud-agent-model <id>       cloudAgent.defaultModel (default composer-2.5)
+
+OpenCode Console BYOK flags (https://opencode.ai/v2/docs/console/byok/):
+  --opencode-byok                enable BYOK connections (alias: --no-opencode-byok)
+  --opencode-byok-connection <id>  add a connection: the Console API URL or bare conn_… id (repeatable)
+  --opencode-byok-models <a,b>   models enabled on the preceding connection (the rotation pool)
+  --opencode-byok-label <text>   label for the preceding connection
+  --opencode-byok-schema <s>     auto | chat-completions | responses | anthropic | google
+  --opencode-byok-mode <m>       rotation (default) or pinned
+  --opencode-byok-pin <id>       connection to pin when mode is pinned
+  --opencode-byok-model <id>     model to pin when mode is pinned
+  --opencode-byok-sync           seed empty model lists from the local OpenCode install
+                                 (alias: --no-opencode-byok-sync)
+  --opencode-byok-import         read the local OpenCode install and print/seed connections
+  Console BYOK authenticates with the Console service-account key: keys.opencode
+  (or OPENCODE_API_KEY) is reused, with keys.opencode-byok / keys.opencode-byok-<slug>
+  as per-connection overrides.
 
 Setup options (with \`setup <agent>\` or \`setup zstack [agent]\`):
   modelhitch setup codex                         install to the agent user skill directory
@@ -254,6 +368,21 @@ async function runBridge(): Promise<void> {
   const cloudRepo = flagValue('--cloud-agent-repo') ?? undefined;
   const cloudRef = flagValue('--cloud-agent-ref') ?? undefined;
   const cloudModel = flagValue('--cloud-agent-model') ?? undefined;
+  // --provider: runtime-only pin, never written back to the config file.
+  const pinnedProviderId = flagValue('--provider');
+  const byokFlag = argsHasFlag(['--opencode-byok', '--opencode-byok-lane']) ? true : argsHasFlag(['--no-opencode-byok', '--no-opencode-byok-lane']) ? false : undefined;
+  const byokModeFlag = flagValue('--opencode-byok-mode');
+  const byokPin = flagValue('--opencode-byok-pin');
+  const byokPinModel = flagValue('--opencode-byok-model');
+  const byokSync = argsHasFlag(['--opencode-byok-sync']) ? true : argsHasFlag(['--no-opencode-byok-sync']) ? false : undefined;
+  const byokConnections = openCodeByokConnectionsFromArgs();
+  const byokImport = argsHasFlag(['--opencode-byok-import']);
+  // Reading the local OpenCode install costs a DB scan, so it stays lazy: the
+  // import flag reads it now, `syncFromOpenCode` reads it when providers are
+  // built, and the settings UI reads it through /v1/opencode-state on demand.
+  let openCodeStateCache: OpenCodeLocalState | undefined;
+  const openCodeStateLazy = (): OpenCodeLocalState => (openCodeStateCache ??= readOpenCodeLocalState());
+  const openCodeState = byokImport ? openCodeStateLazy() : undefined;
 
   const loaded = readConfigFile(configPath); // null when none exists yet
   if (loaded) {
@@ -293,6 +422,51 @@ async function runBridge(): Promise<void> {
       sessionReuse: config.cloudAgent?.sessionReuse ?? 'per-bridge-session',
     };
   }
+  if (byokImport) {
+    const discovered = openCodeImportConnections(openCodeStateLazy());
+    if (!discovered.length) {
+      console.warn('OpenCode import: no providers with models were found in the local OpenCode install.');
+    } else {
+      console.log(`OpenCode import: ${discovered.length} connection${discovered.length === 1 ? '' : 's'} discovered from the local install.`);
+      for (const connection of discovered) {
+        console.log(`  ${connection.id.padEnd(20)} ${(connection.models ?? []).join(', ') || '(no models)'}`);
+      }
+      console.log('  Console connection ids are not stored locally: replace each id with its real');
+      console.log('  connection id (or paste the Console API URL) from https://opencode.ai/console.');
+    }
+    byokConnections.push(...discovered);
+  }
+  if (
+    byokFlag !== undefined ||
+    byokConnections.length > 0 ||
+    byokModeFlag !== undefined ||
+    byokPin !== undefined ||
+    byokPinModel !== undefined ||
+    byokSync !== undefined ||
+    byokImport
+  ) {
+    const existing = config.opencodeByok;
+    const connections = mergeOpenCodeByokConnections(existing?.connections ?? [], byokConnections);
+    const pinnedConnectionId = byokPin ?? existing?.pinnedConnectionId;
+    const pinnedModel = byokPinModel ?? existing?.pinnedModel;
+    // Naming a connection is a request to use it: only an explicit
+    // --no-opencode-byok (or a document that already disabled the block) keeps
+    // the lane off.
+    const enabled = byokFlag ?? (byokConnections.length > 0 ? true : existing?.enabled ?? connections.length > 0);
+    config.opencodeByok = {
+      enabled,
+      mode: byokModeFlag === 'pinned' || byokModeFlag === 'rotation' ? byokModeFlag : existing?.mode ?? 'rotation',
+      ...(pinnedConnectionId ? { pinnedConnectionId } : {}),
+      ...(pinnedModel ? { pinnedModel } : {}),
+      connections,
+      syncFromOpenCode: byokSync ?? existing?.syncFromOpenCode ?? false,
+    };
+    if (byokModeFlag !== undefined && byokModeFlag !== 'pinned' && byokModeFlag !== 'rotation') {
+      console.error(`--opencode-byok-mode must be "rotation" or "pinned" (got "${byokModeFlag}").`);
+      process.exitCode = 1;
+      return;
+    }
+  }
   // Merge env-sourced keys so a bridge without a written keys block still works
   // (and the settings UI can show which providers already have credentials).
   config.keys = keysFromEnv(config.keys ?? {});
@@ -302,6 +476,19 @@ async function runBridge(): Promise<void> {
     } catch {
       /* settings still work in-memory; file write is best-effort */
     }
+  }
+  if (byokImport) {
+    // The import is a one-shot: persist the seeded connections so the settings
+    // page can take over, then exit instead of starting a bridge.
+    try {
+      writeConfigFile(configPath, config);
+      console.log(`Wrote ${configPath} with opencodeByok enabled.`);
+      console.log('Set each connection\'s real Console id in /settings, then start the bridge.');
+    } catch (err) {
+      console.error(`Could not write ${configPath}: ${(err as Error).message}`);
+      process.exitCode = 1;
+    }
+    return;
   }
 
   // Catalog mode: warm the models.dev source, build the executable provider set.
@@ -322,23 +509,45 @@ async function runBridge(): Promise<void> {
       return;
     }
   }
-  const providers = bridgeProviders(baseProviders, config, cloudSessionStore);
+  const byokState = config.opencodeByok?.syncFromOpenCode ? openCodeStateLazy() : openCodeState;
+  const providers = bridgeProviders(baseProviders, config, cloudSessionStore, { openCodeState: byokState });
   await validateCloudAgentKey(config);
+
+  // Console BYOK joins the lane plan: rotation puts every connection × model at
+  // the front of the plan, pinned keeps one connection primary. Both leave the
+  // configured policy directly behind as the fallback.
+  const byokPlan = applyOpenCodeByokPlan({
+    config,
+    policy: policyFromConfig(config),
+    defaultProviderId: config.defaultProviderId,
+    defaultModel: config.defaultModel,
+    state: byokState,
+  });
+  // `--provider <id>` pins routing for the life of this process only.
+  if (pinnedProviderId && !providers.some((p) => p.id === pinnedProviderId)) {
+    console.error(
+      `Unknown --provider "${pinnedProviderId}". Available: ${providers.map((p) => p.id).sort().join(', ')}`,
+    );
+    process.exitCode = 1;
+    return;
+  }
 
   const server = createModelHitchServer({
     providers,
-    defaultProviderId: config.defaultProviderId ?? 'vercel-ai-gateway',
-    defaultModel: config.defaultModel,
+    defaultProviderId: pinnedProviderId ?? byokPlan.defaultProviderId ?? config.defaultProviderId ?? 'vercel-ai-gateway',
+    defaultModel: pinnedProviderId ? config.defaultModel : byokPlan.defaultModel ?? config.defaultModel,
+    pinnedProviderId,
+    openCodeState: () => openCodeStateLazy(),
     imageGeneration: config.imageGeneration,
     cloudAgent: config.cloudAgent,
     maxBodyBytes,
-    policy: policyFromConfig(config),
+    policy: byokPlan.policy,
     cooldown,
     catalogSource,
     keystore,
     // Keys from the config file / env are available from the very first request —
     // no Apply needed for keys already stored locally.
-    apiKeys: config.keys,
+    apiKeys: { ...config.keys, ...openCodeByokApiKeys(config, { state: byokState }) },
     usagePersistence: true,
     logger: (line) => console.log(line),
     onFailover: (event) =>
@@ -373,7 +582,7 @@ async function runBridge(): Promise<void> {
         // Apply immediately — hot reload. Optional fields absent from the
         // incoming document must be cleared first: Object.assign alone would
         // keep stale values (e.g. a catalog block the UI just unchecked).
-        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'defaultWorkspaceTarget', 'cooldown', 'imageGeneration', 'cloudAgent'] as const) {
+        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'defaultWorkspaceTarget', 'cooldown', 'imageGeneration', 'cloudAgent', 'opencodeByok'] as const) {
           delete (config as unknown as Record<string, unknown>)[k];
         }
         Object.assign(config, asConfig);
@@ -381,7 +590,26 @@ async function runBridge(): Promise<void> {
         try {
           const nextCatalog = buildCatalogOptions(config);
           const wantsCatalog = config.catalog !== undefined;
-          const applyProviders = (base: Provider[]) => bridgeProviders(base, config, cloudSessionStore);
+          // A settings Apply is the moment a BYOK connection or its models can
+          // change, so re-read the OpenCode install when the block asks for it.
+          const state = config.opencodeByok?.syncFromOpenCode ? readOpenCodeLocalState() : undefined;
+          openCodeStateCache = state;
+          const applyProviders = (base: Provider[]) => bridgeProviders(base, config, cloudSessionStore, { openCodeState: state });
+          const plan = applyOpenCodeByokPlan({
+            config,
+            policy: policyFromConfig(config),
+            defaultProviderId: config.defaultProviderId,
+            defaultModel: config.defaultModel,
+            state,
+          });
+          const routeDefaults = {
+            defaultProviderId: pinnedProviderId ?? plan.defaultProviderId ?? config.defaultProviderId,
+            defaultModel: pinnedProviderId ? config.defaultModel : plan.defaultModel ?? config.defaultModel,
+            pinnedProviderId,
+            openCodeState: () => openCodeStateLazy(),
+            policy: plan.policy,
+            apiKeys: { ...config.keys, ...openCodeByokApiKeys(config, { state }) },
+          };
           if (wantsCatalog && !catalogSource) {
             const src = createCatalogSource({ ...nextCatalog, registry: defaultProviders });
             await src.warm();
@@ -389,14 +617,11 @@ async function runBridge(): Promise<void> {
             baseProviders = src.providers();
             server.reconfigure({
               providers: applyProviders(baseProviders),
-              policy: policyFromConfig(config),
               cooldown: buildCooldownFromConfig(config) ?? (catalogSource ? new CircuitBreaker() : undefined),
               catalogSource: src,
-              apiKeys: config.keys,
-              defaultProviderId: config.defaultProviderId,
-              defaultModel: config.defaultModel,
               imageGeneration: config.imageGeneration,
               cloudAgent: config.cloudAgent,
+              ...routeDefaults,
             });
           } else if (!wantsCatalog && catalogSource) {
             // Catalog mode switched off — fall back to the built-in registry.
@@ -404,27 +629,21 @@ async function runBridge(): Promise<void> {
             baseProviders = defaultProviders;
             server.reconfigure({
               providers: applyProviders(baseProviders),
-              policy: policyFromConfig(config),
               cooldown: buildCooldownFromConfig(config),
               catalogSource: undefined,
-              apiKeys: config.keys,
-              defaultProviderId: config.defaultProviderId,
-              defaultModel: config.defaultModel,
               imageGeneration: config.imageGeneration,
               cloudAgent: config.cloudAgent,
+              ...routeDefaults,
             });
           } else {
             const base = catalogSource ? catalogSource.providers() : baseProviders;
             server.reconfigure({
               providers: applyProviders(base),
-              policy: policyFromConfig(config),
               cooldown: buildCooldownFromConfig(config) ?? (catalogSource ? new CircuitBreaker() : undefined),
-              apiKeys: config.keys,
               baseUrls: config.catalog?.baseUrls,
-              defaultProviderId: config.defaultProviderId,
-              defaultModel: config.defaultModel,
               imageGeneration: config.imageGeneration,
               cloudAgent: config.cloudAgent,
+              ...routeDefaults,
             });
           }
           await validateCloudAgentKey(config);
@@ -437,8 +656,9 @@ async function runBridge(): Promise<void> {
   });
 
   const { url } = await server.listen(port, host);
+  const byokSummary = describeOpenCodeByokPlan(byokPlan, config);
   console.log(`\nModelHitch bridge v${VERSION} listening on ${url}
-
+${pinnedProviderId ? `\nPinned to provider: ${pinnedProviderId} (--provider; other providers are used only when it is depleted or erroring)\n` : ''}${byokSummary ? `\n${byokSummary}\n` : ''}
 Point any OpenAI-compatible client (Android Studio Agent Mode, JetBrains AI,
 Cursor, Codex CLI, Claude Code, Gemini CLI, ...) at:
 
@@ -448,7 +668,7 @@ Cursor, Codex CLI, Claude Code, Gemini CLI, ...) at:
 Settings (local — no env digging):
   ${configPath}
   open ${url}/settings in a browser
-
+${pinnedProviderId ? '\nRestart this bridge without --provider to go back to the configured rotation.\n' : ''}
 Usage telemetry (persisted to ./modelhitch-usage.db):
   JSON:       curl ${url}/v1/usage
   Dashboard:  open ${url}/usage in a browser
@@ -519,15 +739,21 @@ async function runStatus(): Promise<void> {
   }
 
   let health = 'no';
+  let pinned: string | undefined;
   try {
     const res = await fetch(`http://${host}:${port}/healthz`, { signal: AbortSignal.timeout(1200) });
     health = res.ok ? `yes — responding on http://${host}:${port}` : 'no';
+    if (res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { pinnedProviderId?: string };
+      pinned = body.pinnedProviderId;
+    }
   } catch {
     /* not responding */
   }
   console.log('modelhitch status: running');
   console.log(`  pid:      ${status.pid}`);
   console.log(`  healthz:  ${health}`);
+  if (pinned) console.log(`  provider: pinned to ${pinned} (started with --provider)`);
   console.log(`  log:      ${status.logPath}`);
 }
 

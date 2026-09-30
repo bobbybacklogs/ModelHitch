@@ -8,7 +8,9 @@
   "types": "./dist/index.d.ts",
   "bin": {
     "modelhitch": "dist/cli.js",
-    "modelhitch-harness": "dist/harness-cli.js"
+    "mh": "dist/cli.js",
+    "modelhitch-harness": "dist/harness-cli.js",
+    "mhh": "dist/harness-cli.js"
   },
   "exports": {
     ".": {
@@ -51,12 +53,16 @@
     "test:watch": "vitest",
     "runtime-info": "node agent-runtime/bin/info.mjs",
     "test:agent-runtime": "vitest run --config agent-runtime/tests/vitest.config.ts",
+    "test:tui": "bun test tests/harness-tui-frame.test.ts",
     "verify": "npm run typecheck && npm run build && npm test",
     "example": "tsx examples/quickstart.ts",
     "bridge": "tsx examples/studio-bridge.ts",
     "canary": "tsx examples/canary.ts",
     "harness": "tsx harness/cli.ts",
     "harness:tui": "bun harness/cli.ts",
+    "mhh": "tsx harness/cli.ts",
+    "mhh:tui": "bun harness/cli.ts",
+    "settings:tui": "bun src/settings-tui.ts",
     "prepublishOnly": "npm run verify",
     "gh-release": "node scripts/gh-release.mjs",
     "release": "npm version patch && npm publish && git push origin main --tags && npm run gh-release",

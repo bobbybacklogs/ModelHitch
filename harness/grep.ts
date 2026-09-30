@@ -53,6 +53,12 @@ export interface GrepOptions {
   regex?: boolean;
   /** Stop after scanning this many files. Defaults to 2000. */
   maxFiles?: number;
+  /**
+   * Cancel the walk. A deep tree can take longer than a tool budget allows, and
+   * a synchronous walk cannot be interrupted from outside without a check
+   * inside the loop, so the flag is polled per file.
+   */
+  signal?: AbortSignal;
 }
 
 export interface GrepMatch {
@@ -70,6 +76,13 @@ export interface GrepResult {
   truncated: boolean;
   filesScanned: number;
   filesSkippedBinary: number;
+  /**
+   * True when the search was cancelled part way through. Kept separate from
+   * `truncated` so a cancelled scan can never be read as one that finished, and
+   * `truncated` is set alongside it so callers that only know about caps still
+   * treat the result as partial.
+   */
+  aborted?: boolean;
   /** Set when the search could not run at all, e.g. a bad pattern. */
   error?: string;
 }
@@ -83,6 +96,15 @@ function escapeLiteral(text: string): string {
 
 function isProbablyBinary(buffer: Buffer): boolean {
   return buffer.subarray(0, SNIFF_BYTES).includes(0);
+}
+
+/**
+ * Read through a call so TypeScript re-checks the flag every time: a direct
+ * `options.signal?.aborted` comparison inside the loop gets narrowed once and
+ * then treated as never changing.
+ */
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 /** `1 file` / `2 files`, so counts never read as "1 file(s)". */
@@ -143,10 +165,16 @@ export function grepWorkspace(options: GrepOptions): GrepResult {
   let filesScanned = 0;
   let filesSkippedBinary = 0;
   let truncated = false;
+  let aborted = false;
 
   // Iterative walk: a deep tree should not risk a stack overflow.
   const queue: string[] = [root];
   while (queue.length > 0) {
+    if (isAborted(options.signal)) {
+      aborted = true;
+      truncated = true;
+      break;
+    }
     if (filesScanned >= maxFiles || matches.length >= maxResults) {
       truncated = true;
       break;
@@ -161,6 +189,11 @@ export function grepWorkspace(options: GrepOptions): GrepResult {
     }
 
     for (const entry of entries) {
+      if (isAborted(options.signal)) {
+        aborted = true;
+        truncated = true;
+        break;
+      }
       if (filesScanned >= maxFiles || matches.length >= maxResults) {
         truncated = true;
         break;
@@ -206,14 +239,22 @@ export function grepWorkspace(options: GrepOptions): GrepResult {
     }
   }
 
-  return { matches, truncated, filesScanned, filesSkippedBinary };
+  return { matches, truncated, filesScanned, filesSkippedBinary, ...(aborted ? { aborted } : {}) };
 }
 
 /** Render a result as compact text for a model to read. */
 export function formatGrepResult(result: GrepResult, pattern: string): string {
   if (result.error) return `Error: ${result.error}`;
+  // A cancelled scan must not read as a completed one, so the abort note is
+  // attached to both the empty and the populated case.
+  const abortedNote = result.aborted
+    ? '\n(search was cancelled before it finished — this is a partial result, not a complete one)'
+    : '';
   if (result.matches.length === 0) {
-    return `No matches for "${pattern}" (scanned ${result.filesScanned} ${plural(result.filesScanned, 'file')}).`;
+    return abortedNote
+      ? `No matches for "${pattern}" before the search was cancelled ` +
+          `(scanned ${result.filesScanned} ${plural(result.filesScanned, 'file')}).${abortedNote}`
+      : `No matches for "${pattern}" (scanned ${result.filesScanned} ${plural(result.filesScanned, 'file')}).`;
   }
   const lines = result.matches.map((m) => `${m.file}:${m.line}: ${m.text}`);
   // "1 match(es) ... in 2 file(s)" reads as though one match exists across two
@@ -222,8 +263,10 @@ export function formatGrepResult(result: GrepResult, pattern: string): string {
   const header =
     `${result.matches.length} ${plural(result.matches.length, 'match', 'matches')} for "${pattern}" ` +
     `(scanned ${result.filesScanned} ${plural(result.filesScanned, 'file')}):`;
-  const footer = result.truncated ? '\n(results truncated — narrow the pattern or pass include/maxResults)' : '';
-  return `${header}\n${lines.join('\n')}${footer}`;
+  const footer = result.truncated
+    ? '\n(results truncated — narrow the pattern or pass include/maxResults)'
+    : '';
+  return `${header}\n${lines.join('\n')}${footer}${abortedNote}`;
 }
 
 /**

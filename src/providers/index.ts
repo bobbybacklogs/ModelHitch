@@ -48,4 +48,19 @@ export {
   type OpenCodeProviderOptions,
   type OpenCodeWire,
 } from './opencode.js';
+export {
+  createOpenCodeByokProvider,
+  isOpenCodeByokProviderId,
+  openCodeByokBaseUrl,
+  openCodeByokProviderId,
+  openCodeByokSlug,
+  openCodeByokWire,
+  OPENCODE_BYOK_BASE_URL_PREFIX,
+  OPENCODE_BYOK_KEY_ENV,
+  OPENCODE_BYOK_KEY_ID,
+  OPENCODE_BYOK_PROVIDER_PREFIX,
+  type CreateOpenCodeByokProviderOptions,
+  type OpenCodeByokConnectionInput,
+  type OpenCodeByokSchema,
+} from './opencode-byok.js';
 export type { Provider, ModelInfo } from './types.js';

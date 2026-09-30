@@ -29,10 +29,24 @@ describe('isRetryableError', () => {
     expect(isRetryableError(new ModelHitchError('bad-request', '429 from upstream', { status: 429 }))).toBe(true);
   });
 
+  it('treats status 402 as retryable so an unfunded lane rotates', () => {
+    // Providers surface insufficient credit as bad-request with 402 preserved.
+    // The lane cannot serve the request, which is what rotation is for.
+    expect(
+      isRetryableError(new ModelHitchError('bad-request', 'requires more credits', { status: 402 })),
+    ).toBe(true);
+    expect(
+      isRetryableError(new ModelHitchError('bad-request', 'can only afford 1460 tokens', { status: 402 })),
+    ).toBe(true);
+    // A 402 with no code in the retryable list still rotates.
+    expect(isRetryableError(new ModelHitchError('bad-request', 'payment required', { status: 402 }), [])).toBe(true);
+  });
+
   it('does not retry non-retryable codes', () => {
     expect(isRetryableError(new ModelHitchError('bad-request', 'bad prompt', { status: 400 }))).toBe(false);
     expect(isRetryableError(new ModelHitchError('model-not-found', 'nope', { status: 404 }))).toBe(false);
     expect(isRetryableError(new ModelHitchError('invalid-api-key', 'nope', { status: 401 }))).toBe(false);
+    expect(isRetryableError(new ModelHitchError('bad-request', 'payment required', { status: 403 }))).toBe(false);
   });
 
   it('never retries plain Errors (aborts, cancellations)', () => {

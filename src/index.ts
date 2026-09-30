@@ -3,7 +3,14 @@
 
 export { ModelHitch, type ModelHitchOptions, type ChatInput } from './client.js';
 export { ASCII_LOGO, printAsciiLogo } from './ascii.js';
-export { runToolLoop, type ToolExecutor, type ToolLoopOptions, type ToolLoopEvent } from './agent.js';
+export {
+  runToolLoop,
+  type BatchToolExecutor,
+  type HistoryRewriter,
+  type ToolExecutor,
+  type ToolLoopOptions,
+  type ToolLoopEvent,
+} from './agent.js';
 export { defaultProviders } from './registry.js';
 export { MemoryKeyStore } from './storage/memory.js';
 export { LocalStorageKeyStore } from './storage/local-storage.js';
@@ -94,14 +101,44 @@ export {
   validateConfig,
   validateConfigWithSource,
   CONFIG_VERSION,
+  OPENCODE_BYOK_SCHEMAS,
   type CatalogConfig,
   type CooldownConfig,
   type ConfigValidation,
   type ImageGenerationConfig,
   type MaskedConfig,
   type ModelHitchConfig,
+  type OpenCodeByokConfig,
+  type OpenCodeByokConnection,
 } from './config.js';
 export { defaultConfigTemplate, initConfigFile, readConfigFile, writeConfigFile } from './config-file.js';
+
+// OpenCode Console BYOK — one provider lane per Console connection
+export {
+  applyOpenCodeByokPlan,
+  describeOpenCodeByokPlan,
+  isOpenCodeByokEnabled,
+  isOpenCodeByokLane,
+  openCodeByokApiKeys,
+  openCodeByokConfig,
+  openCodeByokModels,
+  openCodeByokProviders,
+  openCodeModelsForConnection,
+  resolveOpenCodeByokConnections,
+  type OpenCodeByokPlan,
+  type OpenCodeByokPlanInput,
+  type OpenCodeByokProviderOptions,
+  type OpenCodeLocalProvider,
+  type OpenCodeLocalState,
+  type ResolvedOpenCodeByokConnection,
+} from './opencode-byok.js';
+export {
+  openCodeConfigDirs,
+  openCodeDataDirs,
+  parseJsonc,
+  readOpenCodeLocalState,
+  type OpenCodeStateOptions,
+} from './opencode-state.js';
 
 export { UsageTracker, usageDashboardHtml } from './core/usage.js';
 export { SqliteUsageStorage, type UsageStorage } from './core/usage-storage.js';
@@ -175,8 +212,20 @@ export {
 export {
   deriveSessionId,
   extractSessionId,
+  resolveOutboundSessionId,
   SESSION_HEADER_CANDIDATES,
 } from './core/session.js';
+
+export {
+  DsmlStreamGuard,
+  hasDsmlMarkup,
+  hasToolCallMarkup,
+  recoverDsmlToolCalls,
+  recoverMessageToolCalls,
+  toolSchemaFromDefinitions,
+} from './core/dsml.js';
+
+export type { DsmlRecovery, RecoveredToolCall, ToolSchemaMap } from './core/dsml.js';
 
 export type {
   ModelMessage,

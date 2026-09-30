@@ -220,6 +220,64 @@ export function settingsPageHtml(): string {
     </div>
   </section>
 
+  <section id="opencode-byok">
+    <div class="section-head"><h2>OpenCode Console BYOK</h2><span class="hint">one lane per Console connection · rotate across them or pin one</span></div>
+    <div class="panel">
+      <div class="warnbox">
+        Console BYOK links a provider account you already pay for to your OpenCode workspace. Each connection exposes exactly one gateway URL —
+        <span class="mono">https://opencode.ai/inference/custom/&lt;connection_id&gt;</span> — and authenticates with a Console service-account key, so the provider secret never reaches this machine.
+        Connect providers at <a href="https://opencode.ai/console" target="_blank" rel="noreferrer">opencode.ai/console</a> → Providers, then paste the Console API URL (or the bare <span class="mono">conn_…</span> id) below.
+      </div>
+      <div class="row">
+        <div class="grow">
+          <label>enabled</label>
+          <select id="byokEnabled"><option value="false">disabled</option><option value="true">enabled</option></select>
+        </div>
+        <div class="grow">
+          <label>mode</label>
+          <select id="byokMode">
+            <option value="rotation">rotation — spread requests across every connection</option>
+            <option value="pinned">pinned — one connection first, others only on failure</option>
+          </select>
+        </div>
+        <div class="grow">
+          <label>models from OpenCode</label>
+          <select id="byokSync"><option value="false">use the model lists below</option><option value="true">seed empty lists from my OpenCode install</option></select>
+        </div>
+      </div>
+      <div class="row">
+        <div class="grow">
+          <label>pinned connection</label>
+          <select id="byokPin"><option value="">(first enabled connection)</option></select>
+        </div>
+        <div class="grow">
+          <label>pinned model</label>
+          <input id="byokPinModel" type="text" placeholder="(connection's first model)" />
+        </div>
+      </div>
+      <div class="row">
+        <div class="grow" style="min-width:340px">
+          <label>Console service-account key</label>
+          <div class="prov-key" style="margin-top:2px">
+            <input type="password" id="byokKey" autocomplete="off" placeholder="(blank = reuse the OpenCode key above)" />
+            <span class="env">keys.opencode-byok</span>
+          </div>
+        </div>
+      </div>
+      <div class="row" style="border-bottom:0">
+        <button class="btn" type="button" id="byokImport">Import from OpenCode</button>
+        <button class="btn" type="button" id="byokAdd">+ connection</button>
+        <span class="muted" id="byok-status"></span>
+      </div>
+      <div id="byok-connections"></div>
+      <div class="muted" style="font-size:12px">
+        Each connection is served as its own provider (<span class="mono">opencode-byok-&lt;slug&gt;</span>), so it appears in the policy lanes above,
+        in the lane-health table, and in <span class="mono">modelhitch bridge --provider opencode-byok-&lt;slug&gt;</span>.
+        Per-connection keys can be pasted on that provider's card in the Providers section.
+      </div>
+    </div>
+  </section>
+
   <section>
     <div class="section-head"><h2>Image lane</h2><span class="hint">disabled by default; opt in when you want a dedicated image-generation route</span></div>
     <div class="panel">
@@ -494,6 +552,7 @@ function collectKeys() {
   });
   collectCloudAgentKey(keys);
   collectOpenCodeKey(keys);
+  collectOpenCodeByokKey(keys);
   return keys;
 }
 
@@ -523,6 +582,216 @@ function collectOpenCodeKey(keys) {
   } else {
     if (existing['opencode']) keys['opencode'] = existing['opencode'];
     if (existing['opencode-go']) keys['opencode-go'] = existing['opencode-go'];
+  }
+}
+
+// ---- OpenCode Console BYOK ----------------------------------------------
+
+var BYOK_SCHEMAS = ['auto', 'chat-completions', 'responses', 'anthropic', 'google'];
+
+/* Console service-account key shared by every BYOK connection. A blank field
+   keeps whatever is stored; the OpenCode Zen/Go key is the fallback when this
+   one is unset, which is why the placeholder says so. */
+function collectOpenCodeByokKey(keys) {
+  var input = el('byokKey');
+  if (!input) return;
+  var val = input.value.trim();
+  var existing = (state.config && state.config.keys) || {};
+  if (val) keys['opencode-byok'] = val;
+  else if (existing['opencode-byok']) keys['opencode-byok'] = existing['opencode-byok'];
+}
+
+function byokState() {
+  return state.openCode && state.openCode.found ? state.openCode : null;
+}
+
+/* Models the user actually runs in OpenCode across every provider — the model
+   picker for a BYOK connection. Console mints connection ids no local file
+   records, so the provider names are the only useful join key offline. */
+function allDiscoveredModels() {
+  var oc = byokState();
+  var out = [];
+  if (!oc) return out;
+  (oc.providers || []).forEach(function (p) {
+    (p.models || []).forEach(function (m) { if (out.indexOf(m) === -1) out.push(m); });
+  });
+  return out;
+}
+
+function byokConnectionId(row) {
+  var input = row.querySelector('.byok-id');
+  return input ? input.value.trim() : '';
+}
+
+function byokConnectionRowHtml(connection) {
+  var id = connection && connection.id ? connection.id : '';
+  var label = connection && connection.label ? connection.label : '';
+  var baseUrl = connection && connection.baseUrl ? connection.baseUrl : '';
+  var schema = (connection && connection.schema) || 'auto';
+  var enabled = !connection || connection.enabled !== false;
+  var models = (connection && connection.models) || [];
+  var schemaOptions = BYOK_SCHEMAS.map(function (s) {
+    return '<option value="' + s + '"' + (s === schema ? ' selected' : '') + '>' + s + '</option>';
+  }).join('');
+  var chips = models.map(modelChipHtml).join('');
+  var known = allDiscoveredModels().filter(function (m) { return models.indexOf(m) === -1; });
+  var addOptions = '<option value="">' + (known.length ? '+ model from OpenCode…' : '(no OpenCode models detected)') + '</option>' +
+    known.map(function (m) { return '<option value="' + esc(m) + '">' + esc(m) + '</option>'; }).join('');
+  return '<div class="byok-conn lane">' +
+      '<div>' +
+        '<label>connection id or URL</label>' +
+        '<input class="byok-id" type="text" placeholder="conn_… or https://opencode.ai/inference/custom/conn_…" value="' + esc(id) + '" />' +
+        '<label style="margin-top:6px">label</label>' +
+        '<input class="byok-label" type="text" placeholder="(optional)" value="' + esc(label) + '" />' +
+        '<label style="margin-top:6px">gateway URL override</label>' +
+        '<input class="byok-url" type="text" placeholder="(optional)" value="' + esc(baseUrl) + '" />' +
+      '</div>' +
+      '<div class="lane-models byok-models">' +
+        '<label>models — the rotation pool</label>' +
+        '<div class="chips">' + chips + '</div>' +
+        '<div class="model-add-row">' +
+          '<select class="model-add">' + addOptions + '</select>' +
+          '<input type="text" class="model-add-custom" placeholder="or type a model id + Enter" />' +
+        '</div>' +
+        '<div class="no-models-hint">empty = the connection\'s default model (or the OpenCode models above when syncing)</div>' +
+      '</div>' +
+      '<div>' +
+        '<label>schema</label>' +
+        '<select class="byok-schema">' + schemaOptions + '</select>' +
+        '<label style="margin-top:6px">enabled</label>' +
+        '<select class="byok-enabled"><option value="true"' + (enabled ? ' selected' : '') + '>yes</option><option value="false"' + (enabled ? '' : ' selected') + '>no</option></select>' +
+        '<button class="btn danger byok-remove" type="button" style="margin-top:6px">remove</button>' +
+      '</div>' +
+    '</div>';
+}
+
+function renderOpenCodeByok() {
+  var cfg = state.config || {};
+  var byok = cfg.opencodeByok || { enabled: false, mode: 'rotation', connections: [] };
+  var box = el('byok-connections');
+  if (!box) return;
+  el('byokEnabled').value = String(!!byok.enabled);
+  el('byokMode').value = byok.mode === 'pinned' ? 'pinned' : 'rotation';
+  el('byokSync').value = String(byok.syncFromOpenCode === true);
+
+  var connections = byok.connections || [];
+  box.innerHTML = connections.length
+    ? connections.map(byokConnectionRowHtml).join('')
+    : '<div class="empty">no BYOK connections yet — add one, or import the providers you already use in OpenCode</div>';
+
+  renderByokPinOptions();
+  el('byokPin').value = byok.pinnedConnectionId || '';
+  el('byokPinModel').value = byok.pinnedModel || '';
+  var isPinned = byok.mode === 'pinned';
+  el('byokPin').disabled = !isPinned;
+  el('byokPinModel').disabled = !isPinned;
+
+  var hasKey = !!(cfg.keys && cfg.keys['opencode-byok']);
+  var input = el('byokKey');
+  input.value = '';
+  input.placeholder = hasKey ? '(set — leave blank to keep)' : '(blank = reuse the OpenCode key above)';
+
+  var status = el('byok-status');
+  var oc = state.openCode;
+  if (status) {
+    status.textContent = oc
+      ? (oc.found
+          ? 'OpenCode: ' + (oc.providers || []).length + ' provider(s) detected' + (oc.warnings && oc.warnings.length ? ' (' + oc.warnings.length + ' warning' + (oc.warnings.length === 1 ? '' : 's') + ')' : '')
+          : 'OpenCode: no local install found')
+      : '';
+  }
+}
+
+function renderByokPinOptions() {
+  var select = el('byokPin');
+  if (!select) return;
+  var selected = select.value;
+  var rows = document.querySelectorAll('#byok-connections .byok-conn');
+  var opts = ['<option value="">(first enabled connection)</option>'];
+  Array.prototype.forEach.call(rows, function (row) {
+    var id = byokConnectionId(row);
+    if (!id) return;
+    opts.push('<option value="' + esc(id) + '">' + esc(id) + '</option>');
+  });
+  select.innerHTML = opts.join('');
+  if (selected) select.value = selected;
+}
+
+function collectOpenCodeByok() {
+  var connections = [];
+  document.querySelectorAll('#byok-connections .byok-conn').forEach(function (row) {
+    var id = byokConnectionId(row);
+    if (!id) return;
+    var label = row.querySelector('.byok-label').value.trim();
+    var url = row.querySelector('.byok-url').value.trim();
+    var models = Array.prototype.map.call(row.querySelectorAll('.lane-models .chips .chip'), function (c) { return c.dataset.model; });
+    var entry = {
+      id: id,
+      schema: row.querySelector('.byok-schema').value || 'auto',
+      enabled: row.querySelector('.byok-enabled').value === 'true'
+    };
+    if (label) entry.label = label;
+    if (url) entry.baseUrl = url;
+    if (models.length) entry.models = models;
+    connections.push(entry);
+  });
+  var pinnedConnectionId = el('byokPin').value.trim();
+  var pinnedModel = el('byokPinModel').value.trim();
+  var byok = {
+    enabled: el('byokEnabled').value === 'true',
+    mode: el('byokMode').value === 'pinned' ? 'pinned' : 'rotation',
+    connections: connections,
+    syncFromOpenCode: el('byokSync').value === 'true'
+  };
+  if (pinnedConnectionId) byok.pinnedConnectionId = pinnedConnectionId;
+  if (pinnedModel) byok.pinnedModel = pinnedModel;
+  return byok;
+}
+
+function slugify(value) {
+  return String(value || '').trim().toLowerCase().replace(/^conn[_-]/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+/* Seed connection rows from the local OpenCode install. Console mints opaque
+   connection ids that no local file records, so the provider name is used as
+   the id — labelled so it is obvious it still has to be replaced. */
+async function importFromOpenCode() {
+  var status = el('byok-status');
+  if (status) status.textContent = 'Reading the local OpenCode install…';
+  try {
+    state.openCode = await api('/v1/opencode-state');
+  } catch (err) {
+    if (status) status.textContent = 'OpenCode import unavailable: ' + err.message;
+    return;
+  }
+  var found = (state.openCode.providers || []).filter(function (p) { return (p.models || []).length > 0; });
+  if (!found.length) {
+    if (status) status.textContent = 'OpenCode: nothing to import (no provider with model history found)';
+    renderOpenCodeByok();
+    return;
+  }
+  var box = el('byok-connections');
+  var existing = {};
+  Array.prototype.forEach.call(box.querySelectorAll('.byok-conn'), function (row) { existing[slugify(byokConnectionId(row))] = true; });
+  var empty = box.querySelector('.empty');
+  if (empty) empty.remove();
+  var added = 0;
+  found.forEach(function (provider) {
+    if (existing[slugify(provider.providerId)]) return;
+    box.insertAdjacentHTML('beforeend', byokConnectionRowHtml({
+      id: provider.providerId,
+      label: provider.providerId + ' (from OpenCode)',
+      schema: 'auto',
+      models: provider.models,
+      enabled: true
+    }));
+    added++;
+  });
+  el('byokEnabled').value = 'true';
+  renderByokPinOptions();
+  if (status) {
+    status.textContent = 'Imported ' + added + ' connection' + (added === 1 ? '' : 's') +
+      ' from OpenCode — replace each id with its Console connection id, then Apply.';
   }
 }
 
@@ -867,6 +1136,7 @@ function assemble() {
     cooldown: collectReliability(),
     imageGeneration: collectImageGeneration(),
     cloudAgent: collectCloudAgent(),
+    opencodeByok: collectOpenCodeByok(),
     keys: collectKeys()
   };
 }
@@ -879,7 +1149,7 @@ async function loadAll() {
     state.builtin = cat.builtin || [];
     var models = await api('/v1/models');
     state.models = models.data || [];
-    renderImageGeneration(); renderCloudAgent(); renderWorkspaceTarget(); renderProviders(); renderOpenCode(); renderCatalog(); renderPolicy(); renderReliability();
+    renderImageGeneration(); renderCloudAgent(); renderWorkspaceTarget(); renderProviders(); renderOpenCode(); renderOpenCodeByok(); renderCatalog(); renderPolicy(); renderReliability();
     refreshHealth();
   } catch (err) {
     showErrors(['Failed to load settings: ' + err.message]);
@@ -926,6 +1196,11 @@ document.getElementById('imageModel').addEventListener('change', function () {
 document.addEventListener('click', function (ev) {
   var t = ev.target;
   if (t.classList && t.classList.contains('lane-remove')) { t.closest('.lane').remove(); return; }
+  if (t.classList && t.classList.contains('byok-remove')) {
+    t.closest('.byok-conn').remove();
+    renderByokPinOptions();
+    return;
+  }
   if (t.classList && t.classList.contains('add-lane')) {
     var group = t.dataset.into;
     var box = el(group + '-lanes');
@@ -959,6 +1234,10 @@ document.addEventListener('change', function (ev) {
   if (t.classList && t.classList.contains('model-add') && t.value) {
     addModelChip(t, t.value);
     t.value = '';
+    return;
+  }
+  if (t.classList && t.classList.contains('byok-id')) {
+    renderByokPinOptions();
     return;
   }
 });
@@ -1013,7 +1292,28 @@ function setupOpenCodeListeners() {
   });
 }
 
+function setupByokListeners() {
+  var add = el('byokAdd');
+  if (add) add.addEventListener('click', function () {
+    var box = el('byok-connections');
+    var empty = box.querySelector('.empty');
+    if (empty) empty.remove();
+    box.insertAdjacentHTML('beforeend', byokConnectionRowHtml({ enabled: true, schema: 'auto' }));
+    el('byokEnabled').value = 'true';
+    renderByokPinOptions();
+  });
+  var imp = el('byokImport');
+  if (imp) imp.addEventListener('click', function () { importFromOpenCode(); });
+  var mode = el('byokMode');
+  if (mode) mode.addEventListener('change', function () {
+    var pinned = el('byokMode').value === 'pinned';
+    el('byokPin').disabled = !pinned;
+    el('byokPinModel').disabled = !pinned;
+  });
+}
+
 setupOpenCodeListeners();
+setupByokListeners();
 setInterval(refreshHealth, 5000);
 loadAll();
 </script>

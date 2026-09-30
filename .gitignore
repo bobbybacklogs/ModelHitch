@@ -1,6 +1,7 @@
 node_modules/
 dist/
 coverage/
+.dirgest/
 android-sdk/.gradle/
 android-sdk/**/.gradle/
 android-sdk/**/build/

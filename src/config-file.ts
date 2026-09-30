@@ -83,6 +83,16 @@ export function defaultConfigTemplate(): ModelHitchConfig {
       workOnCurrentBranch: false,
       sessionReuse: 'per-bridge-session',
     },
+    // OpenCode Console BYOK (https://opencode.ai/v2/docs/console/byok/): one
+    // provider lane per connection. Paste the Console API URL (or the bare
+    // `conn_…` id) into `connections` from /settings, or run
+    // `modelhitch bridge --opencode-byok-import` to seed them.
+    opencodeByok: {
+      enabled: false,
+      mode: 'rotation',
+      connections: [],
+      syncFromOpenCode: true,
+    },
   };
 }
 

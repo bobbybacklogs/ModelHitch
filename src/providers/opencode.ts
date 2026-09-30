@@ -15,12 +15,35 @@ import type {
   Usage,
 } from '../core/types.js';
 import { AnthropicProvider } from './anthropic.js';
-import { createOpenAICompatibleProvider, mapHTTPError } from './openai-compatible.js';
+import { createOpenAICompatibleProvider, mapHTTPError, applySessionHeaders } from './openai-compatible.js';
+import { recoverMessageToolCalls, toolSchemaFromDefinitions } from '../core/dsml.js';
+import { deriveSessionId } from '../core/session.js';
 import type { ModelInfo, Provider } from './types.js';
 
 export const OPENCODE_ZEN_BASE_URL = 'https://opencode.ai/zen/v1';
 export const OPENCODE_GO_BASE_URL = 'https://opencode.ai/zen/go/v1';
 export const OPENCODE_DEFAULT_MODEL = 'deepseek-v4-pro';
+
+/**
+ * OpenCode Go requires a stable per-conversation session header and rejects
+ * requests without one (`MissingSessionID`, HTTP 400). Zen accepts the same
+ * header, so both lanes send it on every wire.
+ * See https://opencode.ai/docs/go/#where-can-i-use-it
+ */
+export const OPENCODE_SESSION_HEADER = 'x-opencode-session';
+
+/** Session header names sent upstream, OpenCode's required name first. */
+export const OPENCODE_SESSION_HEADERS = [
+  OPENCODE_SESSION_HEADER,
+  'x-session-id',
+  'x-conversation-id',
+];
+
+/**
+ * OpenCode asks clients to identify themselves with a real user agent rather
+ * than a generic SDK or HTTP-library name.
+ */
+export const OPENCODE_USER_AGENT = 'ModelHitch-OpenCode/2.0';
 
 export type OpenCodeWire = 'responses' | 'messages' | 'gemini' | 'chat-completions';
 
@@ -148,6 +171,15 @@ export interface OpenCodeProviderOptions {
   capabilities?: Partial<Capabilities>;
   headers?: Record<string, string>;
   fetchImpl?: typeof fetch;
+  /**
+   * Pin the wire protocol instead of detecting it from the model family.
+   * Console BYOK connections fix their schema per connection (`Chat
+   * Completions`, `Responses API`, `Anthropic Compatible`, `Google Generative
+   * AI`), so the model id is not a reliable signal there — a custom
+   * connection can expose `claude-…` over the Chat Completions schema.
+   * Left undefined, the Zen/Go behavior (family detection) is unchanged.
+   */
+  forceWire?: OpenCodeWire;
 }
 
 function resolveApiKey(
@@ -317,6 +349,40 @@ function chatParamsToGeminiBody(params: ChatParams): Record<string, unknown> {
   return body;
 }
 
+/**
+ * Ensure every OpenCode request carries a session id. Go rejects requests
+ * without one, and Zen uses it for routing and cache affinity, so a caller that
+ * supplies nothing gets a stable id derived from the conversation.
+ */
+function withSession(params: ChatParams): ChatParams {
+  return params.sessionId ? params : { ...params, sessionId: deriveSessionId(params.messages) };
+}
+
+/**
+ * DeepSeek-family models can emit tool calls as DSML markup in the text channel
+ * instead of real `tool_calls`; recover them so no client ever sees raw markup.
+ */
+function finalizeOpenCodeMessage(
+  messageText: string,
+  toolCalls: ToolCall[] | undefined,
+  params: ChatParams,
+): { message: ModelMessage; finishReason: string } {
+  const recovery = recoverMessageToolCalls(
+    { content: messageText, toolCalls },
+    toolSchemaFromDefinitions(params.tools),
+  );
+  const content = typeof recovery.content === 'string' ? recovery.content : messageText;
+  const calls = recovery.toolCalls;
+  return {
+    message: {
+      role: 'assistant',
+      content,
+      toolCalls: calls && calls.length > 0 ? calls : undefined,
+    },
+    finishReason: recovery.recovered ? 'tool-calls' : '',
+  };
+}
+
 export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Provider {
   const id = opts.id ?? 'opencode';
   const name = opts.name ?? 'OpenCode Zen';
@@ -346,21 +412,28 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
     apiKeyEnvFallbacks,
     capabilities,
     headers: customHeaders,
+    sessionHeaders: OPENCODE_SESSION_HEADERS,
     fetchImpl,
   });
 
-  // Internal delegate for Anthropic Messages wire (Claude, Qwen) with Bearer token authentication
+  // Internal delegate for Anthropic Messages wire (Claude, Qwen). The endpoint
+  // is Anthropic-shaped and reads the key from `x-api-key`, so a bearer-only
+  // request is answered "Missing API key" even when the key is valid — verified
+  // against opencode.ai/zen/v1/messages. Both spellings go out because the other
+  // OpenCode wires read `Authorization`, and upstream ignores the header it does
+  // not use.
   const messagesDelegate = new AnthropicProvider({
     id,
     name,
     baseUrl,
     defaultModel,
     messagesPath: '/messages',
-    authScheme: 'bearer',
+    authScheme: 'bearer-and-x-api-key',
     apiKeyEnvVar,
     apiKeyEnvFallbacks,
     capabilities,
     headers: customHeaders,
+    sessionHeaders: OPENCODE_SESSION_HEADERS,
     fetchImpl,
   });
 
@@ -372,6 +445,8 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
       Authorization: `Bearer ${apiKey}`,
       ...customHeaders,
     };
+    applySessionHeaders(headers, params.sessionId, OPENCODE_SESSION_HEADERS);
+    if (!headers['User-Agent'] && !headers['user-agent']) headers['User-Agent'] = OPENCODE_USER_AGENT;
 
     let res: Response;
     try {
@@ -426,14 +501,11 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
     };
 
     const finishReason = toolCalls.length ? 'tool-calls' : data.status === 'incomplete' ? 'length' : 'stop';
+    const finalized = finalizeOpenCodeMessage(messageText, toolCalls.length ? toolCalls : undefined, params);
 
     return {
-      message: {
-        role: 'assistant',
-        content: messageText,
-        toolCalls: toolCalls.length ? toolCalls : undefined,
-      },
-      finishReason,
+      message: finalized.message,
+      finishReason: finalized.finishReason || finishReason,
       usage,
       raw: data,
     };
@@ -447,6 +519,8 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
       Authorization: `Bearer ${apiKey}`,
       ...customHeaders,
     };
+    applySessionHeaders(headers, params.sessionId, OPENCODE_SESSION_HEADERS);
+    if (!headers['User-Agent'] && !headers['user-agent']) headers['User-Agent'] = OPENCODE_USER_AGENT;
 
     let res: Response;
     try {
@@ -471,6 +545,17 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
 
     let emittedFinish = false;
     let accumulatedUsage: Usage | undefined;
+    /**
+     * Responses carries two ids for one function call and uses a different one
+     * on each event: `output_item.added` names the call (`call_id`) *and* the
+     * item (`id`), while `function_call_arguments.delta` names only the item.
+     * A consumer joins a chunk by the id its `tool-call-start` carried, so the
+     * delta has to be re-keyed onto that call id — emitting the item id there
+     * starts an entry and then appends the arguments to nothing, and the call
+     * arrives with `{}`. OpenAI's own stream behaves the same way, so the
+     * mapping belongs here rather than at every consumer.
+     */
+    const callIdByItemId = new Map<string, string>();
 
     for await (const sse of parseSSE(bodyToAsyncIterable(requireBody(res, id)))) {
       const data = safeJsonParse<Record<string, unknown>>(sse, {});
@@ -482,25 +567,29 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
       } else if (type === 'response.output_item.added') {
         const item = (data.item ?? {}) as Record<string, unknown>;
         if (item.type === 'function_call') {
+          const callId = String(item.call_id ?? item.id ?? '');
+          if (item.id !== undefined) callIdByItemId.set(String(item.id), callId);
           yield {
             type: 'tool-call-start',
-            id: String(item.call_id ?? item.id ?? ''),
+            id: callId,
             name: String(item.name ?? ''),
           };
         }
       } else if (type === 'response.function_call_arguments.delta') {
         const delta = String(data.delta ?? '');
+        const itemId = String(data.item_id ?? '');
         yield {
           type: 'tool-call-args-delta',
-          id: String(data.item_id ?? ''),
+          id: callIdByItemId.get(itemId) ?? itemId,
           argsDelta: delta,
         };
       } else if (type === 'response.output_item.done') {
         const item = (data.item ?? {}) as Record<string, unknown>;
         if (item.type === 'function_call') {
+          const callId = callIdByItemId.get(String(item.id ?? '')) ?? String(item.call_id ?? item.id ?? '');
           yield {
             type: 'tool-call-end',
-            id: String(item.call_id ?? item.id ?? ''),
+            id: callId,
           };
         }
       } else if (type === 'response.completed') {
@@ -538,6 +627,8 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
       'x-goog-api-key': apiKey,
       ...customHeaders,
     };
+    applySessionHeaders(headers, params.sessionId, OPENCODE_SESSION_HEADERS);
+    if (!headers['User-Agent'] && !headers['user-agent']) headers['User-Agent'] = OPENCODE_USER_AGENT;
 
     let res: Response;
     try {
@@ -595,14 +686,11 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
 
     const rawReason = String(firstCandidate.finishReason ?? 'STOP');
     const finishReason = toolCalls.length ? 'tool-calls' : rawReason === 'MAX_TOKENS' ? 'length' : 'stop';
+    const finalized = finalizeOpenCodeMessage(messageText, toolCalls.length ? toolCalls : undefined, params);
 
     return {
-      message: {
-        role: 'assistant',
-        content: messageText,
-        toolCalls: toolCalls.length ? toolCalls : undefined,
-      },
-      finishReason,
+      message: finalized.message,
+      finishReason: finalized.finishReason || finishReason,
       usage,
       raw: data,
     };
@@ -617,6 +705,8 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
       'x-goog-api-key': apiKey,
       ...customHeaders,
     };
+    applySessionHeaders(headers, params.sessionId, OPENCODE_SESSION_HEADERS);
+    if (!headers['User-Agent'] && !headers['user-agent']) headers['User-Agent'] = OPENCODE_USER_AGENT;
 
     let res: Response;
     try {
@@ -710,8 +800,8 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
 
     async chat(params: ChatParams, credentials: ProviderCredentials): Promise<ChatResult> {
       const cleanModel = params.model.replace(/^(?:opencode|opencode-go)\//, '');
-      const wire = detectOpenCodeWire(cleanModel);
-      const normalizedParams: ChatParams = { ...params, model: cleanModel };
+      const wire = opts.forceWire ?? detectOpenCodeWire(cleanModel);
+      const normalizedParams: ChatParams = withSession({ ...params, model: cleanModel });
 
       switch (wire) {
         case 'responses':
@@ -728,8 +818,8 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
 
     async *stream(params: ChatParams, credentials: ProviderCredentials): AsyncIterable<StreamChunk> {
       const cleanModel = params.model.replace(/^(?:opencode|opencode-go)\//, '');
-      const wire = detectOpenCodeWire(cleanModel);
-      const normalizedParams: ChatParams = { ...params, model: cleanModel };
+      const wire = opts.forceWire ?? detectOpenCodeWire(cleanModel);
+      const normalizedParams: ChatParams = withSession({ ...params, model: cleanModel });
 
       switch (wire) {
         case 'responses':

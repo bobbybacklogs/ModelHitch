@@ -8,7 +8,9 @@ import {
   loadAgentLibrary,
   resolveAgentsDir,
   searchAgents,
+  searchAgentsSemantic,
   type AgentLibrary,
+  type EmbedFn,
   type LibraryAgent,
   type SubagentToolTier,
 } from './agent-library.js';
@@ -17,6 +19,17 @@ export type { SubagentToolTier } from './agent-library.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+/**
+ * Warning channel for the harness, following the CLI convention: diagnostics go
+ * to stderr with a `[harness]` prefix so they never contaminate tool output or
+ * a piped answer. Exposed as a function rather than reached for directly, so
+ * modules that warn (the semantic search, for one) take it by injection and can
+ * be tested without capturing stderr.
+ */
+export function harnessLogger(message: string): void {
+  console.error(`[harness] ${message}`);
+}
 
 /**
  * Subagent delegation for the harness, backed by bihan (the subagent
@@ -165,7 +178,7 @@ export interface SubagentRoster {
   /** True when `name` is one of this roster's tools. */
   ownsTool(name: string): boolean;
   /** Dispatch a call to one of `tools`. Never throws. */
-  execute(name: string, args: Record<string, unknown>): Promise<string>;
+  execute(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<string>;
   /** Registered subagent names. */
   names: string[];
   /** Tool names a registered subagent actually holds, to verify tier wiring. */
@@ -202,11 +215,26 @@ export interface SubagentOptions {
   workspaceDir: string;
   /** Explicit agents; overrides both the library and the built-ins. */
   agents?: AgentSpec[];
+  /**
+   * Agents registered *in addition* to whichever source resolves.
+   *
+   * Distinct from `agents`, which replaces the source entirely: a bundled agent
+   * such as the reviewer has to sit alongside a user's library, not displace it.
+   */
+  extraAgents?: AgentSpec[];
   /** Folder of agent definitions. `undefined` auto-discovers; `null` disables. */
   agentsDir?: string | null;
   maxDepth?: number;
   /** Names to leave out of a loaded library. */
   exclude?: string[];
+  /**
+   * Optional embedder for `find_subagent`.
+   *
+   * Supplied, the roster selects agents by intent and falls back to keyword
+   * search whenever the embedder is missing or fails. Omitted, nothing about the
+   * roster changes: the lexical path is the default, not the degraded case.
+   */
+  embedder?: EmbedFn;
 }
 
 /** Generic sub-contractors, used when no agent library is available. */
@@ -366,10 +394,21 @@ export async function createSubagentRoster(
     }
   }
 
+  // Bundled agents join the roster after the source resolves, so a bundled one
+  // can never displace a user's library.
+  for (const spec of options.extraAgents ?? []) {
+    addAgent({
+      name: spec.name,
+      role: spec.role,
+      instructions: spec.instructions,
+      tier: spec.tools,
+      description: spec.role,
+    });
+  }
+
   const names = entries.map((entry) => entry.name);
   const catalogue = buildCatalog(entries);
   const fromLibrary = source.kind === 'library';
-
   const delegationTool: ToolDefinition = {
     name: 'subagent',
     description:
@@ -422,7 +461,15 @@ export async function createSubagentRoster(
     if (query.trim() === '') return 'Error: find_subagent needs a non-empty query.';
     const limit = typeof args['limit'] === 'number' ? Math.max(1, Math.min(25, args['limit'] as number)) : 8;
     if (!library) return `Error: no agent library is loaded; available: ${nameList()}.`;
-    const matches = searchAgents(library.agents, query, limit);
+    // Semantic selection when an embedder was injected. The search falls back to
+    // keywords itself, so this stays one call site either way and the roster's
+    // output format is unchanged.
+    const matches = options.embedder
+      ? await searchAgentsSemantic(library.agents, query, limit, {
+          embed: options.embedder,
+          log: harnessLogger,
+        })
+      : searchAgents(library.agents, query, limit);
     if (matches.length === 0) {
       return `No subagent matched "${query}". Available: ${nameList()}.`;
     }
@@ -431,7 +478,7 @@ export async function createSubagentRoster(
       .join('\n');
   }
 
-  async function delegate(args: Record<string, unknown>): Promise<string> {
+  async function delegate(args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
     const agent = typeof args['agent'] === 'string' ? (args['agent'] as string) : '';
     const task = typeof args['task'] === 'string' ? (args['task'] as string) : '';
     if (!agent || !task) {
@@ -445,13 +492,36 @@ export async function createSubagentRoster(
         `Available: ${nameList()}.`
       );
     }
+    if (signal?.aborted === true) {
+      return `Error: subagent "${agent}" was cancelled before it started`;
+    }
     try {
       // asTool() gives the subagent entry point: it runs the subagent's own loop
       // and returns only its synthesized answer.
-      const out = await target.asTool().run({ task }, { agentName: 'Harness' });
+      const run = target.asTool().run({ task }, { agentName: 'Harness' });
+      // bihan's `run()` takes no signal, so the gate here is a race: the harness
+      // stops waiting the moment the signal fires. The subagent's own loop can
+      // outlive that, which is a real limit of the bihan surface, not something
+      // this adapter can paper over.
+      const out = signal
+        ? await Promise.race([
+            run,
+            new Promise<never>((_resolve, reject) => {
+              const abort = (): void => reject(new Error(`subagent "${agent}" was cancelled`));
+              if (signal.aborted) abort();
+              else signal.addEventListener('abort', abort, { once: true });
+            }),
+          ])
+        : await run;
       return typeof out === 'string' ? out : JSON.stringify(out, null, 2);
     } catch (err) {
-      return `Error: subagent "${agent}" failed: ${err instanceof Error ? err.message : String(err)}`;
+      const message = err instanceof Error ? err.message : String(err);
+      // `signal.aborted` is re-read through the optional chain on purpose: the
+      // narrowing from the earlier check does not survive the await.
+      const cancelled = signal !== undefined && signal.aborted;
+      return cancelled
+        ? `Error: subagent "${agent}" was cancelled before it finished`
+        : `Error: subagent "${agent}" failed: ${message}`;
     }
   }
 
@@ -467,8 +537,8 @@ export async function createSubagentRoster(
     ownsTool(name: string) {
       return toolsOut.some((t) => t.name === name);
     },
-    async execute(name: string, args: Record<string, unknown>) {
-      if (name === delegationTool.name) return delegate(args);
+    async execute(name: string, args: Record<string, unknown>, signal?: AbortSignal) {
+      if (name === delegationTool.name) return delegate(args, signal);
       if (findTool && name === findTool.name) return findMatches(args);
       return `Error: unknown subagent tool "${name}".`;
     },

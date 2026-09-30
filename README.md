@@ -241,6 +241,48 @@ npx modelhitch settings
 | **Image lane** | Off by default — enable in settings or with `--image-lane` |
 | **Runtime** | Bridge needs Node 22.5+ (SQLite); library supports Node 18+ |
 
+### Pin one provider
+
+```bash
+npx modelhitch bridge --background --provider opencode-go
+```
+
+The pinned provider becomes the lane every request prefers — including requests that name a
+different provider — and the route the pin displaced is tried next, so a depleted or erroring
+provider still rotates on to a working one. Pin to a provider the bridge does not serve and it
+refuses to start with the available ids. The pin lives only in that process: restart without
+`--provider` and the configured rotation is back. `modelhitch status` shows the active pin.
+
+### OpenCode Console BYOK
+
+Console [BYOK](https://opencode.ai/v2/docs/console/byok/) links a provider account you already
+pay for to an OpenCode workspace. Each connection gets one gateway URL and authenticates with a
+Console service-account key, so the provider secret never reaches this machine. ModelHitch serves
+each connection as its own provider lane — `opencode-byok-<slug>` — which means it rotates,
+cools, and pins like every other provider:
+
+```bash
+# rotate across the connections configured in /settings
+npx modelhitch bridge --background --opencode-byok
+
+# or pin one connection for this process
+npx modelhitch bridge --background --provider opencode-byok-deepseek
+```
+
+In `/settings` → **OpenCode Console BYOK**: paste the Console API URL (or the bare `conn_…` id),
+list the models the connection enables, and choose `rotation` (spread across every connection) or
+`pinned` (one connection first). **Import from OpenCode** reads your local OpenCode install
+(`auth.json`, `opencode.db` message history, `opencode.jsonc`) and seeds connections with the
+models you actually run; `--opencode-byok-sync` does the same at bridge start. The Console key is
+reused from the OpenCode key in settings (`keys.opencode` / `OPENCODE_API_KEY`) unless you paste a
+dedicated one.
+
+| | |
+| --- | --- |
+| **Schema** | Per connection: `auto`, `chat-completions`, `responses`, `anthropic`, `google` |
+| **Provider id** | `opencode-byok-<slug>` — usable in policy lanes and `--provider` |
+| **Keys** | `keys.opencode` shared · `keys.opencode-byok` or `keys.opencode-byok-<slug>` to override |
+
 [Bridge guide →](./docs/guide.md#local-agent-bridge) · [agent-runtime scaffold (Eve-shaped filesystem-first durable agent) →](./agent-runtime/README.md)
 
 ## Development
