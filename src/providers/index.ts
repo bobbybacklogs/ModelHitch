@@ -40,14 +40,30 @@ export {
   opencode,
   opencodeGo,
   createOpenCodeProvider,
+  createMultiWireProvider,
   detectOpenCodeWire,
   OPENCODE_ZEN_BASE_URL,
   OPENCODE_GO_BASE_URL,
   OPENCODE_DEFAULT_MODEL,
   OPENCODE_SNAPSHOT_MODELS,
+  type MultiWireProviderOptions,
   type OpenCodeProviderOptions,
   type OpenCodeWire,
 } from './opencode.js';
+export {
+  createCustomLaneProvider,
+  customLaneBaseUrl,
+  customLaneProviderId,
+  customLaneSlug,
+  customLaneWire,
+  isCustomLaneProviderId,
+  CUSTOM_LANE_KEY_ENV_PREFIX,
+  CUSTOM_LANE_PROVIDER_PREFIX,
+  CUSTOM_LANE_SCHEMAS,
+  type CreateCustomLaneProviderOptions,
+  type CustomLaneInput,
+  type CustomLaneSchema,
+} from './custom-lane.js';
 export {
   createOpenCodeByokProvider,
   isOpenCodeByokProviderId,
@@ -64,3 +80,8 @@ export {
   type OpenCodeByokSchema,
 } from './opencode-byok.js';
 export type { Provider, ModelInfo } from './types.js';
+export {
+  createChatGptPlanProvider,
+  chatGptPlanRequestBody,
+  type ChatGptPlanProviderOptions,
+} from './chatgpt-plan.js';

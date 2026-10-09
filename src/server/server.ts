@@ -65,6 +65,7 @@ import {
 } from './responses.js';
 import { clearConversations, findConversationWithToolCall, rememberConversation } from './conversation-state.js';
 import { normalizeBodyImages } from './local-images.js';
+import { planLanes, planModelEntries, laneRoute, type PlanLane, type PlanModelEntry } from './lane-catalog.js';
 import { resolveOutboundSessionId } from '../core/session.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
 import type { CloudAgentConfig, ImageGenerationConfig } from '../config.js';
@@ -80,6 +81,12 @@ import { WorkspaceStore } from '../workspace/store.js';
 import { handleWorkspaceHttp } from './workspace-http.js';
 import type { OpenCodeLocalState } from '../opencode-byok.js';
 import { OPENCODE_BYOK_KEY_ENV } from '../providers/opencode-byok.js';
+import {
+  CHATGPT_PLAN_PROVIDER_ID,
+  CHATGPT_PLAN_USAGE_SETTINGS_URL,
+  type ChatGptPlanSignInAttempt,
+  type ChatGptPlanStatus,
+} from '../chatgpt-plan.js';
 
 export interface ModelHitchServerOptions {
   /** Providers to serve. Defaults to the built-in set. */
@@ -176,6 +183,42 @@ export interface ModelHitchServerOptions {
    * (the settings UI "Import from OpenCode" action). Unset = 501.
    */
   openCodeState?: () => OpenCodeLocalState;
+  /**
+   * Backs the `/v1/chatgpt-plan*` routes: the account panel and sign-in flow
+   * for the Sign in with ChatGPT lane. Unset = 501, which is what a bridge
+   * built without ChatGPT plan support reports.
+   */
+  chatGptPlan?: ChatGptPlanBridge;
+}
+
+/**
+ * The Sign in with ChatGPT account surface, implemented by the daemon over its
+ * credential file.
+ *
+ * The server never touches tokens itself: it hands the browser to the system
+ * authorization page and reports what the daemon knows. Sign-in completes on a
+ * separate loopback listener (the redirect URI OpenAI requires is
+ * `http://127.0.0.1:<port>/auth/callback`, which is not this bridge), so the
+ * settings page polls `status()` instead of waiting on a request.
+ */
+export interface ChatGptPlanBridge {
+  status(): ChatGptPlanStatus;
+  beginSignIn(options: {
+    accountKey?: string;
+    registration?: boolean;
+    forceConsent?: boolean;
+  }): Promise<ChatGptPlanSignInAttempt>;
+  signInAttempt(attemptId: string): ChatGptPlanSignInAttempt | undefined;
+  cancelSignIn(attemptId?: string): boolean;
+  signOut(options: { accountKey?: string; revoke?: boolean }): Promise<{ revoked: boolean; warnings: string[] }>;
+  activate(accountKey: string): void;
+  /** The signed-in account's model catalog. */
+  listModels(): Promise<Array<{ id: string; name?: string }>>;
+}
+
+/** Reads a request body as a plain object without trusting its shape. */
+function asObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 /** One completed inference request, as reported to the `onUsage` hook. */
@@ -324,6 +367,7 @@ export class OpenAICompatibleServer {
     staticModels?: Record<string, string[]>;
     pinnedProviderId?: string;
     openCodeState?: () => OpenCodeLocalState;
+    chatGptPlan?: ChatGptPlanBridge;
   }): void {
     if (partial.providers) this.providers = partial.providers;
     if (partial.catalogSource !== undefined) {
@@ -364,6 +408,178 @@ export class OpenAICompatibleServer {
     if (partial.staticModels !== undefined) this.options.staticModels = partial.staticModels;
     if (partial.pinnedProviderId !== undefined) this.options.pinnedProviderId = partial.pinnedProviderId || undefined;
     if (partial.openCodeState !== undefined) this.options.openCodeState = partial.openCodeState;
+    if (partial.chatGptPlan !== undefined) this.options.chatGptPlan = partial.chatGptPlan;
+  }
+
+  /**
+   * Sign in with ChatGPT account surface.
+   *
+   * Returns false when the path is not one of ours, so the caller can 404.
+   * A bridge with no `chatGptPlan` wired answers 501 on every route here,
+   * because "this build cannot do it" is a different answer from "not found".
+   */
+  private async handleChatGptPlan(
+    method: string,
+    path: string,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<boolean> {
+    const bridge = this.options.chatGptPlan;
+    const notImplemented = () =>
+      this.sendJson(res, 501, {
+        error: {
+          message:
+            'Sign in with ChatGPT is not available on this bridge. Start it with `modelhitch bridge` (or enable the lane) to sign in.',
+          type: 'not_implemented',
+          code: 'not_implemented',
+        },
+      });
+
+    if (method === 'GET' && path === '/v1/chatgpt-plan') {
+      this.log(`${method} ${path} ->`);
+      if (!bridge) {
+        notImplemented();
+        return true;
+      }
+      try {
+        this.sendJson(res, 200, bridge.status());
+      } catch (err) {
+        this.sendJson(res, 500, {
+          error: {
+            message: `Could not read the ChatGPT plan account state: ${(err as Error).message}`,
+            type: 'server_error',
+            code: 'chatgpt_plan_status_failed',
+          },
+        });
+      }
+      return true;
+    }
+
+    if (method === 'POST' && path === '/v1/chatgpt-plan/sign-in') {
+      this.log(`${method} ${path} ->`);
+      if (!bridge) {
+        notImplemented();
+        return true;
+      }
+      const body = asObject(await this.readBody(req));
+      try {
+        const attempt = await bridge.beginSignIn({
+          ...(typeof body.accountKey === 'string' && body.accountKey.trim() ? { accountKey: body.accountKey.trim() } : {}),
+          ...(body.registration === true ? { registration: true } : {}),
+          ...(body.forceConsent === true ? { forceConsent: true } : {}),
+        });
+        this.sendJson(res, 200, { ok: true, attempt });
+      } catch (err) {
+        this.sendChatGptPlanError(res, err);
+      }
+      return true;
+    }
+
+    const attemptMatch = path.match(/^\/v1\/chatgpt-plan\/sign-in\/([^/]+)$/);
+    if (method === 'GET' && attemptMatch) {
+      this.log(`${method} ${path} ->`);
+      if (!bridge) {
+        notImplemented();
+        return true;
+      }
+      const attempt = bridge.signInAttempt(decodeURIComponent(attemptMatch[1] ?? ''));
+      if (!attempt) {
+        this.sendJson(res, 404, {
+          error: { message: 'No such ChatGPT sign-in attempt.', type: 'invalid_request_error', code: 'not_found' },
+        });
+        return true;
+      }
+      this.sendJson(res, 200, { attempt });
+      return true;
+    }
+
+    const cancelMatch = path.match(/^\/v1\/chatgpt-plan\/sign-in\/([^/]+)\/cancel$/);
+    if (method === 'POST' && cancelMatch) {
+      this.log(`${method} ${path} ->`);
+      if (!bridge) {
+        notImplemented();
+        return true;
+      }
+      try {
+        const cancelled = bridge.cancelSignIn(decodeURIComponent(cancelMatch[1] ?? ''));
+        this.sendJson(res, 200, { ok: true, cancelled });
+      } catch (err) {
+        this.sendChatGptPlanError(res, err);
+      }
+      return true;
+    }
+
+    if (method === 'POST' && path === '/v1/chatgpt-plan/sign-out') {
+      this.log(`${method} ${path} ->`);
+      if (!bridge) {
+        notImplemented();
+        return true;
+      }
+      const body = asObject(await this.readBody(req));
+      try {
+        const result = await bridge.signOut({
+          ...(typeof body.accountKey === 'string' && body.accountKey.trim() ? { accountKey: body.accountKey.trim() } : {}),
+          ...(body.revoke === false ? { revoke: false } : {}),
+        });
+        this.sendJson(res, 200, { ok: true, ...result });
+      } catch (err) {
+        this.sendChatGptPlanError(res, err);
+      }
+      return true;
+    }
+
+    if (method === 'POST' && path === '/v1/chatgpt-plan/activate') {
+      this.log(`${method} ${path} ->`);
+      if (!bridge) {
+        notImplemented();
+        return true;
+      }
+      const body = asObject(await this.readBody(req));
+      const accountKey = typeof body.accountKey === 'string' ? body.accountKey.trim() : '';
+      if (!accountKey) {
+        this.sendJson(res, 400, {
+          error: { message: 'accountKey is required.', type: 'invalid_request_error', code: 'invalid_request' },
+        });
+        return true;
+      }
+      try {
+        bridge.activate(accountKey);
+        this.sendJson(res, 200, { ok: true });
+      } catch (err) {
+        this.sendChatGptPlanError(res, err);
+      }
+      return true;
+    }
+
+    if (method === 'POST' && path === '/v1/chatgpt-plan/models') {
+      this.log(`${method} ${path} ->`);
+      if (!bridge) {
+        notImplemented();
+        return true;
+      }
+      try {
+        this.sendJson(res, 200, { models: await bridge.listModels() });
+      } catch (err) {
+        this.sendChatGptPlanError(res, err);
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  /** Surface an auth failure with the code and status the caller should act on. */
+  private sendChatGptPlanError(res: ServerResponse, err: unknown): void {
+    const status = err instanceof ModelHitchError && err.status ? err.status : 400;
+    const code = err instanceof ModelHitchError ? err.code : 'chatgpt_plan_failed';
+    const message = err instanceof Error ? err.message : String(err);
+    const hint =
+      status === 429
+        ? ` Manage plan and per-app limits at ${CHATGPT_PLAN_USAGE_SETTINGS_URL}.`
+        : '';
+    this.sendJson(res, status >= 400 && status < 600 ? status : 400, {
+      error: { message: `${message}${hint}`, type: 'chatgpt_plan_error', code },
+    });
   }
 
   /** The provider a `--provider` pin routes through, when it still exists. */
@@ -415,14 +631,23 @@ export class OpenAICompatibleServer {
    * route a pin displaced (if any), then the policy/auto-mode lanes.
    */
   private async lanesForRoute(route: RoutedRequest, credentials?: ProviderCredentials): Promise<ResolvedLane[]> {
-    const lanes: ResolvedLane[] = [
-      {
-        providerId: route.provider.id,
-        model: route.model,
-        provider: route.provider,
-        credentials: credentials ?? (await this.resolveCredentials(route.provider.id)),
-      },
-    ];
+    const primary: ResolvedLane = {
+      providerId: route.provider.id,
+      model: route.model,
+      provider: route.provider,
+      credentials: credentials ?? (await this.resolveCredentials(route.provider.id)),
+    };
+    // The policy can mark the lane a request landed on — a custom BYOK lane with
+    // `onLimit: 'stop'` is terminal. The walk has to see that flag, and the
+    // primary lane is built here rather than resolved, so it is inherited
+    // explicitly: reaching a stop lane directly must stop just as arriving by
+    // rotation does.
+    const ownTarget = this.laneTargetsFromSource(primary.providerId, primary.model).find(
+      (target) => target.providerId === primary.providerId && target.model === primary.model,
+    );
+    if (ownTarget?.terminal) primary.terminal = true;
+
+    const lanes: ResolvedLane[] = [primary];
     if (route.displaced) {
       const provider = this.providerFor(route.displaced.providerId);
       if (provider) {
@@ -644,8 +869,14 @@ export class OpenAICompatibleServer {
       return;
     }
 
-    const cloudAgentCancelMatch = path.match(/^\/v1\/cloud-agents\/([^/]+)\/cancel$/);
-    if (method === 'POST' && cloudAgentCancelMatch) {
+    // Sign in with ChatGPT: the account panel and sign-in flow for the
+    // `chatgpt-plan` lane. Handled as a family so the five routes share one
+    // 501 story when the bridge has no credential store wired.
+    if (path === '/v1/chatgpt-plan' || path.startsWith('/v1/chatgpt-plan/')) {
+      if (await this.handleChatGptPlan(method, path, req, res)) return;
+    }
+
+    const cloudAgentCancelMatch = path.match(/^\/v1\/cloud-agents\/([^/]+)\/cancel$/);    if (method === 'POST' && cloudAgentCancelMatch) {
       this.log(`${method} ${path} ->`);
       try {
         const agent = await this.handleCloudAgentCancel(decodeURIComponent(cloudAgentCancelMatch[1] ?? ''));
@@ -1450,8 +1681,21 @@ export class OpenAICompatibleServer {
   // ---------------------------------------------------------------------------
 
   private async modelCatalog(): Promise<OpenAIModelEntry[]> {
+    // The plan leads: a picker renders the list in order, and the lanes are the
+    // answer to "which of these hundreds of ids should I choose". Plain entries
+    // whose id the plan already published are dropped, so a lane is described
+    // once — by its plan entry, which is the one carrying a name and a tier.
+    const plan: OpenAIModelEntry[] = this.planModels().map((lane) => ({
+      id: lane.id,
+      object: 'model',
+      created: 0,
+      owned_by: lane.providerId,
+      name: lane.name,
+      modelhitch: lane,
+    }));
+
     const out: OpenAIModelEntry[] = [];
-    const seen = new Set<string>();
+    const seen = new Set(plan.map((entry) => entry.id));
     const push = (id: string, ownedBy: string) => {
       if (!id || seen.has(id)) return;
       seen.add(id);
@@ -1478,7 +1722,64 @@ export class OpenAICompatibleServer {
         }
       }
     }
-    return out.sort((a, b) => a.id.localeCompare(b.id));
+    return [...plan, ...out.sort((a, b) => a.id.localeCompare(b.id))];
+  }
+
+  /**
+   * The routing plan as pickable models. Empty when the bridge has no plan
+   * (neither a policy nor auto-mode), which leaves `GET /v1/models` exactly as
+   * it was before lanes were published.
+   *
+   * Lanes whose provider is not registered are dropped: offering a route the
+   * bridge cannot serve is worse than a shorter list.
+   */
+  private planModels(): PlanModelEntry[] {
+    // No plan, nothing to publish — and no reason to resolve a primary lane.
+    if (!this.policy && !this.options.autoMode) return [];
+    const lanes = planLanes({
+      policy: this.policy,
+      autoMode: this.options.autoMode,
+      primary: this.defaultLane(),
+      defaultModelFor: (providerId) => this.source.defaultModel(providerId),
+    });
+    return planModelEntries(lanes, {
+      providerName: (id) => this.providerFor(id)?.name,
+      routeFor: (lane) => this.publishedRoute(lane),
+    }).filter((lane) => Boolean(this.providerFor(lane.providerId)));
+  }
+
+  /**
+   * The id a client sends back for a lane.
+   *
+   * Fully qualified by default: a bare id means "the default provider" to the
+   * router rather than "this lane", so a lane on any other provider has to name
+   * it. The exception is the default provider's own lanes, where the bare id
+   * *is* the lane — and where the catalog advertises that same bare id anyway,
+   * so using it keeps the picker from listing one lane twice.
+   *
+   * That exception is guarded, because a bare id is matched against every
+   * provider prefix first: the default config's gateway lane `openai/gpt-5.4`
+   * would be routed to the `openai` provider. When another registered provider
+   * id is a prefix of the bare route, the lane stays qualified.
+   */
+  private publishedRoute(lane: PlanLane): string {
+    if (lane.providerId !== this.options.defaultProviderId) return laneRoute(lane);
+    const shadowed = this.providers.some(
+      (provider) => provider.id !== lane.providerId && lane.model.startsWith(`${provider.id}/`),
+    );
+    return shadowed ? laneRoute(lane) : lane.model;
+  }
+
+  /**
+   * The lane a request with no model lands on — auto-mode's first lane. The
+   * resolved `defaultModel` option wins over the provider's own default, the
+   * same precedence a request gets. Undefined when there is no provider to
+   * route to at all.
+   */
+  private defaultLane(): FailoverTarget | undefined {
+    if (this.providers.length === 0) return undefined;
+    const route = routeModel(undefined, this.providers, this.options.defaultProviderId);
+    return { providerId: route.provider.id, model: this.options.defaultModel ?? route.model };
   }
 
   private async handleModels(res: ServerResponse): Promise<void> {
@@ -1815,6 +2116,10 @@ function providerEnvHints(providerId: string): string[] {
   // Console BYOK connections share the Console service-account key with the
   // Zen/Go lanes, so every `opencode-byok-*` provider points at the same var.
   if (providerId.startsWith('opencode-byok-')) return [OPENCODE_BYOK_KEY_ENV];
+  // The ChatGPT plan lane has no API key at all: its credential is an OAuth
+  // grant saved by the sign-in flow, so listing an env var here would send the
+  // settings UI looking for a key that does not exist.
+  if (providerId === CHATGPT_PLAN_PROVIDER_ID) return [];
   const map: Record<string, string[]> = {
     openai: ['OPENAI_API_KEY'],
     anthropic: ['ANTHROPIC_API_KEY'],

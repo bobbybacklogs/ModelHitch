@@ -2,6 +2,10 @@ node_modules/
 dist/
 coverage/
 .dirgest/
+# HitchChat is developed as its own repository (it carries a nested .git and
+# its own history), so its files are not tracked here. Promote it to a
+# submodule if it should ship with ModelHitch.
+HitchChat/
 android-sdk/.gradle/
 android-sdk/**/.gradle/
 android-sdk/**/build/

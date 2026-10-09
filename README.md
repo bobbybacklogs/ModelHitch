@@ -87,6 +87,7 @@ Defaults to a personal install. Add `--project`, `--dry-run`, or `--force` as ne
 | **Flutter** | Dart SDK, SSE streaming, secure BYOK, OpenAI-compatible providers |
 | **Electron** | Desktop adapter, `safeStorage` BYOK, renderer IPC, browser-safe bundling |
 | **BYOK** | Request keys, memory store, browser local storage, env fallback |
+| **ChatGPT plan** | Spend a signed-in ChatGPT plan as a lane: rotate to it, pin it, or route to it explicitly (`chatgpt-plan`). OAuth, no API key |
 | **React** | `useChat`, `useStream`, bridge client via `modelhitch/react` |
 | **Bridge** | OpenAI Chat/Responses/Images, Anthropic Messages, Gemini GenerateContent |
 | **Reliability** | Automatic 429/5xx/network failover across models and providers |
@@ -98,6 +99,9 @@ Defaults to a personal install. Add `--project`, `--dry-run`, or `--force` as ne
 `Together AI` · `HuggingFace` · `Google Gemini` · `DeepSeek` · `xAI` ·
 `Mistral` · `Moonshot` · `Z.ai (GLM)` · `LM Studio` · `Ollama` · `vLLM` · `llama.cpp` ·
 `KoboldCpp` · `mock`
+
+Plus the opt-in lanes you configure: `chatgpt-plan` (Sign in with ChatGPT), `custom-<slug>`
+(any endpoint you name), and `opencode-byok-<slug>` (OpenCode Console connections).
 
 ## Android SDK
 
@@ -283,7 +287,67 @@ dedicated one.
 | **Provider id** | `opencode-byok-<slug>` — usable in policy lanes and `--provider` |
 | **Keys** | `keys.opencode` shared · `keys.opencode-byok` or `keys.opencode-byok-<slug>` to override |
 
-[Bridge guide →](./docs/guide.md#local-agent-bridge) · [agent-runtime scaffold (Eve-shaped filesystem-first durable agent) →](./agent-runtime/README.md)
+### Custom BYOK lanes
+
+For a key to a provider ModelHitch does not list: a self-hosted gateway, a regional reseller, an
+internal deployment. You supply the endpoint, the key, and the model slots, and the lane behaves
+like any other provider. There is no catalog to import from, so a custom lane is **never** polled
+for models — the ids you type are exactly what it serves.
+
+```bash
+npx modelhitch bridge --background \
+  --custom-lanes \
+  --custom-lane upstream --custom-lane-url https://api.example.com/v1 \
+  --custom-lane-models fast-model,smart-model --custom-lane-schema chat-completions \
+  --custom-lane-on-limit stop
+```
+
+In `/settings` → **Custom lanes**: add a lane, paste the endpoint, type the model slots, pick the
+schema, and choose what hitting a limit means. `placement` decides where the lanes sit — `lead`
+(default) routes to them first with your configured lanes directly behind as the safety net,
+`fallback` keeps the buffet primary and uses the custom lanes only when it is depleted.
+
+| | |
+| --- | --- |
+| **Schema** | Per lane: `auto` (detect from the model family), `chat-completions`, `responses`, `anthropic`, `google` |
+| **Provider id** | `custom-<slug>` — usable in policy lanes, the lane-health table, and `--provider` |
+| **Keys** | `keys.custom-<slug>` · the lane's `apiKeyEnvVar` · `MODELHITCH_CUSTOM_<ID>_API_KEY` · `requiresKey: false` for a keyless endpoint |
+| **On limit** | `rotate` (default) fails over like every lane · `stop` is terminal: a 429/402/5xx surfaces instead of spending another provider, and keeps stopping while the lane is parked |
+
+[Bridge guide →](./docs/guide.md#custom-byok-lanes) · [agent-runtime scaffold (Eve-shaped filesystem-first durable agent) →](./agent-runtime/README.md)
+
+### Sign in with ChatGPT
+
+Spend the ChatGPT plan the user already pays for, instead of an API key. You sign in once in the
+system browser, and ModelHitch serves `chatgpt-plan` as an ordinary lane: rotate to it, pin it as
+the main route, cool it down on a limit, or route to it explicitly as `chatgpt-plan/<model>`.
+
+```bash
+# sign in first (opens your browser, loopback callback, no client secret)
+npx modelhitch chatgpt-plan sign-in
+
+# then serve it as the main route, with the buffet directly behind it
+npx modelhitch bridge --background --chatgpt-plan
+```
+
+`/settings` → **Sign in with ChatGPT** has the same flow with a **Continue with ChatGPT** button,
+plus rotation, pin, placement, and model-slot controls.
+
+| | |
+| --- | --- |
+| **Provider id** | `chatgpt-plan` |
+| **Credentials** | OAuth grant in `~/.modelhitch/chatgpt-plan.json` (owner-only). Never an API key, never in `config.json` |
+| **Models** | Read from the signed-in account's `GET /v1/models`, or name slots yourself. ModelHitch never guesses a slug |
+| **Mode** | `rotation` spreads requests over the model slots · `pinned` leads on one model with its siblings as the first fallback |
+| **Placement** | `lead` (default) spends the plan first, `fallback` uses it only once the configured lanes are depleted |
+| **On limit** | `rotate` (default) fails over like any 429 · `stop` makes the lane terminal |
+| **Requires** | `store: false` and `stream: true` on every request, which this route mandates. `temperature` and `maxTokens` are not sent |
+
+OpenAI's preview route rejects several fields the normal API accepts and only counts a response as
+complete on `response.completed`. Both are enforced in the adapter, and the plan-usage settings link
+travels with a limit error so the caller can act on it.
+
+[ChatGPT plan lane guide →](./docs/guide.md#sign-in-with-chatgpt) · [Sign in with ChatGPT spec →](https://developers.openai.com/siwc/token-sharing-open-source)
 
 ## Development
 

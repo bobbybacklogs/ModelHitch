@@ -6,6 +6,9 @@ import { validatePolicy } from './core/policy.js';
 import { CircuitBreaker } from './core/circuit-breaker.js';
 import { MemoryLaneCooldown } from './core/cooldown.js';
 import type { CatalogSourceOptions } from './catalog/source.js';
+import type { Capabilities } from './core/types.js';
+import type { CustomLaneSchema } from './providers/custom-lane.js';
+import { CUSTOM_LANE_SCHEMAS, customLaneProviderId } from './providers/custom-lane.js';
 import type { OpenCodeByokSchema } from './providers/opencode-byok.js';
 import { openCodeByokProviderId } from './providers/opencode-byok.js';
 
@@ -127,6 +130,122 @@ export interface OpenCodeByokConfig {
   syncFromOpenCode?: boolean;
 }
 
+/**
+ * One custom BYOK lane: an endpoint ModelHitch does not ship, added by the user.
+ *
+ * These are hand-written slots, not a catalog. The `models` list is what the
+ * user typed, and the bridge advertises exactly that — ModelHitch never polls
+ * the endpoint for models, because an unknown provider's catalog is unknowable.
+ *
+ * Credentials deliberately live in `keys[providerId]` (or the lane's env var),
+ * never here, exactly like `opencodeByok`: `serializeConfig` masks `keys` on
+ * every read, so a plaintext key in this block would leak through
+ * `GET /v1/config`.
+ */
+export interface CustomLaneConfig {
+  /** Stable lane id — becomes the provider id `custom-<slug>`. */
+  id: string;
+  /** Display label for the lane. */
+  label?: string;
+  /** Endpoint root, e.g. `https://api.example.com/v1` (no trailing slash needed). */
+  baseUrl: string;
+  /** API schema; `auto` (default) detects the wire from the model family. */
+  schema?: CustomLaneSchema;
+  /** The model slots to route to. At least one is required. */
+  models: string[];
+  /** Extra headers sent with every request. */
+  headers?: Record<string, string>;
+  /** Env var holding the key; defaults to `MODELHITCH_CUSTOM_<SLUG>_API_KEY`. */
+  apiKeyEnvVar?: string;
+  /** False for a keyless endpoint (a self-hosted gateway). Default: true. */
+  requiresKey?: boolean;
+  /** Honest capability claims for an endpoint that cannot do tools/vision. */
+  capabilities?: Partial<Capabilities>;
+  /** Off = kept in the document but out of the provider set and out of rotation. */
+  enabled?: boolean;
+  /**
+   * What happens when this lane is rate-limited or out of credit:
+   * - `rotate` (default) fails over to the next lane, like every other lane.
+   * - `stop` makes the lane terminal: the limit error surfaces to the caller
+   *   instead of spending another provider, and it stays terminal while the
+   *   lane is parked from that failure.
+   */
+  onLimit?: 'rotate' | 'stop';
+}
+
+/** Custom BYOK lanes: providers we don't ship, used as ordinary lanes. */
+export interface CustomLanesConfig {
+  /** Master switch. Off = no custom providers, no custom lanes. */
+  enabled: boolean;
+  /**
+   * Where the lanes sit in the plan:
+   * - `lead` (default) puts them at the front of `trusted`, with the configured
+   *   policy directly behind as the safety net.
+   * - `fallback` keeps the buffet primary and uses the custom lanes only when
+   *   the configured lanes are depleted or erroring.
+   */
+  placement?: 'lead' | 'fallback';
+  /** Custom lanes, in rotation order. */
+  lanes: CustomLaneConfig[];
+}
+
+/**
+ * Sign in with ChatGPT — the user's ChatGPT plan as a provider lane.
+ *
+ * The lane spends the plan the user authorized through `chatgpt.tokens.use
+ * .direct`, so it is a *billing* choice as much as a routing one, and the
+ * settings page asks for it with the approved "Continue with ChatGPT" button.
+ *
+ * Credentials never live here. Access, refresh, and ID tokens go in the
+ * protected `chatgpt-plan.json` beside the config file (`0600`, written
+ * atomically), and this block holds only routing preferences. That split is
+ * what lets `GET /v1/config` keep masking secrets without special-casing a
+ * second credential shape.
+ *
+ * OpenAI's preview route has rules the ordinary OpenAI API does not: every
+ * request must set `store: false` and `stream: true`, history travels in
+ * `input`, and a list of fields is rejected outright. See
+ * `src/providers/chatgpt-plan.ts`.
+ */
+export interface ChatGptPlanConfig {
+  /** Master switch. Off = no lane, no provider, and no sign-in routes needed. */
+  enabled: boolean;
+  /**
+   * `rotation` spreads requests across the model slots (and the plan's shared
+   * usage total, which is what a Plus account is really rotating over);
+   * `pinned` makes one model the main route and keeps the rest directly behind
+   * it as the first fallback. Default: `rotation`.
+   */
+  mode?: 'rotation' | 'pinned';
+  /**
+   * Where the lane sits in the plan:
+   * - `lead` (default) puts the lane at the front of `trusted`, so eligible
+   *   requests spend the ChatGPT plan first.
+   * - `fallback` appends it to `fallback`, so it is used only once the
+   *   configured lanes are depleted or erroring.
+   */
+  placement?: 'lead' | 'fallback';
+  /**
+   * Model slugs the lane serves, in rotation order. Empty means "ask the
+   * signed-in account" — the bridge reads `GET /v1/models` at startup, and the
+   * settings page fills this in with the account's picker. ModelHitch never
+   * invents a slug, because the catalog is account-specific.
+   */
+  models?: string[];
+  /** Model that leads when `mode` is `pinned`. Must be one of `models`. */
+  pinnedModel?: string;
+  /** Which saved ChatGPT account serves this lane. Default: the active one. */
+  accountKey?: string;
+  /**
+   * What a ChatGPT plan limit means:
+   * - `rotate` (default) tries the next lane, exactly like any other 429. The
+   *   lane cools down, so later requests skip it until it recovers.
+   * - `stop` makes the lane terminal, so a spent plan surfaces to the caller
+   *   instead of silently spending a different provider's quota.
+   */
+  onLimit?: 'rotate' | 'stop';
+}
+
 export interface ModelHitchConfig {
   /** Document version — currently 1. */
   version: 1;
@@ -146,6 +265,10 @@ export interface ModelHitchConfig {
   cloudAgent?: CloudAgentConfig;
   /** OpenCode Console BYOK connections (one provider lane each). */
   opencodeByok?: OpenCodeByokConfig;
+  /** Custom BYOK lanes — endpoints we don't ship, with hand-typed model slots. */
+  customLanes?: CustomLanesConfig;
+  /** Sign in with ChatGPT — the user's ChatGPT plan as a provider lane. */
+  chatgptPlan?: ChatGptPlanConfig;
   /** Per-provider API keys. Persisted locally; masked on read. */
   keys?: Record<string, string>;
   /** Default composer target on /workspace: "rotation" or "provider/model". */
@@ -417,6 +540,150 @@ export function validateConfig(config: unknown): ConfigValidation {
       }
       if (b.enabled && b.connections !== undefined && !(b.connections ?? []).some((c) => (c?.models ?? []).length > 0) && !b.syncFromOpenCode) {
         warnings.push('opencodeByok connections have no models and syncFromOpenCode is off — each lane will fall back to the provider default model.');
+      }
+    }
+  }
+
+  if (cfg.customLanes !== undefined) {
+    const c = cfg.customLanes;
+    if (!c || typeof c !== 'object') {
+      errors.push('customLanes must be an object.');
+    } else {
+      if (typeof c.enabled !== 'boolean') errors.push('customLanes.enabled must be a boolean.');
+      if (c.placement !== undefined && c.placement !== 'lead' && c.placement !== 'fallback') {
+        errors.push('customLanes.placement must be "lead" or "fallback".');
+      }
+      if (c.lanes !== undefined && !Array.isArray(c.lanes)) {
+        errors.push('customLanes.lanes must be an array.');
+      }
+      const seenLaneIds = new Set<string>();
+      for (const [i, lane] of (c.lanes ?? []).entries()) {
+        const label = `customLanes.lanes[${i}]`;
+        if (!lane || typeof lane !== 'object' || typeof lane.id !== 'string' || !lane.id.trim()) {
+          errors.push(`${label}.id must be a non-empty lane id.`);
+          continue;
+        }
+        const providerId = customLaneProviderId(lane.id, lane.label);
+        if (seenLaneIds.has(providerId)) {
+          errors.push(`${label}: lane "${lane.id}" collides with another lane (both become provider "${providerId}").`);
+        }
+        seenLaneIds.add(providerId);
+        if (lane.label !== undefined && (typeof lane.label !== 'string' || !lane.label.trim())) {
+          errors.push(`${label}.label must be a non-empty string when set.`);
+        }
+        if (typeof lane.baseUrl !== 'string' || !lane.baseUrl.trim()) {
+          errors.push(`${label}.baseUrl must be a non-empty endpoint URL.`);
+        } else if (!/^https?:\/\//i.test(lane.baseUrl.trim())) {
+          errors.push(`${label}.baseUrl must start with http:// or https:// (got "${lane.baseUrl.trim()}").`);
+        }
+        if (lane.schema !== undefined && !CUSTOM_LANE_SCHEMAS.includes(lane.schema)) {
+          errors.push(`${label}.schema must be one of ${CUSTOM_LANE_SCHEMAS.join(', ')}.`);
+        }
+        // A lane exists to route to models the user names. There is no catalog
+        // to fall back on, so an empty slot list is a hard error rather than a
+        // silent "provider default" that does not exist.
+        if (!Array.isArray(lane.models) || lane.models.length === 0) {
+          errors.push(`${label}.models must list at least one model id.`);
+        } else if (lane.models.some((m) => typeof m !== 'string' || !m.trim())) {
+          errors.push(`${label}.models must be an array of non-empty model ids.`);
+        } else if (new Set(lane.models.map((m) => m.trim())).size !== lane.models.length) {
+          warnings.push(`${label}.models contains duplicate model ids — duplicates are ignored.`);
+        }
+        if (lane.headers !== undefined) {
+          if (!lane.headers || typeof lane.headers !== 'object' || Array.isArray(lane.headers)) {
+            errors.push(`${label}.headers must be an object of header name -> value.`);
+          } else if (Object.values(lane.headers).some((v) => typeof v !== 'string')) {
+            errors.push(`${label}.headers values must be strings.`);
+          }
+        }
+        if (lane.apiKeyEnvVar !== undefined && (typeof lane.apiKeyEnvVar !== 'string' || !lane.apiKeyEnvVar.trim())) {
+          errors.push(`${label}.apiKeyEnvVar must be a non-empty env var name when set.`);
+        }
+        if (lane.requiresKey !== undefined && typeof lane.requiresKey !== 'boolean') {
+          errors.push(`${label}.requiresKey must be a boolean.`);
+        }
+        if (lane.enabled !== undefined && typeof lane.enabled !== 'boolean') {
+          errors.push(`${label}.enabled must be a boolean.`);
+        }
+        if (lane.capabilities !== undefined && (!lane.capabilities || typeof lane.capabilities !== 'object')) {
+          errors.push(`${label}.capabilities must be an object of capability overrides.`);
+        }
+        if (lane.onLimit !== undefined && lane.onLimit !== 'rotate' && lane.onLimit !== 'stop') {
+          errors.push(`${label}.onLimit must be "rotate" or "stop".`);
+        }
+        if (lane.requiresKey === false && lane.schema === 'anthropic') {
+          warnings.push(`${label}: the Anthropic wire still expects a key — requiresKey:false has no effect there.`);
+        }
+      }
+
+      const usable = (c.lanes ?? []).filter(
+        (lane) => lane && lane.enabled !== false && typeof lane?.id === 'string' && !!lane.id.trim() && (lane.models ?? []).length > 0,
+      );
+      if (c.enabled && usable.length === 0) {
+        warnings.push('customLanes.enabled is true but no lane is complete — the bridge will not serve any custom lane.');
+      }
+      // A `stop` lane ends the rotation for everything behind it; say so rather
+      // than let the user wonder why their later lanes never get traffic.
+      const stopping = usable.filter((lane) => lane.onLimit === 'stop');
+      for (const lane of stopping) {
+        const index = usable.indexOf(lane);
+        if (index !== -1 && index < usable.length - 1) {
+          warnings.push(
+            `customLanes: lane "${lane.id}" is onLimit:"stop" but ${usable.length - 1 - index} lane(s) follow it — those are only reached when routed to explicitly.`,
+          );
+        }
+      }
+    }
+  }
+
+  if (cfg.chatgptPlan !== undefined) {
+    const c = cfg.chatgptPlan;
+    if (!c || typeof c !== 'object') {
+      errors.push('chatgptPlan must be an object.');
+    } else {
+      if (typeof c.enabled !== 'boolean') errors.push('chatgptPlan.enabled must be a boolean.');
+      if (c.mode !== undefined && c.mode !== 'rotation' && c.mode !== 'pinned') {
+        errors.push('chatgptPlan.mode must be "rotation" or "pinned".');
+      }
+      if (c.placement !== undefined && c.placement !== 'lead' && c.placement !== 'fallback') {
+        errors.push('chatgptPlan.placement must be "lead" or "fallback".');
+      }
+      if (c.onLimit !== undefined && c.onLimit !== 'rotate' && c.onLimit !== 'stop') {
+        errors.push('chatgptPlan.onLimit must be "rotate" or "stop".');
+      }
+      if (c.accountKey !== undefined && (typeof c.accountKey !== 'string' || !c.accountKey.trim())) {
+        errors.push('chatgptPlan.accountKey must be a non-empty string when set.');
+      }
+      if (c.models !== undefined) {
+        if (!Array.isArray(c.models) || c.models.some((m) => typeof m !== 'string' || !m.trim())) {
+          errors.push('chatgptPlan.models must be an array of non-empty model slugs.');
+        } else if (new Set(c.models.map((m) => m.trim())).size !== c.models.length) {
+          warnings.push('chatgptPlan.models contains duplicate model slugs — duplicates are ignored.');
+        }
+      }
+      if (c.pinnedModel !== undefined && (typeof c.pinnedModel !== 'string' || !c.pinnedModel.trim())) {
+        errors.push('chatgptPlan.pinnedModel must be a non-empty model slug when set.');
+      }
+      // `models` may be malformed at this point (the check above only reports
+      // it), so the derived list stays empty rather than throwing: a validator
+      // that crashes on bad input is worse than one that rejects it.
+      const models = (Array.isArray(c.models) ? c.models : [])
+        .filter((m): m is string => typeof m === 'string')
+        .map((m) => m.trim())
+        .filter(Boolean);
+      if (c.mode === 'pinned') {
+        if (!c.pinnedModel) {
+          warnings.push('chatgptPlan.mode is "pinned" without chatgptPlan.pinnedModel — the first model slot leads.');
+        } else if (models.length && !models.includes(c.pinnedModel.trim())) {
+          errors.push(
+            `chatgptPlan.pinnedModel "${c.pinnedModel.trim()}" is not one of chatgptPlan.models — the lane would route to a model it does not serve.`,
+          );
+        }
+      }
+      if (c.enabled && !models.length) {
+        warnings.push(
+          'chatgptPlan.enabled is true but chatgptPlan.models is empty — the bridge reads the signed-in account\'s model list at startup, and the lane serves nothing until an account is signed in.',
+        );
       }
     }
   }

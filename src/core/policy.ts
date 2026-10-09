@@ -27,6 +27,13 @@ export interface TrustListEntry {
   providerId: string;
   /** Explicit lane models. Empty (or omitted) = the provider's default model lane. */
   models?: string[];
+  /**
+   * Stop-on-limit: when this lane fails with a retryable error (429, 402, 5xx,
+   * network), the walk ends there and the error surfaces instead of rotating to
+   * the next lane. Used by custom BYOK lanes whose owner opted out of failover
+   * ("stop when this one hits its usage limit"). See `FailoverTarget.terminal`.
+   */
+  terminal?: boolean;
 }
 
 /**
@@ -135,6 +142,9 @@ export function validatePolicy(policy: Policy, source: ProviderSource): PolicyVa
     if (entry.models !== undefined && !Array.isArray(entry.models)) {
       errors.push(`${label}: "models" must be an array of model ids.`);
       continue;
+    }
+    if (entry.terminal !== undefined && typeof entry.terminal !== 'boolean') {
+      errors.push(`${label}: "terminal" must be a boolean when set.`);
     }
     const models = entry.models ?? [];
     for (const model of models) {
@@ -246,7 +256,7 @@ export function resolvePolicyLanes(
   source: ProviderSource,
 ): FailoverTarget[] {
   const targets: FailoverTarget[] = [primary];
-  const seen = new Set<string>([laneKey(primary)]);
+  const byKey = new Map<string, FailoverTarget>([[laneKey(primary), primary]]);
 
   const pushEntry = (entry: TrustListEntry) => {
     const provider = source.lookup(entry.providerId);
@@ -254,11 +264,22 @@ export function resolvePolicyLanes(
     const models =
       entry.models && entry.models.length > 0 ? entry.models : [source.defaultModel(entry.providerId) ?? provider.defaultModel];
     for (const model of models) {
-      const target: FailoverTarget = { providerId: entry.providerId, model };
-      if (!seen.has(laneKey(target))) {
-        seen.add(laneKey(target));
-        targets.push(target);
+      const target: FailoverTarget = {
+        providerId: entry.providerId,
+        model,
+        ...(entry.terminal ? { terminal: true } : {}),
+      };
+      const key = laneKey(target);
+      const existing = byKey.get(key);
+      if (existing) {
+        // The lane is already in the plan — usually because it is the caller's
+        // primary route. It still learns that it is terminal: `stop` must not
+        // depend on where the walk entered the plan.
+        if (target.terminal) existing.terminal = true;
+        continue;
       }
+      byKey.set(key, target);
+      targets.push(target);
     }
   };
 

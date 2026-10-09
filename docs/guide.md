@@ -360,6 +360,51 @@ and ignores the incoming Authorization header, so you can supply any harmless br
 placeholder such as `sk-bridge-local` — never a real user key — solely to satisfy that client-side
 validation.
 
+### Lanes in the model picker
+
+A client that treats the bridge as a custom endpoint builds its picker from `GET /v1/models` alone.
+So the bridge publishes its routing plan there first: the trusted lanes in order, then the fallback
+lanes, ahead of the rest of the catalog.
+
+```json
+{
+  "id": "opencode-go/deepseek-v4-pro",
+  "object": "model",
+  "created": 0,
+  "owned_by": "opencode-go",
+  "name": "DeepSeek V4 Pro · OpenCode Go · trusted lane 1",
+  "modelhitch": {
+    "id": "opencode-go/deepseek-v4-pro",
+    "providerId": "opencode-go",
+    "model": "deepseek-v4-pro",
+    "tier": "trusted",
+    "laneIndex": 1,
+    "terminal": false,
+    "name": "DeepSeek V4 Pro · OpenCode Go · trusted lane 1"
+  }
+}
+```
+
+Notes:
+
+- Lane ids are qualified (`providerId/modelId`) so the id names the lane. The exception is the
+  default provider's own lanes, where the bare id already *is* the lane and the catalog advertises
+  the same id — using it keeps a picker from listing one lane twice. That exception is guarded: if
+  another registered provider id is a prefix of the bare route (the default config's gateway lane
+  `openai/gpt-5.4` would otherwise reach the `openai` provider), the lane stays qualified.
+- `name` and `modelhitch` are additions to the OpenAI shape. Clients that do not know them ignore
+  them; the `id` remains the route a client sends back.
+- Picking a lane is not a pin that bypasses failover: the lane you pick leads, and the rest of the
+  plan stays behind it. Pick the first trusted lane for the plan's own order.
+- A lane id is a route, so the fully qualified form always works (`mock/mock-model` reaches the same
+  lane the picker published as `mock-model`).
+- `tier` is `trusted`/`fallback` for a policy plan and `primary`/`fallback` for auto-mode. A lane
+  marked `terminal` (`onLimit: "stop"`) says so in its label.
+- With no policy and no auto-mode, `GET /v1/models` lists providers only — unchanged.
+
+Claude Code is the exception: it filters discovered ids to those containing `claude` or `anthropic`,
+so pin its lanes with `ANTHROPIC_DEFAULT_*_MODEL` as described below.
+
 ### Terminal settings
 
 Run `modelhitch settings` to edit the local config without starting the bridge or opening a browser.
@@ -504,6 +549,185 @@ Credentials: Console BYOK reuses the OpenCode key from settings. Resolution orde
 `keys.opencode-byok` → the connection's own `keys.opencode-byok-<slug>` (the per-provider card in
 `/settings` → Providers) → `keys.opencode` → `keys.opencode-go` → `OPENCODE_API_KEY`. The bridge
 never sends the incoming client Authorization header upstream; it resolves the key locally.
+
+### Custom BYOK lanes
+
+A custom lane is for the key ModelHitch has no provider for: a self-hosted gateway, a regional
+reseller, an internal deployment, a provider that launched last week. You give ModelHitch the
+endpoint, a key, and the model slots you want to use, and it serves the lane like any other
+provider — `custom-<slug>` shows up in the policy lanes, the lane-health table, `GET /v1/models`,
+and `--provider`.
+
+```bash
+npx modelhitch bridge --background \
+  --custom-lanes \
+  --custom-lane upstream \
+  --custom-lane-url https://api.example.com/v1 \
+  --custom-lane-models fast-model,smart-model \
+  --custom-lane-schema chat-completions \
+  --custom-lane-on-limit stop \
+  --custom-lanes-placement lead
+```
+
+**No model discovery, by design.** ModelHitch never sends `GET /models` to a custom lane. A
+catalog we cannot know would be either empty or wrong, so the slots you type are the authority:
+they are what the lane advertises to clients and what appears in the model picker.
+
+`/settings` → **Custom lanes** is the primary surface. It stores `customLanes` in the config
+document:
+
+| Field | Meaning |
+| --- | --- |
+| `enabled` | Master switch. Off = no custom providers, no custom lanes |
+| `placement` | `lead` (default) puts the lanes at the front of the plan; `fallback` keeps the buffet primary |
+| `lanes[]` | `id` (becomes `custom-<slug>`), optional `label`, `baseUrl`, `schema`, `models[]`, optional `headers`, `apiKeyEnvVar`, `requiresKey`, `capabilities`, `enabled`, `onLimit` |
+
+Each lane's `schema` picks the wire, because an unlisted endpoint can be shaped like any of them:
+
+| Schema | Path | Auth |
+| --- | --- | --- |
+| `auto` (default) | detected from the model family (`gpt-*`/`grok-*` → responses, `claude-*`/`qwen*` → messages, `gemini*` → generateContent, else chat completions) | bearer / both |
+| `chat-completions` | `POST <baseUrl>/chat/completions` | `Authorization: Bearer` |
+| `responses` | `POST <baseUrl>/responses` | `Authorization: Bearer` |
+| `anthropic` | `POST <baseUrl>/messages` | `x-api-key` **and** bearer |
+| `google` | `POST <baseUrl>/models/<model>:generateContent` (and `:streamGenerateContent?alt=sse`) | `x-goog-api-key` |
+
+Pin the schema when detection would guess wrong — a gateway exposing `claude-*` over Chat
+Completions needs `chat-completions`, and a self-hosted `gpt-*` served over Chat Completions does
+too.
+
+**Placement.** `lead` prepends every lane × typed slot to `trusted` and makes the first slot the
+bridge's default route: adding a lane is a request to use it. Your configured policy stays
+directly behind it, so a depleted custom lane still falls through to the buffet. `fallback`
+appends the lanes behind everything instead, leaving the primary route exactly as configured.
+When the OpenCode Console BYOK block is also on, the custom lanes land in front of it under
+`lead`, behind it under `fallback`.
+
+**What a limit means.** `onLimit` is per lane:
+
+| Value | Behavior |
+| --- | --- |
+| `rotate` (default) | A 429, a 402 (no credit), a 5xx, or a network blip rotates to the next lane, exactly like every other provider |
+| `stop` | The lane is **terminal**. The error surfaces to the caller instead of spending another provider's quota — and the lane keeps stopping while it is parked from that failure, so a metered endpoint cannot quietly become someone else's bill |
+
+`stop` ends the walk at that lane; it does not disable the lanes behind it. They stay reachable
+when a request is routed to them explicitly (`custom-<id>/<model>`, `--provider`, or a policy that
+lists them first), which is why the settings page warns when lanes sit behind a `stop` lane.
+
+**Credentials.** Resolution order is `keys["custom-<slug>"]` (the same local `keys` map every
+provider uses) → the lane's own `apiKeyEnvVar` → `MODELHITCH_CUSTOM_<ID>_API_KEY` derived from the
+lane id. Set `requiresKey: false` for a keyless endpoint; the Anthropic wire still expects a key,
+and validation warns when a lane asks for both. Capability claims (`tools + vision`, `tools only`,
+`text only`) decide which requests the lane is eligible for, so a text-only endpoint is skipped
+rather than attempted for a tool-calling request.
+
+Custom lanes are read from the same document by the bridge **and** the harness (`mhh`), so a lane
+added in `/settings` is available to both — including the `lead` default route.
+
+### Sign in with ChatGPT
+
+OpenAI's Sign in with ChatGPT lets an open-source or locally hosted client spend the user's
+ChatGPT plan on eligible Responses API requests, through the `chatgpt.tokens.use.direct` scope.
+ModelHitch serves that as the `chatgpt-plan` lane, so the plan can lead, trail, be pinned as the
+main route, cool down on a limit, or be selected with `--provider chatgpt-plan`.
+
+```bash
+# 1. Sign in. Opens your system browser; the callback returns to a loopback listener.
+npx modelhitch chatgpt-plan sign-in
+
+# 2. See what the account can serve.
+npx modelhitch chatgpt-plan models
+
+# 3. Serve it. `lead` makes the plan the primary route, buffet behind as the safety net.
+npx modelhitch bridge --background --chatgpt-plan
+
+# Or pin one model as the main route and let its siblings follow as the first fallback.
+npx modelhitch bridge --background \
+  --chatgpt-plan --chatgpt-plan-mode pinned --chatgpt-plan-pin gpt-5.1
+```
+
+Everything is in `/settings` too, under **Sign in with ChatGPT**: the account panel with a
+**Continue with ChatGPT** button, a **Manage usage** link, the saved-account picker, and the same
+routing controls.
+
+**How the sign-in works.** ModelHitch opens `https://auth.openai.com/api/accounts/authorize` in your
+system browser with a fresh `state`, OIDC `nonce`, and PKCE challenge. The first sign-in registers a
+client through `client_id=dynamic_agent_client` and gets back an issued `oaiapp_…` id, which is what
+later sign-ins reuse. The callback lands on `http://127.0.0.1:<port>/auth/callback`, where a
+listener ModelHitch started beforehand receives it. The code is exchanged for tokens with the PKCE
+verifier and no client secret, then the ID token is verified against OpenAI's published JWKS with
+its issuer, audience, expiry, and nonce all checked. Only then is anything saved.
+
+Because sign-in finishes on its own loopback listener rather than on the bridge, the settings page
+polls `GET /v1/chatgpt-plan` instead of waiting on a request, and the bridge rebuilds the lane the
+moment the account changes. You do not restart it.
+
+**Where the credentials live.** In `~/.modelhitch/chatgpt-plan.json`, written atomically with owner-only
+permissions, holding the access token, the rotating refresh token, the retained ID token, the
+issued client id, this host's stable `ext_agent_host_id`, and the granted scopes. They never enter
+`config.json`, which is masked on every read, and they are never put in a URL. Access tokens last an
+hour and refresh an hour-wide window ahead of expiry; refreshes are serialized so two requests
+cannot race a rotating token. Signing out revokes the renewable session first, then clears the
+tokens locally, and tells you when remote revocation could not be confirmed.
+
+**Model slugs are the account's, not ours.** ChatGPT plan catalogs are account-specific, so
+ModelHitch asks `GET /v1/models` (which answers `{ models: [{ slug, display_name, visibility }] }`)
+and keeps the entries marked `visibility: "list"`. Leave `models` empty and the bridge reads them at
+startup; name them and the config wins. With neither, the lane does not serve rather than routing to
+a guessed slug.
+
+| Field | Meaning |
+| --- | --- |
+| `enabled` | Master switch. Off = no lane, whatever the saved account says |
+| `mode` | `rotation` (default) spreads requests across the model slots · `pinned` leads on `pinnedModel` with the remaining slots immediately behind it |
+| `placement` | `lead` (default) puts the lane at the front of the plan · `fallback` appends it behind everything |
+| `models[]` | Model slots, in rotation order. Empty means "read the signed-in account" |
+| `pinnedModel` | Model that leads when `mode` is `pinned`. Must be one of `models` |
+| `accountKey` | Saved ChatGPT account to serve this lane. Default: the active one |
+| `onLimit` | `rotate` (default) fails over like any 429 · `stop` makes the lane terminal |
+
+**This route is a preview with rules.** Every inference request must set `store: false` and
+`stream: true`, so `chat()` streams and aggregates rather than using a non-streaming form. History
+travels in `input`, system prompts travel in `instructions` (an explicit `{type:"message",
+role:"system"}` item is rejected), and `previous_response_id` is unavailable over HTTP. A list of
+fields is rejected outright, including `temperature`, `top_p`, `max_output_tokens`, `metadata`,
+`user`, `truncation`, `prompt`, `safety_identifier`, `max_tool_calls`, and `moderation`. ModelHitch
+drops those rather than sending them, which means `ChatParams.temperature` and
+`ChatParams.maxTokens` have no effect on this lane; `stop` has no Responses equivalent.
+
+Inference counts as successful only after `response.completed`. A stream that just ends is reported
+as an interrupted stream, not as a finished answer, so a truncated response can never masquerade as
+a complete one.
+
+| Failure | Mapped to | Why |
+| --- | --- | --- |
+| `subscription_sharing_usage_limit_exceeded` (429) | `rate-limited`, status 429 | The lane is rested, not broken, so rotation continues. The message carries the `chatgpt.com/settings/usage` link |
+| `subscription_sharing_usage_unavailable`, `subscription_sharing_user_unavailable` (503) | `provider-error` | Availability could not be checked. Credentials are kept, retried later |
+| `subscription_sharing_invalid_user` (401) | `invalid-api-key` | The subscriber context failed to validate, so the lane is skipped |
+| `subscription_sharing_user_not_eligible`, `subscription_sharing_route_not_supported` (403) | `bad-request` | A policy refusal. The same request is not repeated and OAuth is not looped |
+| `subscription_sharing_unsupported_capability` (400) | `bad-request` | The offending `param` is kept in the message, since the fix is to change the body |
+
+A Plus account's five-hour limit is shared across every app that uses the plan, so hitting it is
+normal and expected. `onLimit: "stop"` is there for anyone who would rather see the limit than have
+ModelHitch quietly spend a different provider's quota after it. Under `rotate`, a plan limit walks
+every model slot of the lane before leaving it, because `rotation` means the slots are all tried.
+A refused request spends nothing, so the extra hop costs latency rather than quota; `stop` skips it.
+
+**Terminal commands.**
+
+```bash
+modelhitch chatgpt-plan status [--json]        # accounts, plan usage, token expiry
+modelhitch chatgpt-plan models                 # the account's model slugs
+modelhitch chatgpt-plan accounts               # saved registrations and their keys
+modelhitch chatgpt-plan use --account <key>    # switch which account serves the lane
+modelhitch chatgpt-plan sign-in [--account <key>] [--register] [--force-consent] [--no-open]
+modelhitch chatgpt-plan sign-out [--account <key>] [--no-revoke]
+```
+
+A signed-in account that was not granted plan usage still counts as signed in: the identity is
+valid, only plan spending is not. Re-request the grant with
+`modelhitch chatgpt-plan sign-in --force-consent`, or turn it on in ChatGPT settings. The lane
+refuses to serve in that state rather than failing later.
 
 ### Bridge CLI commands
 

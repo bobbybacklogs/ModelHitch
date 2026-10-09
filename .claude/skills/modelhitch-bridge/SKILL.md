@@ -22,9 +22,10 @@ Read [operations-reference.md](references/operations-reference.md) before changi
 4. Verify `npx modelhitch status`, `GET /healthz`, and `GET /v1/models` before editing any client.
 5. Send a request using `mock/mock-model` over the same wire as the target client. Separate bridge/wire correctness from provider credentials.
 6. Route explicit models as `providerId/modelId`. Treat bare model IDs as routes through the default provider.
-7. Ask before changing user-level Claude Code, Codex, Gemini, IDE, shell-profile, or environment configuration. Merge narrowly and preserve unrelated settings.
-8. Start a new client process after environment or startup configuration changes.
-9. Inspect `/v1/usage` or `/usage` for request, latency, cost-estimate, and failover evidence.
+7. Read the plan from `GET /v1/models`: it leads with the trusted lanes, then the fallback lanes (ids qualified except on the default provider, plus a `name` and `modelhitch.tier`). A client's model picker is built from this list, so a lane missing here cannot be chosen. Picking a lane puts it first and keeps the rest of the plan behind it.
+8. Ask before changing user-level Claude Code, Codex, Gemini, IDE, shell-profile, or environment configuration. Merge narrowly and preserve unrelated settings.
+9. Start a new client process after environment or startup configuration changes.
+10. Inspect `/v1/usage` or `/usage` for request, latency, cost-estimate, and failover evidence.
 
 ## Diagnose failures
 

@@ -19,6 +19,21 @@ export { LocalStorageKeyStore } from './storage/local-storage.js';
 export { OpenAICompatibleServer, createModelHitchServer } from './server/server.js';
 export type { ModelHitchServerOptions } from './server/server.js';
 
+// the bridge's routing plan as pickable models (`GET /v1/models` lane entries)
+export {
+  displayModelName,
+  laneLabel,
+  laneRoute,
+  planLanes,
+  planModelEntries,
+  providerDisplayName,
+  type PlanLane,
+  type PlanLanesInput,
+  type PlanModelEntriesOptions,
+  type PlanModelEntry,
+  type PlanTier,
+} from './server/lane-catalog.js';
+
 // auto-mode: rate-limit failover + usage tracking
 export {
   DEFAULT_FAILOVER_LANES,
@@ -105,6 +120,8 @@ export {
   type CatalogConfig,
   type CooldownConfig,
   type ConfigValidation,
+  type CustomLaneConfig,
+  type CustomLanesConfig,
   type ImageGenerationConfig,
   type MaskedConfig,
   type ModelHitchConfig,
@@ -140,6 +157,126 @@ export {
   type OpenCodeStateOptions,
 } from './opencode-state.js';
 
+// Custom BYOK lanes — endpoints we don't ship, with hand-typed model slots
+export {
+  applyCustomLanesPlan,
+  customLaneApiKeys,
+  customLaneProviders,
+  customLanesConfig,
+  customLanesPlacement,
+  describeCustomLanesPlan,
+  isCustomLanesEnabled,
+  resolveCustomLanes,
+  type CustomLaneProviderOptions,
+  type CustomLanesPlan,
+  type CustomLanesPlanInput,
+  type ResolvedCustomLane,
+} from './custom-lanes.js';
+export {
+  createCustomLaneProvider,
+  customLaneBaseUrl,
+  customLaneKeyEnvVar,
+  customLaneProviderId,
+  customLaneSlug,
+  customLaneWire,
+  isCustomLaneProviderId,
+  CUSTOM_LANE_KEY_ENV_PREFIX,
+  CUSTOM_LANE_PROVIDER_PREFIX,
+  CUSTOM_LANE_SCHEMAS,
+  type CreateCustomLaneProviderOptions,
+  type CustomLaneInput,
+  type CustomLaneSchema,
+} from './providers/custom-lane.js';
+
+// Sign in with ChatGPT — the user's ChatGPT plan as an ordinary provider lane
+export {
+  applyChatGptPlanPlan,
+  chatGptPlanConfig,
+  chatGptPlanMode,
+  chatGptPlanModelSlug,
+  chatGptPlanPlacement,
+  describeChatGptPlan,
+  hasChatGptPlanScope,
+  isChatGptPlanEnabled,
+  isTokenExpired,
+  parseScopeValue,
+  redactToken,
+  resolveChatGptPlan,
+  chatGptPlanAccountKey,
+  chatGptPlanAccountLabel,
+  CHATGPT_PLAN_AGENT_NAME,
+  CHATGPT_PLAN_API_BASE_URL,
+  CHATGPT_PLAN_AUTHORIZE_ENDPOINT,
+  CHATGPT_PLAN_CALLBACK_HOST,
+  CHATGPT_PLAN_CALLBACK_PATH,
+  CHATGPT_PLAN_DEFAULT_CALLBACK_PORT,
+  CHATGPT_PLAN_DISCOVERY_URL,
+  CHATGPT_PLAN_DYNAMIC_CLIENT_ID,
+  CHATGPT_PLAN_ERRORS_URL,
+  CHATGPT_PLAN_IDENTITY_SCOPES,
+  CHATGPT_PLAN_ISSUER,
+  CHATGPT_PLAN_PROVIDER_ID,
+  CHATGPT_PLAN_PROVIDER_NAME,
+  CHATGPT_PLAN_REFRESH_TOKEN_LIFETIME_MS,
+  CHATGPT_PLAN_RESOURCE,
+  CHATGPT_PLAN_REVOCATION_ENDPOINT,
+  CHATGPT_PLAN_SCOPES,
+  CHATGPT_PLAN_SIGN_IN_TIMEOUT_MS,
+  CHATGPT_PLAN_TOKEN_ENDPOINT,
+  CHATGPT_PLAN_TOKEN_SKEW_MS,
+  CHATGPT_PLAN_USAGE_SCOPE,
+  CHATGPT_PLAN_USAGE_SCOPES,
+  CHATGPT_PLAN_USAGE_SETTINGS_URL,
+  type ChatGptPlanAccount,
+  type ChatGptPlanAccountStatus,
+  type ChatGptPlanCredentials,
+  type ChatGptPlanPlan,
+  type ChatGptPlanPlanInput,
+  type ChatGptPlanSignInAttempt,
+  type ChatGptPlanSignInStatus,
+  type ChatGptPlanStatus,
+  type ChatGptPlanToken,
+  type ChatGptPlanTokenSource,
+  type ResolvedChatGptPlanLane,
+  type ResolveChatGptPlanOptions,
+} from './chatgpt-plan.js';
+export {
+  chatGptPlanProviders,
+  isChatGptPlanProviderId,
+  listChatGptPlanAccountModels,
+  type ChatGptPlanLaneOptions,
+} from './chatgpt-plan-lane.js';
+export {
+  createChatGptPlanProvider,
+  chatGptPlanRequestBody,
+  type ChatGptPlanProviderOptions,
+} from './providers/chatgpt-plan.js';
+// Node-only half of the lane: OAuth PKCE, the loopback callback listener,
+// JWKS-backed ID-token validation, and the protected credential file.
+export {
+  ChatGptPlanAuth,
+  buildChatGptPlanAuthorizeUrl,
+  createHostId,
+  createPkcePair,
+  createRandomValue,
+  defaultChatGptPlanCredentialsPath,
+  describeChatGptPlanAccount,
+  isValidHostId,
+  openInBrowser,
+  pkceChallenge,
+  readChatGptPlanCredentials,
+  redactAuthorizeUrl,
+  validateChatGptPlanIdToken,
+  writeChatGptPlanCredentials,
+  DEFAULT_CHATGPT_PLAN_ENDPOINTS,
+  type ChatGptPlanAuthOptions,
+  type ChatGptPlanEndpoints,
+  type BuildAuthorizeUrlInput,
+  type PkcePair,
+  type ValidatedIdToken,
+  type ValidateIdTokenInput,
+} from './chatgpt-plan-auth.js';
+
 export { UsageTracker, usageDashboardHtml } from './core/usage.js';
 export { SqliteUsageStorage, type UsageStorage } from './core/usage-storage.js';
 export type {
@@ -158,6 +295,9 @@ export {
   AnthropicProvider,
   createOllamaProvider,
   OllamaProvider,
+  // Multi-wire engine (chat completions / responses / messages / generateContent)
+  createMultiWireProvider,
+  type MultiWireProviderOptions,
   type Provider,
   type ModelInfo,
   // Vercel AI Gateway (default runtime)

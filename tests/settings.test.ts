@@ -201,6 +201,30 @@ describe('settings bridge endpoints', () => {
     }
     expect(html).toContain('opencodeByok: collectOpenCodeByok()');
     expect(html).toContain('/v1/opencode-state');
+    // Custom BYOK lane section (endpoint + typed model slots + stop-on-limit).
+    expect(html).toContain('Custom lanes');
+    for (const id of ['customEnabled', 'customPlacement', 'customAdd', 'custom-lanes']) {
+      expect(html).toContain(`id="${id}"`);
+    }
+    expect(html).toContain('customLanes: collectCustomLanes()');
+    expect(html).toContain('custom-remove');
+    // The lane id derives the provider id and the env fallback in the page, and
+    // both have to match what the bridge computes.
+    expect(html).toContain('MODELHITCH_CUSTOM_');
+    // Sign in with ChatGPT section (live account panel + plan routing controls).
+    expect(html).toContain('ChatGPT plan');
+    for (const id of [
+      'chatgpt-plan', 'chatgpt-account', 'chatgpt-plan-accounts', 'chatgpt-plan-models', 'chatgpt-plan-status',
+      'chatgptPlanEnabled', 'chatgptPlanMode', 'chatgptPlanPlacement', 'chatgptPlanOnLimit',
+      'chatgptPlanAccount', 'chatgptPlanPinnedModel', 'chatgptPlanLoadModels',
+    ]) {
+      expect(html).toContain(`id="${id}"`);
+    }
+    expect(html).toContain('chatgptPlan: collectChatGptPlan()');
+    // OpenAI's guidelines fix the wording on the sign-in button, and the plan's
+    // own spending is only visible on the usage page.
+    expect(html).toContain('Continue with ChatGPT');
+    expect(html).toContain('https://chatgpt.com/settings/usage');
   });
 
   it("serves an inline script that actually parses (template escape-rot guard)", () => {

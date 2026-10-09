@@ -308,8 +308,162 @@ describe('CLI bridge flags (built artifact)', () => {
   );
 });
 
-describe('CLI bridge flag errors', () => {
-  it.skipIf(!existsSync(builtCli))('rejects an unknown --provider before listening', async () => {
+/** An upstream that records every request and answers chat completions. */
+async function recordingUpstream(
+  status = 200,
+  content = 'upstream reply',
+): Promise<{ port: number; requests: Array<{ method: string; url: string; auth?: string; body: any }> }> {
+  const requests: Array<{ method: string; url: string; auth?: string; body: any }> = [];
+  const upstream = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      let body: unknown = {};
+      try {
+        body = raw ? JSON.parse(raw) : {};
+      } catch {
+        body = {};
+      }
+      requests.push({ method: req.method ?? '', url: req.url ?? '', auth: req.headers.authorization as string | undefined, body });
+      if (status !== 200) {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'quota exhausted', type: 'insufficient_quota' } }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          id: 'chatcmpl-custom',
+          object: 'chat.completion',
+          created: 0,
+          model: String((body as { model?: string }).model ?? ''),
+          choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 },
+        }),
+      );
+    });
+  });
+  servers.push(upstream);
+  await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', () => resolve()));
+  return { port: (upstream.address() as { port: number }).port, requests };
+}
+
+describe('CLI custom BYOK lanes (built artifact)', () => {
+  it.skipIf(!existsSync(builtCli))(
+    '--custom-lane serves an endpoint ModelHitch does not ship, without ever polling it',
+    async () => {
+      const upstream = await recordingUpstream();
+      const port = 4900 + Math.floor(Math.random() * 100);
+      await startBridge(
+        port,
+        [
+          '--custom-lanes',
+          '--custom-lane',
+          'upstream',
+          '--custom-lane-url',
+          `http://127.0.0.1:${upstream.port}/v1`,
+          '--custom-lane-models',
+          'fast-model,smart-model',
+          '--custom-lane-schema',
+          'chat-completions',
+          '--custom-lane-on-limit',
+          'rotate',
+        ],
+        cleanEnv({ MODELHITCH_CUSTOM_UPSTREAM_API_KEY: 'my-own-provider-key' }),
+      );
+
+      // No model in the request: the custom block leads the plan, so its first
+      // lane × slot is the bridge's default route.
+      const result = await chat(port, { messages: [{ role: 'user', content: 'hello custom' }] });
+      expect(result.status).toBe(200);
+      expect(result.text).toContain('upstream reply');
+
+      expect(upstream.requests).toEqual([
+        {
+          method: 'POST',
+          url: '/v1/chat/completions',
+          auth: 'Bearer my-own-provider-key',
+          body: expect.objectContaining({ model: 'fast-model' }),
+        },
+      ]);
+
+      // The typed slots are the catalog: advertised, and no GET /models was
+      // ever sent to the endpoint.
+      const models = (await (await fetch(`http://127.0.0.1:${port}/v1/models`)).json()) as { data: Array<{ id: string }> };
+      expect(models.data.map((m) => m.id)).toEqual(expect.arrayContaining(['fast-model', 'smart-model']));
+      expect(upstream.requests.filter((r) => r.method === 'GET')).toEqual([]);
+      expect(upstream.requests.some((r) => r.url.includes('/models'))).toBe(false);
+
+      // …and it is a first-class lane for routing and the catalog.
+      const catalog = (await (await fetch(`http://127.0.0.1:${port}/v1/catalog`)).json()) as { providers: Array<{ id: string }> };
+      expect(catalog.providers.map((p) => p.id)).toContain('custom-upstream');
+      const explicit = await chat(port, { model: 'custom-upstream/smart-model', messages: [{ role: 'user', content: 'second' }] });
+      expect(explicit.status).toBe(200);
+      expect(upstream.requests[1]?.body).toMatchObject({ model: 'smart-model' });
+    },
+    60_000,
+  );
+
+  it.skipIf(!existsSync(builtCli))(
+    '--custom-lane-on-limit stop fails in the lane instead of spending the next one',
+    async () => {
+      const metered = await recordingUpstream(429);
+      const spare = await recordingUpstream(200, 'spare lane reply');
+      const port = 5100 + Math.floor(Math.random() * 100);
+      await startBridge(
+        port,
+        [
+          '--custom-lanes',
+          '--custom-lane',
+          'metered',
+          '--custom-lane-url',
+          `http://127.0.0.1:${metered.port}/v1`,
+          '--custom-lane-models',
+          'metered-model',
+          '--custom-lane-schema',
+          'chat-completions',
+          '--custom-lane-on-limit',
+          'stop',
+          '--custom-lane',
+          'spare',
+          '--custom-lane-url',
+          `http://127.0.0.1:${spare.port}/v1`,
+          '--custom-lane-models',
+          'spare-model',
+          '--custom-lane-schema',
+          'chat-completions',
+        ],
+        cleanEnv({
+          MODELHITCH_CUSTOM_METERED_API_KEY: 'metered-key',
+          MODELHITCH_CUSTOM_SPARE_API_KEY: 'spare-key',
+        }),
+      );
+
+      // The metered lane is primary and terminal: its 429 surfaces to the
+      // caller, and the lane behind it is never spent.
+      const limited = await chat(port, { messages: [{ role: 'user', content: 'spend nothing else' }] });
+      expect(limited.status).toBe(429);
+      expect(metered.requests).toHaveLength(1);
+      expect(spare.requests).toEqual([]);
+
+      // Still parked from that failure: the stop holds on the next request too.
+      const again = await chat(port, { messages: [{ role: 'user', content: 'still parked' }] });
+      expect(again.status).toBe(429);
+      expect(metered.requests).toHaveLength(1);
+      expect(spare.requests).toEqual([]);
+
+      // Routing to the spare lane directly still works — `stop` ends the walk,
+      // it does not disable the other lanes.
+      const direct = await chat(port, { model: 'custom-spare/spare-model', messages: [{ role: 'user', content: 'explicit' }] });
+      expect(direct.status).toBe(200);
+      expect(direct.text).toContain('spare lane reply');
+    },
+    60_000,
+  );
+});
+
+describe('CLI bridge flag errors', () => {  it.skipIf(!existsSync(builtCli))('rejects an unknown --provider before listening', async () => {
     const home = tempDir('mh-e2e-badprov-');
     const cwd = tempDir('mh-e2e-badcwd-');
     const child = spawn(process.execPath, [builtCli, 'bridge', '--provider', 'no-such-provider'], {

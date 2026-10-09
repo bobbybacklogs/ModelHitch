@@ -87,13 +87,15 @@ npx modelhitch stop
 | `POST /v1/responses` | Codex and Responses clients |
 | `POST /v1/messages` | Anthropic clients |
 | `POST /v1beta/models/{model}:generateContent` | Gemini clients |
-| `GET /v1/models`, `GET /healthz` | Discovery and health |
+| `GET /v1/models`, `GET /healthz` | Discovery and health. `GET /v1/models` leads with the routing plan's lanes |
 | `GET /v1/usage`, `GET /usage` | Usage JSON and dashboard |
 | `POST /v1/usage/reset` | Reset usage history |
 
 Use `http://127.0.0.1:3939/v1` for OpenAI-style clients and `http://127.0.0.1:3939` for clients that append their own Anthropic or Gemini paths.
 
 Clients that mandate a nonempty `apiKey` field (for example, the official `openai` SDK or IDE agents) can be given any harmless bridge-local placeholder such as `sk-bridge-local`. The bridge resolves credentials locally and ignores the incoming Authorization header, so the placeholder is never sent upstream. Never use a real user key.
+
+A client that treats the bridge as a custom endpoint builds its model picker from `GET /v1/models` alone, so the bridge publishes its routing plan there first: the trusted lanes in order, then the fallback lanes, ahead of the rest of the catalog. Each lane entry carries the real route plus a display `name` ("DeepSeek V4 Pro · OpenCode Go · trusted lane 1") and a `modelhitch` object with `tier`, `laneIndex`, and `terminal`. Lane ids are qualified (`providerId/modelId`) except on the default provider, where the bare id is the lane. Picking a lane leads with it and keeps the rest of the plan behind it, so failover still applies. A bridge with no policy and no auto-mode lists providers only.
 
 ## Stable error codes
 
@@ -104,7 +106,7 @@ Handle `missing-api-key`, `invalid-api-key`, `rate-limited`, `model-not-found`, 
 1. Confirm Node.js and the installed ModelHitch version.
 2. Confirm the bridge process and `/healthz`.
 3. Test `mock/mock-model` on the same client wire.
-4. Confirm the requested `providerId/modelId` appears in `/v1/models`.
+4. Confirm the requested `providerId/modelId` appears in `/v1/models`. A lane in the plan appears fully qualified, so `GET /v1/models/<provider>/<model>` answers for it too.
 5. Confirm the provider credential exists without displaying it.
 6. Inspect the background log and `/v1/usage`.
 7. Reproduce in the foreground.

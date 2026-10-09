@@ -1,8 +1,15 @@
 import {
   ModelHitch,
+  applyChatGptPlanPlan,
+  applyCustomLanesPlan,
   buildCatalogOptions,
   buildCooldownFromConfig,
+  ChatGptPlanAuth,
+  customLaneProviders,
+  chatGptPlanProviders,
   defaultConfigTemplate,
+  defaultChatGptPlanCredentialsPath,
+  listChatGptPlanAccountModels,
   policyFromConfig,
   readConfigFile,
   validateConfig,
@@ -88,8 +95,41 @@ export async function buildRuntime(opts: {
     if (key) await keystore.set(providerId, key);
   }
 
-  let provider = config.defaultProviderId ?? 'vercel-ai-gateway';
-  let model = config.defaultModel ?? defaultProviders[0]?.defaultModel ?? 'openai/gpt-5.4';
+  // Custom BYOK lanes are part of the same settings document, so a run has to
+  // serve them: they are providers the registry does not ship, and the stored
+  // policy may route to them. Without this, a config with a custom lane would
+  // fail policy validation ("unknown provider") instead of running.
+  const customLanes = customLaneProviders(config);
+  const plan = applyCustomLanesPlan({
+    config,
+    policy: policyFromConfig(config),
+    defaultProviderId: config.defaultProviderId,
+    defaultModel: config.defaultModel,
+  });
+
+  // The ChatGPT plan lane lives in the same document, but its credential is an
+  // OAuth grant rather than a `keys` entry. The harness reads the same
+  // credential file the bridge writes, so `mhh` runs against whatever the user
+  // signed into, and `mhh setup` can verify a lane the user just enabled.
+  const chatgptPlanAuth = new ChatGptPlanAuth({ path: defaultChatGptPlanCredentialsPath() });
+  const accountModels = config.chatgptPlan?.enabled
+    ? await listChatGptPlanAccountModels({ tokens: chatgptPlanAuth })
+    : [];
+  const chatgptPlanLanes = chatGptPlanProviders(config, {
+    tokens: chatgptPlanAuth,
+    accountModels,
+  });
+  const chatgptPlan = applyChatGptPlanPlan({
+    config,
+    policy: plan.policy,
+    defaultProviderId: plan.defaultProviderId,
+    defaultModel: plan.defaultModel,
+    accountModels,
+  });
+  const providers = [...defaultProviders, ...customLanes, ...chatgptPlanLanes];
+
+  let provider = chatgptPlan.defaultProviderId ?? config.defaultProviderId ?? 'vercel-ai-gateway';
+  let model = chatgptPlan.defaultModel ?? config.defaultModel ?? defaultProviders[0]?.defaultModel ?? 'openai/gpt-5.4';
   if (opts.modelOverride) {
     const { providerId, modelId } = splitModelOverride(opts.modelOverride);
     provider = providerId;
@@ -100,7 +140,11 @@ export async function buildRuntime(opts: {
     defaultProviderId: provider,
     defaultModel: model,
     keystore,
-    policy: policyFromConfig(config),
+    // The registry plus whatever the document's lane blocks added. Passing the
+    // built-in set unconditionally keeps a lane provider routable even when the
+    // configured policy does not name it yet.
+    providers: providers.length > defaultProviders.length ? providers : undefined,
+    policy: chatgptPlan.policy,
     cooldown: buildCooldownFromConfig(config),
     ...(buildCatalogOptions(config) ? { catalog: buildCatalogOptions(config) } : {}),
   });

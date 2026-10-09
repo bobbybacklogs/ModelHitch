@@ -77,6 +77,8 @@ export class CircuitBreaker implements LaneCooldown {
   private readonly graceMs: number;
   private readonly rateLimitTripsImmediately: boolean;
   private readonly lanes = new Map<string, LaneState>();
+  /** Last reported failure per lane — read by terminal (stop-on-limit) lanes. */
+  private readonly failures = new Map<string, FailoverErrorInfo>();
 
   constructor(options: CircuitBreakerOptions = {}) {
     this.now = options.now ?? (() => Date.now());
@@ -127,11 +129,18 @@ export class CircuitBreaker implements LaneCooldown {
       st.trippedUntil = now + this.graceMs;
     }
     this.lanes.set(k, st);
+    this.failures.set(k, info);
   }
 
   /** A lane succeeded — close the circuit and reset its health. */
   success(lane: FailoverTarget): void {
     this.lanes.set(key(lane), { consecutiveFailures: 0, trips: 0, trippedUntil: 0 });
+    this.failures.delete(key(lane));
+  }
+
+  /** The failure that parked a lane, for a terminal lane's error message. */
+  lastFailure(lane: FailoverTarget): FailoverErrorInfo | undefined {
+    return this.failures.get(key(lane));
   }
 
   /** Health for every lane with recorded state, sorted by lane key. */
@@ -150,6 +159,7 @@ export class CircuitBreaker implements LaneCooldown {
 
   clear(): void {
     this.lanes.clear();
+    this.failures.clear();
   }
 
   private health(lane: FailoverTarget, st: LaneState): LaneHealth {

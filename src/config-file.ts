@@ -93,6 +93,30 @@ export function defaultConfigTemplate(): ModelHitchConfig {
       connections: [],
       syncFromOpenCode: true,
     },
+    // Custom BYOK lanes: a provider ModelHitch does not ship. Add a lane in
+    // /settings (or with `modelhitch bridge --custom-lane <id>
+    // --custom-lane-url <url> --custom-lane-models <a,b>`) and it becomes an
+    // ordinary lane — `custom-<id>` in the policy, the lane-health table, and
+    // `--provider`. The model list is typed by hand: a custom lane is never
+    // polled for models. `onLimit: "stop"` makes a lane terminal, so a rate
+    // limit surfaces instead of spending another provider.
+    customLanes: {
+      enabled: false,
+      placement: 'lead',
+      lanes: [],
+    },
+    // Sign in with ChatGPT: spend the user's ChatGPT plan on eligible requests.
+    // Off by default — it is a billing choice, so the user opts in from
+    // /settings with "Continue with ChatGPT". Tokens live in
+    // `chatgpt-plan.json` beside this file, never in this document. Leave
+    // `models` empty and the bridge reads the signed-in account's catalog.
+    chatgptPlan: {
+      enabled: false,
+      mode: 'rotation',
+      placement: 'lead',
+      onLimit: 'rotate',
+      models: [],
+    },
   };
 }
 

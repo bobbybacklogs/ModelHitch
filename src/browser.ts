@@ -88,9 +88,94 @@ export {
   type CatalogConfig,
   type CooldownConfig,
   type ConfigValidation,
+  type CustomLaneConfig,
+  type CustomLanesConfig,
   type MaskedConfig,
   type ModelHitchConfig,
 } from './config.js';
+
+// custom BYOK lanes — endpoints ModelHitch does not ship, used as ordinary lanes
+export {
+  applyCustomLanesPlan,
+  customLaneApiKeys,
+  customLaneProviders,
+  customLanesConfig,
+  customLanesPlacement,
+  describeCustomLanesPlan,
+  isCustomLanesEnabled,
+  resolveCustomLanes,
+  type CustomLaneProviderOptions,
+  type CustomLanesPlan,
+  type CustomLanesPlanInput,
+  type ResolvedCustomLane,
+} from './custom-lanes.js';
+export {
+  createCustomLaneProvider,
+  customLaneBaseUrl,
+  customLaneKeyEnvVar,
+  customLaneProviderId,
+  customLaneSlug,
+  customLaneWire,
+  isCustomLaneProviderId,
+  CUSTOM_LANE_KEY_ENV_PREFIX,
+  CUSTOM_LANE_PROVIDER_PREFIX,
+  CUSTOM_LANE_SCHEMAS,
+  type CreateCustomLaneProviderOptions,
+  type CustomLaneInput,
+  type CustomLaneSchema,
+} from './providers/custom-lane.js';
+
+// Sign in with ChatGPT — the ChatGPT plan lane's routing plan and adapter.
+// The OAuth flow itself is Node-only (`chatgpt-plan-auth.ts`: loopback
+// listener, JWKS validation, credential file) and is deliberately absent here.
+// A browser build drives the lane by supplying its own `ChatGptPlanTokenSource`
+// — for example one that asks an app server for a token, so the refresh token
+// never reaches browser storage.
+export {
+  applyChatGptPlanPlan,
+  chatGptPlanConfig,
+  chatGptPlanMode,
+  chatGptPlanModelSlug,
+  chatGptPlanPlacement,
+  describeChatGptPlan,
+  hasChatGptPlanScope,
+  isChatGptPlanEnabled,
+  isTokenExpired,
+  parseScopeValue,
+  redactToken,
+  resolveChatGptPlan,
+  chatGptPlanAccountKey,
+  chatGptPlanAccountLabel,
+  CHATGPT_PLAN_API_BASE_URL,
+  CHATGPT_PLAN_DYNAMIC_CLIENT_ID,
+  CHATGPT_PLAN_PROVIDER_ID,
+  CHATGPT_PLAN_PROVIDER_NAME,
+  CHATGPT_PLAN_RESOURCE,
+  CHATGPT_PLAN_USAGE_SCOPE,
+  CHATGPT_PLAN_USAGE_SETTINGS_URL,
+  type ChatGptPlanAccount,
+  type ChatGptPlanAccountStatus,
+  type ChatGptPlanPlan,
+  type ChatGptPlanPlanInput,
+  type ChatGptPlanSignInAttempt,
+  type ChatGptPlanSignInStatus,
+  type ChatGptPlanStatus,
+  type ChatGptPlanToken,
+  type ChatGptPlanTokenSource,
+  type ResolvedChatGptPlanLane,
+  type ResolveChatGptPlanOptions,
+} from './chatgpt-plan.js';
+export {
+  chatGptPlanProviders,
+  isChatGptPlanProviderId,
+  listChatGptPlanAccountModels,
+  type ChatGptPlanLaneOptions,
+} from './chatgpt-plan-lane.js';
+export {
+  createChatGptPlanProvider,
+  chatGptPlanRequestBody,
+  type ChatGptPlanProviderOptions,
+} from './providers/chatgpt-plan.js';
 
 export { UsageTracker, usageDashboardHtml } from './core/usage.js';
 // `UsageStorage` is an interface only — safe for browsers. `SqliteUsageStorage`
@@ -113,6 +198,9 @@ export {
   AnthropicProvider,
   createOllamaProvider,
   OllamaProvider,
+  // Multi-wire engine (chat completions / responses / messages / generateContent)
+  createMultiWireProvider,
+  type MultiWireProviderOptions,
   type Provider,
   type ModelInfo,
   // Vercel AI Gateway (default runtime)

@@ -15,7 +15,12 @@ import type {
   Usage,
 } from '../core/types.js';
 import { AnthropicProvider } from './anthropic.js';
-import { createOpenAICompatibleProvider, mapHTTPError, applySessionHeaders } from './openai-compatible.js';
+import {
+  createOpenAICompatibleProvider,
+  mapHTTPError,
+  applySessionHeaders,
+  DEFAULT_SESSION_HEADERS,
+} from './openai-compatible.js';
 import { recoverMessageToolCalls, toolSchemaFromDefinitions } from '../core/dsml.js';
 import { deriveSessionId } from '../core/session.js';
 import type { ModelInfo, Provider } from './types.js';
@@ -182,24 +187,86 @@ export interface OpenCodeProviderOptions {
   forceWire?: OpenCodeWire;
 }
 
+/**
+ * The generic multi-wire engine the OpenCode lanes and the custom BYOK lanes
+ * are both built from. Everything OpenCode-specific (its base URL, its session
+ * header, its user agent, its model-family wire detection, its `GET /models`
+ * snapshot) is an *option* here, so a lane that was never in ModelHitch's
+ * catalog can be served by the same code path instead of a second copy of the
+ * Responses / Anthropic / Gemini mappings.
+ *
+ * See `createOpenCodeProvider` for the Zen/Go preset and
+ * `providers/custom-lane.ts` for the BYOK preset.
+ */
+export interface MultiWireProviderOptions {
+  /** Unique provider id — the lane identity in routing, health, and logs. */
+  id: string;
+  /** Human-readable name; defaults to the id. */
+  name?: string;
+  /** Base URL including the version segment, e.g. "https://api.example.com/v1". */
+  baseUrl: string;
+  /** Model used when a request omits one. */
+  defaultModel: string;
+  /** Env var read when the caller passes no `apiKey` (optional: BYOK keys
+   * usually live in the config `keys` map, which reaches us as a credential). */
+  apiKeyEnvVar?: string;
+  /** Additional env vars checked when the primary one is unset. */
+  apiKeyEnvFallbacks?: string[];
+  /** Set false for a keyless endpoint (a self-hosted gateway behind a URL). */
+  requiresKey?: boolean;
+  /** Label used in the missing-api-key message ("OpenCode", "Lane "x""). */
+  providerLabel?: string;
+  capabilities?: Partial<Capabilities>;
+  /** Extra headers sent with every request (auth overrides included). */
+  headers?: Record<string, string>;
+  /** Outbound session-header names, in priority order. */
+  sessionHeaders?: readonly string[];
+  /** User-Agent sent unless the caller set one. */
+  userAgent?: string;
+  /** Strip this pattern from a model id before it reaches the wire. */
+  stripModelPrefix?: RegExp;
+  /** Wire used when `forceWire` is unset. Default: OpenCode family detection. */
+  detectWire?: (model: string) => OpenCodeWire;
+  forceWire?: OpenCodeWire;
+  /** Model ids advertised when the endpoint has no usable `GET /models`. */
+  snapshotModels?: readonly string[];
+  /**
+   * Model discovery override. When set it is the ONLY source — no `GET
+   * /models` request is made. Custom BYOK lanes use it to advertise the slots
+   * the user typed, which is the whole point: never poll a provider whose
+   * catalog we cannot know.
+   */
+  listModels?: (credentials: ProviderCredentials) => Promise<ModelInfo[]>;
+  fetchImpl?: typeof fetch;
+}
+
 function resolveApiKey(
   credentials: ProviderCredentials,
-  envVar: string,
+  envVar: string | undefined,
   envFallbacks: string[],
   providerId: string,
-): string {
+  providerLabel: string,
+  requiresKey: boolean,
+): string | undefined {
   if (credentials.apiKey) return credentials.apiKey;
-  const envKey = process.env[envVar];
-  if (envKey) return envKey;
-  for (const fb of envFallbacks) {
-    const val = process.env[fb];
-    if (val) return val;
+  for (const name of [envVar, ...envFallbacks]) {
+    if (!name) continue;
+    const value = (typeof process !== 'undefined' && process.env?.[name]) as string | undefined;
+    if (value) return value;
   }
-  throw new ModelHitchError(
-    'missing-api-key',
-    `OpenCode requires an API key. Set ${envVar} in your environment or configure it in ModelHitch settings.`,
-    { providerId },
-  );
+  if (!requiresKey) return undefined;
+  const hint = envVar
+    ? ` Set ${envVar} in your environment or configure it in ModelHitch settings.`
+    : ' Add one in ModelHitch settings.';
+  throw new ModelHitchError('missing-api-key', `${providerLabel} requires an API key.${hint}`, {
+    providerId,
+  });
+}
+
+/** Case-insensitive header presence check (a caller's own header always wins). */
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+  const wanted = name.toLowerCase();
+  return Object.keys(headers).some((key) => key.toLowerCase() === wanted);
 }
 
 function chatParamsToResponsesBody(params: ChatParams, stream = false): Record<string, unknown> {
@@ -383,26 +450,55 @@ function finalizeOpenCodeMessage(
   };
 }
 
-export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Provider {
-  const id = opts.id ?? 'opencode';
-  const name = opts.name ?? 'OpenCode Zen';
-  const baseUrl = (opts.baseUrl ?? OPENCODE_ZEN_BASE_URL).replace(/\/+$/, '');
-  const defaultModel = opts.defaultModel ?? OPENCODE_DEFAULT_MODEL;
-  const apiKeyEnvVar = opts.apiKeyEnvVar ?? 'OPENCODE_API_KEY';
+export function createMultiWireProvider(opts: MultiWireProviderOptions): Provider {
+  const id = opts.id;
+  const name = opts.name ?? opts.id;
+  const baseUrl = opts.baseUrl.replace(/\/+$/, '');
+  const defaultModel = opts.defaultModel;
+  const apiKeyEnvVar = opts.apiKeyEnvVar;
   const apiKeyEnvFallbacks = opts.apiKeyEnvFallbacks ?? [];
+  const providerLabel = opts.providerLabel ?? name;
+  const requiresKey = opts.requiresKey !== false;
+  const sessionHeaders = opts.sessionHeaders ?? DEFAULT_SESSION_HEADERS;
+  const userAgent = opts.userAgent ?? 'ModelHitch/2.0';
+  const stripModelPrefix = opts.stripModelPrefix;
+  const detectWire = opts.detectWire ?? detectOpenCodeWire;
+  const snapshotModels = opts.snapshotModels ?? OPENCODE_SNAPSHOT_MODELS;
+  const listModelsOverride = opts.listModels;
   const fetchImpl = opts.fetchImpl ?? ((...args) => fetch(...args));
   const customHeaders = opts.headers ?? {};
+
+  /** Model id as the endpoint expects it (OpenCode lanes strip their own prefix). */
+  const stripModel = (model: string): string =>
+    stripModelPrefix ? model.replace(stripModelPrefix, '') : model;
 
   const capabilities: Capabilities = {
     streaming: true,
     toolCalling: true,
     vision: true,
-    embeddings: true,
-    maxContextTokens: 1_000_000,
+    embeddings: false,
     ...opts.capabilities,
   };
 
+  /**
+   * Resolve the credential once, before the wire is chosen.
+   *
+   * Every wire used to answer "is there a key?" for itself, which meant a
+   * missing key was reported by whichever delegate happened to be picked — and
+   * `requiresKey: false` only worked on some of them. One resolution here keeps
+   * the answer (and the error naming the lane) identical across wires.
+   */
+  const scopedCredentials = (credentials: ProviderCredentials): ProviderCredentials => {
+    const apiKey = resolveApiKey(credentials, apiKeyEnvVar, apiKeyEnvFallbacks, id, providerLabel, requiresKey);
+    return apiKey ? { ...credentials, apiKey } : credentials;
+  };
+
   // Internal delegate for OpenAI Chat Completions wire (DeepSeek, GLM, Kimi, MiniMax, freebies)
+  //
+  // `requiresKey: false` is deliberate: the engine resolves the key once for
+  // every wire (see `scopedCredentials`), so a keyless custom lane works here
+  // too and a missing key is reported in the lane's own terms rather than by a
+  // delegate that does not know what it is serving.
   const chatCompletionsDelegate = createOpenAICompatibleProvider({
     id,
     name,
@@ -410,9 +506,10 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
     defaultModel,
     apiKeyEnvVar,
     apiKeyEnvFallbacks,
+    requiresKey: false,
     capabilities,
     headers: customHeaders,
-    sessionHeaders: OPENCODE_SESSION_HEADERS,
+    sessionHeaders: [...sessionHeaders],
     fetchImpl,
   });
 
@@ -438,15 +535,15 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
   });
 
   async function chatResponses(params: ChatParams, credentials: ProviderCredentials): Promise<ChatResult> {
-    const apiKey = resolveApiKey(credentials, apiKeyEnvVar, apiKeyEnvFallbacks, id);
+    const apiKey = resolveApiKey(credentials, apiKeyEnvVar, apiKeyEnvFallbacks, id, providerLabel, requiresKey);
     const body = chatParamsToResponsesBody(params, false);
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
       ...customHeaders,
     };
-    applySessionHeaders(headers, params.sessionId, OPENCODE_SESSION_HEADERS);
-    if (!headers['User-Agent'] && !headers['user-agent']) headers['User-Agent'] = OPENCODE_USER_AGENT;
+    if (apiKey && !hasHeader(headers, 'authorization')) headers.Authorization = `Bearer ${apiKey}`;
+    applySessionHeaders(headers, params.sessionId, sessionHeaders);
+    if (!hasHeader(headers, 'user-agent')) headers['User-Agent'] = userAgent;
 
     let res: Response;
     try {
@@ -512,15 +609,15 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
   }
 
   async function* streamResponses(params: ChatParams, credentials: ProviderCredentials): AsyncIterable<StreamChunk> {
-    const apiKey = resolveApiKey(credentials, apiKeyEnvVar, apiKeyEnvFallbacks, id);
+    const apiKey = resolveApiKey(credentials, apiKeyEnvVar, apiKeyEnvFallbacks, id, providerLabel, requiresKey);
     const body = chatParamsToResponsesBody(params, true);
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
       ...customHeaders,
     };
-    applySessionHeaders(headers, params.sessionId, OPENCODE_SESSION_HEADERS);
-    if (!headers['User-Agent'] && !headers['user-agent']) headers['User-Agent'] = OPENCODE_USER_AGENT;
+    if (apiKey && !hasHeader(headers, 'authorization')) headers.Authorization = `Bearer ${apiKey}`;
+    applySessionHeaders(headers, params.sessionId, sessionHeaders);
+    if (!hasHeader(headers, 'user-agent')) headers['User-Agent'] = userAgent;
 
     let res: Response;
     try {
@@ -619,16 +716,16 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
   }
 
   async function chatGemini(params: ChatParams, credentials: ProviderCredentials): Promise<ChatResult> {
-    const apiKey = resolveApiKey(credentials, apiKeyEnvVar, apiKeyEnvFallbacks, id);
-    const cleanModel = params.model.replace(/^(?:opencode|opencode-go)\//, '');
+    const apiKey = resolveApiKey(credentials, apiKeyEnvVar, apiKeyEnvFallbacks, id, providerLabel, requiresKey);
+    const cleanModel = stripModel(params.model);
     const body = chatParamsToGeminiBody(params);
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
       ...customHeaders,
     };
-    applySessionHeaders(headers, params.sessionId, OPENCODE_SESSION_HEADERS);
-    if (!headers['User-Agent'] && !headers['user-agent']) headers['User-Agent'] = OPENCODE_USER_AGENT;
+    if (apiKey && !hasHeader(headers, 'x-goog-api-key')) headers['x-goog-api-key'] = apiKey;
+    applySessionHeaders(headers, params.sessionId, sessionHeaders);
+    if (!hasHeader(headers, 'user-agent')) headers['User-Agent'] = userAgent;
 
     let res: Response;
     try {
@@ -697,16 +794,16 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
   }
 
   async function* streamGemini(params: ChatParams, credentials: ProviderCredentials): AsyncIterable<StreamChunk> {
-    const apiKey = resolveApiKey(credentials, apiKeyEnvVar, apiKeyEnvFallbacks, id);
-    const cleanModel = params.model.replace(/^(?:opencode|opencode-go)\//, '');
+    const apiKey = resolveApiKey(credentials, apiKeyEnvVar, apiKeyEnvFallbacks, id, providerLabel, requiresKey);
+    const cleanModel = stripModel(params.model);
     const body = chatParamsToGeminiBody(params);
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
       ...customHeaders,
     };
-    applySessionHeaders(headers, params.sessionId, OPENCODE_SESSION_HEADERS);
-    if (!headers['User-Agent'] && !headers['user-agent']) headers['User-Agent'] = OPENCODE_USER_AGENT;
+    if (apiKey && !hasHeader(headers, 'x-goog-api-key')) headers['x-goog-api-key'] = apiKey;
+    applySessionHeaders(headers, params.sessionId, sessionHeaders);
+    if (!hasHeader(headers, 'user-agent')) headers['User-Agent'] = userAgent;
 
     let res: Response;
     try {
@@ -799,55 +896,56 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
     capabilities,
 
     async chat(params: ChatParams, credentials: ProviderCredentials): Promise<ChatResult> {
-      const cleanModel = params.model.replace(/^(?:opencode|opencode-go)\//, '');
-      const wire = opts.forceWire ?? detectOpenCodeWire(cleanModel);
+      const cleanModel = stripModel(params.model);
+      const wire = opts.forceWire ?? detectWire(cleanModel);
       const normalizedParams: ChatParams = withSession({ ...params, model: cleanModel });
+      const scoped = scopedCredentials(credentials);
 
       switch (wire) {
         case 'responses':
-          return chatResponses(normalizedParams, credentials);
+          return chatResponses(normalizedParams, scoped);
         case 'messages':
-          return messagesDelegate.chat(normalizedParams, credentials);
+          return messagesDelegate.chat(normalizedParams, scoped);
         case 'gemini':
-          return chatGemini(normalizedParams, credentials);
+          return chatGemini(normalizedParams, scoped);
         case 'chat-completions':
         default:
-          return chatCompletionsDelegate.chat(normalizedParams, credentials);
+          return chatCompletionsDelegate.chat(normalizedParams, scoped);
       }
     },
 
     async *stream(params: ChatParams, credentials: ProviderCredentials): AsyncIterable<StreamChunk> {
-      const cleanModel = params.model.replace(/^(?:opencode|opencode-go)\//, '');
-      const wire = opts.forceWire ?? detectOpenCodeWire(cleanModel);
+      const cleanModel = stripModel(params.model);
+      const wire = opts.forceWire ?? detectWire(cleanModel);
       const normalizedParams: ChatParams = withSession({ ...params, model: cleanModel });
+      const scoped = scopedCredentials(credentials);
 
       switch (wire) {
         case 'responses':
-          yield* streamResponses(normalizedParams, credentials);
+          yield* streamResponses(normalizedParams, scoped);
           break;
         case 'messages':
-          yield* messagesDelegate.stream(normalizedParams, credentials);
+          yield* messagesDelegate.stream(normalizedParams, scoped);
           break;
         case 'gemini':
-          yield* streamGemini(normalizedParams, credentials);
+          yield* streamGemini(normalizedParams, scoped);
           break;
         case 'chat-completions':
         default:
-          yield* chatCompletionsDelegate.stream(normalizedParams, credentials);
+          yield* chatCompletionsDelegate.stream(normalizedParams, scoped);
           break;
       }
     },
 
     async listModels(credentials: ProviderCredentials): Promise<ModelInfo[]> {
+      // An explicit override is the only source: a BYOK lane never polls.
+      if (listModelsOverride) return listModelsOverride(credentials);
       try {
-        const apiKey = resolveApiKey(credentials, apiKeyEnvVar, apiKeyEnvFallbacks, id);
-        const res = await fetchImpl(`${baseUrl}/models`, {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            ...customHeaders,
-          },
-        });
+        const apiKey = resolveApiKey(credentials, apiKeyEnvVar, apiKeyEnvFallbacks, id, providerLabel, requiresKey);
+        if (!apiKey && requiresKey) return snapshotModels.map((mId) => ({ id: mId, name: mId }));
+        const headers: Record<string, string> = { ...customHeaders };
+        if (apiKey && !hasHeader(headers, 'authorization')) headers.Authorization = `Bearer ${apiKey}`;
+        const res = await fetchImpl(`${baseUrl}/models`, { method: 'GET', headers });
         if (res.ok) {
           const json = await res.json();
           const list = Array.isArray(json.data) ? json.data : Array.isArray(json) ? json : [];
@@ -862,12 +960,49 @@ export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Prov
         // Fall back to static snapshot
       }
 
-      return OPENCODE_SNAPSHOT_MODELS.map((mId) => ({
+      return snapshotModels.map((mId) => ({
         id: mId,
         name: mId,
       }));
     },
   };
+}
+
+/**
+ * The OpenCode Zen / Go preset over the generic multi-wire engine.
+ *
+ * OpenCode is what the generic engine was extracted from, so this preset is
+ * where its quirks live: the `x-opencode-session` header Go requires, the
+ * `ModelHitch-OpenCode/2.0` user agent OpenCode asks clients to send, the
+ * `opencode/`-prefixed model ids the lane accepts, `OPENCODE_API_KEY` as the
+ * credential fallback, and the Zen model snapshot as the offline catalog.
+ */
+export function createOpenCodeProvider(opts: OpenCodeProviderOptions = {}): Provider {
+  return createMultiWireProvider({
+    id: opts.id ?? 'opencode',
+    name: opts.name ?? 'OpenCode Zen',
+    baseUrl: opts.baseUrl ?? OPENCODE_ZEN_BASE_URL,
+    defaultModel: opts.defaultModel ?? OPENCODE_DEFAULT_MODEL,
+    apiKeyEnvVar: opts.apiKeyEnvVar ?? 'OPENCODE_API_KEY',
+    apiKeyEnvFallbacks: opts.apiKeyEnvFallbacks,
+    providerLabel: 'OpenCode',
+    capabilities: {
+      streaming: true,
+      toolCalling: true,
+      vision: true,
+      embeddings: true,
+      maxContextTokens: 1_000_000,
+      ...opts.capabilities,
+    },
+    headers: opts.headers,
+    sessionHeaders: OPENCODE_SESSION_HEADERS,
+    userAgent: OPENCODE_USER_AGENT,
+    stripModelPrefix: /^(?:opencode|opencode-go)\//,
+    detectWire: detectOpenCodeWire,
+    forceWire: opts.forceWire,
+    snapshotModels: OPENCODE_SNAPSHOT_MODELS,
+    fetchImpl: opts.fetchImpl,
+  });
 }
 
 /** OpenCode Zen pay-per-use provider instance */

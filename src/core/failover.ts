@@ -25,6 +25,20 @@ import { ModelHitchError, type ModelHitchErrorCode } from './errors.js';
 export interface FailoverTarget {
   providerId: string;
   model: string;
+  /**
+   * Opt-in "stop here" lane. A BYOK endpoint with `onLimit: 'stop'` is the last
+   * lane the walk may reach: a retryable failure on it (429, 402, a 5xx, a
+   * network blip) surfaces instead of rotating to the next lane, and the same
+   * is true when the lane is still parked from an earlier failure. The point is
+   * that a user who said "stop when this one hits its limit" does not silently
+   * spend a different provider's quota on the next request.
+   *
+   * Absent = ordinary lane: rotate as usual. Lanes *after* a terminal lane stay
+   * in the plan (they are reachable when routing starts past the terminal lane,
+   * e.g. an explicit `provider/model` pin), they are just never reached by
+   * rotation from the terminal lane itself.
+   */
+  terminal?: boolean;
 }
 
 export interface FailoverErrorInfo {
@@ -170,6 +184,12 @@ export interface LaneCooldown {
    * failover loop calls this through `FailoverContext.onSuccess`.
    */
   success?(lane: FailoverTarget): void;
+  /**
+   * Optional: the failure that parked a lane. Only terminal lanes read this —
+   * they have to explain *why* the walk stopped, and the original error is a
+   * far better answer than "the lane is on cooldown".
+   */
+  lastFailure?(lane: FailoverTarget): FailoverErrorInfo | undefined;
 }
 
 /** One lane's failure during a walk that bottomed out. */
@@ -271,6 +291,40 @@ function sleep(ms: number): Promise<void> {
   return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 }
 
+function laneKey(target: FailoverTarget): string {
+  return `${target.providerId}/${target.model}`;
+}
+
+/**
+ * The error a terminal lane reports when the walk reaches it while it is still
+ * parked from an earlier failure. Nothing upstream was called and no other lane
+ * may be tried, so the recorded failure — when the cooldown engine kept it — is
+ * the honest answer, and it preserves the code/status/Retry-After the caller
+ * would have seen from the lane itself.
+ */
+function stoppedLaneError(
+  target: FailoverTarget,
+  recorded: FailoverErrorInfo | undefined,
+): ModelHitchError {
+  const lane = laneKey(target);
+  if (recorded) {
+    return new ModelHitchError(
+      recorded.code === 'unknown' ? 'provider-error' : recorded.code,
+      `Lane "${lane}" is stopped on limit (${recorded.code}) and still parked — not failing over: ${recorded.message}`,
+      {
+        status: recorded.status,
+        providerId: target.providerId,
+        retryAfterMs: recorded.retryAfterMs,
+      },
+    );
+  }
+  return new ModelHitchError(
+    'provider-error',
+    `Lane "${lane}" is stopped on limit and still parked — no other lane was tried.`,
+    { providerId: target.providerId },
+  );
+}
+
 /**
  * Non-stream: try each target until one resolves. If every lane fails without
  * producing a result, the FIRST error is rethrown — that's the lane the user
@@ -296,6 +350,14 @@ export async function withFailover<T, L extends FailoverTarget>(
   while (i < targets.length && i < maxAttempts) {
     const target = targets[i]!;
     if (ctx.cooldown && ctx.cooldown.cooldownMs(target) > 0) {
+      if (target.terminal) {
+        // Stop-on-limit lane, parked from an earlier failure: end the walk
+        // here instead of spending another provider's quota.
+        const err = stoppedLaneError(target, ctx.cooldown.lastFailure?.(target));
+        const parked: ExhaustionInfo = { targets, attempts, firstError: err };
+        ctx.onExhausted?.(parked);
+        throw new ExhaustedError(err, parked);
+      }
       i++; // cooled lane — skip without attempting
       continue;
     }
@@ -309,7 +371,8 @@ export async function withFailover<T, L extends FailoverTarget>(
       // so an exhausted walk never surfaces the empty "All failover lanes
       // failed." fallback when later lanes were only skipped on cooldown.
       firstError ??= err;
-      const last = i >= targets.length - 1 || i >= maxAttempts - 1;
+      // A terminal lane is the last stop even when lanes follow it in the plan.
+      const last = i >= targets.length - 1 || i >= maxAttempts - 1 || target.terminal === true;
       if (last) {
         // Also honor cooling for a final retryable failure (e.g. 429 with
         // Retry-After) so the NEXT request doesn't immediately re-walk a lane
@@ -366,6 +429,14 @@ export function withFailoverStream<T, L extends FailoverTarget>(
     while (i < targets.length && i < maxAttempts) {
       const target = targets[i]!;
       if (ctx.cooldown && ctx.cooldown.cooldownMs(target) > 0) {
+        if (target.terminal) {
+          // Stop-on-limit lane, parked from an earlier failure: end the walk
+          // here instead of spending another provider's quota.
+          const err = stoppedLaneError(target, ctx.cooldown.lastFailure?.(target));
+          const parked: ExhaustionInfo = { targets, attempts, firstError: err };
+          ctx.onExhausted?.(parked);
+          throw new ExhaustedError(err, parked);
+        }
         i++; // cooled lane — skip without attempting
         continue;
       }
@@ -385,7 +456,8 @@ export function withFailoverStream<T, L extends FailoverTarget>(
         // so an exhausted walk never loses the actionable cause when later
         // lanes are only skipped on cooldown.
         firstError ??= err;
-        const last = i >= targets.length - 1 || i >= maxAttempts - 1;
+        // A terminal lane is the last stop even when lanes follow it in the plan.
+        const last = i >= targets.length - 1 || i >= maxAttempts - 1 || target.terminal === true;
         if (last) {
           if (yielded) {
             // Content already sent from the final lane — never duplicate;

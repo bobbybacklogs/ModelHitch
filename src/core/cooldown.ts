@@ -29,6 +29,8 @@ export class MemoryLaneCooldown implements LaneCooldown {
   private readonly now: () => number;
   private readonly graceMs: number;
   private readonly until = new Map<string, number>();
+  /** Last reported failure per lane — read by terminal (stop-on-limit) lanes. */
+  private readonly failures = new Map<string, FailoverErrorInfo>();
 
   constructor(options: MemoryLaneCooldownOptions = {}) {
     this.now = options.now ?? (() => Date.now());
@@ -49,22 +51,37 @@ export class MemoryLaneCooldown implements LaneCooldown {
         : retryAfterMsOrError.retryAfterMs;
     const ms = retryAfterMs !== undefined && retryAfterMs > 0 ? retryAfterMs : this.graceMs;
     this.until.set(key(lane), this.now() + Math.ceil(ms));
+    if (retryAfterMsOrError !== undefined && typeof retryAfterMsOrError !== 'number') {
+      this.failures.set(key(lane), retryAfterMsOrError);
+    }
   }
 
   /** A lane succeeded — drop any stale cooldown for it. */
   success(lane: FailoverTarget): void {
     this.until.delete(key(lane));
+    this.failures.delete(key(lane));
+  }
+
+  /** The failure that parked a lane, for a terminal lane's error message. */
+  lastFailure(lane: FailoverTarget): FailoverErrorInfo | undefined {
+    return this.failures.get(key(lane));
   }
 
   clear(): void {
     this.until.clear();
+    this.failures.clear();
   }
 
   /** Drop expired entries so the map can't grow without bound for dynamic lane keys. */
   private sweep(): void {
     const t = this.now();
     for (const [k, until] of this.until) {
-      if (until <= t) this.until.delete(k);
+      if (until <= t) {
+        this.until.delete(k);
+        // The recorded failure is only ever read for a lane that is still
+        // parked, so it expires with the cooldown it belongs to.
+        this.failures.delete(k);
+      }
     }
   }
 }

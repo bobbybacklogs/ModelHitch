@@ -7,6 +7,8 @@
  * streaming, usage), without pretending to implement the entire API surface.
  */
 
+import type { PlanModelEntry } from './lane-catalog.js';
+
 /** A content part inside an OpenAI message (text or image_url). */
 export interface OpenAIContentPart {
   type: string;
@@ -101,10 +103,24 @@ export interface OpenAIErrorBody {
   error: { message: string; type: string; param: string | null; code: string | null };
 }
 
-/** Outbound `GET /v1/models` entry. */
+/**
+ * Outbound `GET /v1/models` entry.
+ *
+ * `id` is the route the client sends back (`providerId/modelId`, or a bare id
+ * for the default provider). `name` and `modelhitch` are additions the OpenAI
+ * shape tolerates: clients that don't know them ignore them, and they are what
+ * lets a model picker show a lane by name and tier instead of a raw id.
+ */
 export interface OpenAIModelEntry {
   id: string;
   object: 'model';
   created: number;
   owned_by: string;
+  /** Display label, e.g. "DeepSeek V4 Pro · OpenCode Go · trusted lane 1". */
+  name?: string;
+  /**
+   * Present only on entries that describe a lane of the bridge's routing plan
+   * (see `src/server/lane-catalog.ts`), never on plain catalog entries.
+   */
+  modelhitch?: PlanModelEntry;
 }

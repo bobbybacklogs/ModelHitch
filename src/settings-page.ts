@@ -9,6 +9,7 @@
  *   PUT  /v1/config        validate + apply (writes the config file)
  *   GET  /v1/catalog       provider inventory (registry or models.dev)
  *   GET  /v1/lane-health   circuit-breaker health snapshot (polled)
+ *   GET  /v1/chatgpt-plan  Sign in with ChatGPT account panel (polled)
  *   GET  /v1/usage         usage summary (linked)
  *
  * Design language: a local instrument panel, not a SaaS dashboard — warm
@@ -136,6 +137,16 @@ export function settingsPageHtml(): string {
   details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
   details { margin-top: 8px; }
   .warnbox { border: 1px solid var(--warn); background: #241d10; color: #e3c98f; border-radius: 4px; padding: 8px 12px; font-size: 12px; margin-bottom: 10px; }
+
+  /* OpenAI's sign-in button is black with a monochrome mark and wording its
+     guidelines fix exactly, so it keeps its own class instead of .btn. */
+  .btn-chatgpt { display: inline-flex; align-items: center; gap: 8px; background: #000; color: #fff; border: 1px solid #000; border-radius: 6px; padding: 8px 14px; font-size: 13px; font-family: var(--sans); font-weight: 600; cursor: pointer; }
+  .btn-chatgpt:hover { background: #212121; color: #fff; }
+  .btn-chatgpt svg { display: block; flex: none; }
+  /* Account rows in the ChatGPT plan panel: one line per account, detail muted. */
+  .plan-account { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .plan-account:last-child { border-bottom: 0; }
+  .plan-account .who { font-family: var(--mono); font-size: 13px; }
 </style>
 </head>
 <body>
@@ -274,6 +285,115 @@ export function settingsPageHtml(): string {
         Each connection is served as its own provider (<span class="mono">opencode-byok-&lt;slug&gt;</span>), so it appears in the policy lanes above,
         in the lane-health table, and in <span class="mono">modelhitch bridge --provider opencode-byok-&lt;slug&gt;</span>.
         Per-connection keys can be pasted on that provider's card in the Providers section.
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Custom lanes</h2><span class="hint">a provider we don't ship — paste an endpoint and key, then type the model slots you want</span></div>
+    <div class="panel">
+      <div class="row">
+        <div class="grow">
+          <label>enabled</label>
+          <select id="customEnabled">
+            <option value="false">disabled</option>
+            <option value="true">enabled</option>
+          </select>
+        </div>
+        <div class="grow">
+          <label>placement</label>
+          <select id="customPlacement">
+            <option value="lead">lead — route to these lanes first</option>
+            <option value="fallback">fallback — only when the lanes above are depleted</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" style="border-bottom:0">
+        <button class="btn" type="button" id="customAdd">+ lane</button>
+        <span class="muted" id="custom-status"></span>
+      </div>
+      <div id="custom-lanes"></div>
+      <div class="muted" style="font-size:12px">
+        Each lane is served as its own provider (<span class="mono">custom-&lt;slug&gt;</span>) with its own lane health, so it works in the policy lanes,
+        in <span class="mono">modelhitch bridge --provider custom-&lt;slug&gt;</span>, and in the lane-health table.
+        The model slots you type are the whole catalog: ModelHitch never calls <span class="mono">GET /models</span> on a custom lane.
+        <span class="mono">on limit: stop</span> makes the lane terminal — a rate limit or an empty account surfaces to the caller
+        instead of spending another provider, and it keeps stopping while the lane is parked.
+      </div>
+    </div>
+  </section>
+
+  <section id="chatgpt-plan">
+    <div class="section-head"><h2>ChatGPT plan</h2><span class="hint">spend your own ChatGPT plan on eligible requests · separate from this app's own charges</span></div>
+    <div class="panel">
+      <div class="warnbox">
+        Eligible requests in this app can spend your ChatGPT plan instead of an API key: sign in once with ChatGPT and the plan pays for those requests.
+        This is separate from this app's own charges — the plan is your OpenAI subscription, not credit bought here, and nothing about it is billed through this machine.
+        The browser does the sign-in, and the issued tokens land in a protected file beside your config; they are never written into this settings document.
+      </div>
+      <div class="row">
+        <div class="grow">
+          <label>account</label>
+          <div id="chatgpt-account"><div class="muted">reading the ChatGPT plan state…</div></div>
+        </div>
+        <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer noopener">Manage usage</a>
+      </div>
+      <div id="chatgpt-plan-accounts"></div>
+      <div class="row">
+        <div class="grow">
+          <label>enabled</label>
+          <select id="chatgptPlanEnabled">
+            <option value="false">disabled</option>
+            <option value="true">enabled</option>
+          </select>
+        </div>
+        <div class="grow">
+          <label>mode</label>
+          <select id="chatgptPlanMode">
+            <option value="rotation">rotation — spread requests across the model slots</option>
+            <option value="pinned">pinned — one model first, the rest directly behind it</option>
+          </select>
+        </div>
+        <div class="grow">
+          <label>placement</label>
+          <select id="chatgptPlanPlacement">
+            <option value="lead">lead — spend the plan first</option>
+            <option value="fallback">fallback — only when the lanes above are depleted</option>
+          </select>
+        </div>
+        <div class="grow">
+          <label>on limit</label>
+          <select id="chatgptPlanOnLimit">
+            <option value="rotate">rotate — fail over to the next lane</option>
+            <option value="stop">stop — surface the limit, spend nothing else</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div class="grow">
+          <label>account for this lane</label>
+          <select id="chatgptPlanAccount"><option value="">(the active account)</option></select>
+        </div>
+        <div class="grow">
+          <label>pinned model</label>
+          <select id="chatgptPlanPinnedModel"><option value="">(the first model slot)</option></select>
+        </div>
+      </div>
+      <div class="row" style="border-bottom:0">
+        <button class="btn" type="button" id="chatgptPlanLoadModels">Load models from account</button>
+        <span class="muted" id="chatgpt-plan-status"></span>
+      </div>
+      <div class="row">
+        <div class="grow" style="min-width:340px">
+          <label>model slots</label>
+          <div id="chatgpt-plan-models"></div>
+        </div>
+      </div>
+      <div class="muted" style="font-size:12px">
+        <span class="mono">rotation</span> spreads requests across the model slots above, <span class="mono">pinned</span> makes one of them the main route with the rest directly behind it.
+        <span class="mono">lead</span> spends the plan first, before every other lane; <span class="mono">fallback</span> keeps it behind them.
+        <span class="mono">on limit: stop</span> makes a spent plan surface to the caller instead of silently spending another provider.
+        Slugs come from the signed-in account — ModelHitch never guesses a ChatGPT plan model.
       </div>
     </div>
   </section>
@@ -553,6 +673,7 @@ function collectKeys() {
   collectCloudAgentKey(keys);
   collectOpenCodeKey(keys);
   collectOpenCodeByokKey(keys);
+  collectCustomLaneKeys(keys);
   return keys;
 }
 
@@ -793,6 +914,580 @@ async function importFromOpenCode() {
     status.textContent = 'Imported ' + added + ' connection' + (added === 1 ? '' : 's') +
       ' from OpenCode — replace each id with its Console connection id, then Apply.';
   }
+}
+
+// ---- custom BYOK lanes ---------------------------------------------------
+
+/* Same slug rules as the bridge (providers/custom-lane.ts): the lane id becomes
+   the provider id, so the two must agree or the key lands on nothing. */
+function customSlug(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function customProviderId(laneId) {
+  return 'custom-' + (customSlug(laneId) || 'lane');
+}
+
+/* The env var the bridge falls back to when no key is stored — shown as a hint
+   so a user can keep the secret out of the config document entirely. */
+function customEnvVar(laneId) {
+  var slug = (customSlug(laneId) || 'lane').replace(/-/g, '_').toUpperCase();
+  return 'MODELHITCH_CUSTOM_' + slug + '_API_KEY';
+}
+
+function customModelsEditorHtml(models) {
+  var chosen = models || [];
+  return '<div class="lane-models">' +
+      '<label>models — the only slots this lane serves</label>' +
+      '<div class="chips">' + chosen.map(modelChipHtml).join('') + '</div>' +
+      '<div class="model-add-row">' +
+        '<select class="model-add"><option value="">(type the model id)</option></select>' +
+        '<input type="text" class="model-add-custom" placeholder="type a model id + Enter" />' +
+      '</div>' +
+      '<div class="no-models-hint">typed by hand — a custom lane is never polled for its model list</div>' +
+    '</div>';
+}
+
+function customCapabilityValue(caps) {
+  caps = caps || {};
+  if (caps.toolCalling === false && caps.vision === false) return 'text';
+  if (caps.vision === false) return 'tools';
+  return 'both';
+}
+
+function customLaneRowHtml(lane) {
+  var id = lane && lane.id ? lane.id : '';
+  var label = lane && lane.label ? lane.label : '';
+  var url = lane && lane.baseUrl ? lane.baseUrl : '';
+  var schema = (lane && lane.schema) || 'auto';
+  var onLimit = (lane && lane.onLimit) === 'stop' ? 'stop' : 'rotate';
+  var caps = customCapabilityValue(lane && lane.capabilities);
+  var enabled = !lane || lane.enabled !== false;
+  var models = (lane && lane.models) || [];
+  var schemaOptions = BYOK_SCHEMAS.map(function (s) {
+    return '<option value="' + s + '"' + (s === schema ? ' selected' : '') + '>' + s + '</option>';
+  }).join('');
+  var stored = ((state.config && state.config.keys) || {})[customProviderId(id)];
+  return '<div class="custom-lane lane">' +
+      '<div>' +
+        '<label>lane id</label>' +
+        '<input class="custom-id" type="text" placeholder="my-provider" value="' + esc(id) + '" />' +
+        '<label style="margin-top:6px">label</label>' +
+        '<input class="custom-label" type="text" placeholder="(optional)" value="' + esc(label) + '" />' +
+        '<label style="margin-top:6px">base URL</label>' +
+        '<input class="custom-url" type="text" placeholder="https://api.example.com/v1" value="' + esc(url) + '" />' +
+      '</div>' +
+      customModelsEditorHtml(models) +
+      '<div>' +
+        '<label>schema</label>' +
+        '<select class="custom-schema">' + schemaOptions + '</select>' +
+        '<label style="margin-top:6px">on limit</label>' +
+        '<select class="custom-onlimit">' +
+          '<option value="rotate"' + (onLimit === 'rotate' ? ' selected' : '') + '>rotate — fail over to the next lane</option>' +
+          '<option value="stop"' + (onLimit === 'stop' ? ' selected' : '') + '>stop — surface the limit, spend nothing else</option>' +
+        '</select>' +
+        '<label style="margin-top:6px">capabilities</label>' +
+        '<select class="custom-caps">' +
+          '<option value="both"' + (caps === 'both' ? ' selected' : '') + '>tools + vision</option>' +
+          '<option value="tools"' + (caps === 'tools' ? ' selected' : '') + '>tools only</option>' +
+          '<option value="text"' + (caps === 'text' ? ' selected' : '') + '>text only</option>' +
+        '</select>' +
+      '</div>' +
+      '<div>' +
+        '<label>API key</label>' +
+        '<input class="custom-key" type="password" autocomplete="off" placeholder="' +
+          (stored ? '(set — leave blank to keep)' : (id ? 'paste the key' : 'set the lane id first')) + '" />' +
+        '<div class="no-models-hint mono" id="custom-env-' + esc(customSlug(id)) + '">' + esc(id ? customEnvVar(id) : 'env fallback: MODELHITCH_CUSTOM_&lt;ID&gt;_API_KEY') + '</div>' +
+        '<label style="margin-top:6px">enabled</label>' +
+        '<select class="custom-enabled"><option value="true"' + (enabled ? ' selected' : '') + '>yes</option><option value="false"' + (enabled ? '' : ' selected') + '>no</option></select>' +
+        '<button class="btn danger custom-remove" type="button" style="margin-top:6px">remove</button>' +
+      '</div>' +
+    '</div>';
+}
+
+function renderCustomLanes() {
+  var cfg = state.config || {};
+  var custom = cfg.customLanes || { enabled: false, placement: 'lead', lanes: [] };
+  var box = el('custom-lanes');
+  if (!box) return;
+  el('customEnabled').value = String(!!custom.enabled);
+  el('customPlacement').value = custom.placement === 'fallback' ? 'fallback' : 'lead';
+  var lanes = custom.lanes || [];
+  box.innerHTML = lanes.length
+    ? lanes.map(customLaneRowHtml).join('')
+    : '<div class="empty">no custom lanes yet — add one when your provider is not in the list above</div>';
+  var status = el('custom-status');
+  if (status) {
+    status.textContent = lanes.length
+      ? lanes.length + ' lane' + (lanes.length === 1 ? '' : 's') + ' configured'
+      : '';
+  }
+}
+
+/* Keys for the custom lanes live under their provider id, beside every other
+   provider key — the bridge reads the same map. */
+function collectCustomLaneKeys(keys) {
+  var existing = (state.config && state.config.keys) || {};
+  document.querySelectorAll('#custom-lanes .custom-lane').forEach(function (row) {
+    var id = row.querySelector('.custom-id').value.trim();
+    if (!id) return;
+    var providerId = customProviderId(id);
+    var input = row.querySelector('.custom-key');
+    var val = input ? input.value.trim() : '';
+    if (val) keys[providerId] = val;
+    else if (existing[providerId]) keys[providerId] = existing[providerId];
+  });
+}
+
+/* capability preset -> the honest claims the lane advertises. "tools + vision"
+   is the engine default, so it is left implicit. */
+function customCapabilities(value) {
+  if (value === 'text') return { toolCalling: false, vision: false };
+  if (value === 'tools') return { vision: false };
+  return undefined;
+}
+
+function collectCustomLanes() {
+  var lanes = [];
+  document.querySelectorAll('#custom-lanes .custom-lane').forEach(function (row) {
+    var id = row.querySelector('.custom-id').value.trim();
+    if (!id) return;
+    var url = row.querySelector('.custom-url').value.trim();
+    var label = row.querySelector('.custom-label').value.trim();
+    var models = Array.prototype.map.call(row.querySelectorAll('.lane-models .chips .chip'), function (c) { return c.dataset.model; });
+    var entry = {
+      id: id,
+      // Incomplete lanes are kept rather than dropped: the bridge validates the
+      // document and names the missing field, which beats losing what was typed.
+      baseUrl: url,
+      models: models,
+      schema: row.querySelector('.custom-schema').value || 'auto',
+      onLimit: row.querySelector('.custom-onlimit').value === 'stop' ? 'stop' : 'rotate',
+      enabled: row.querySelector('.custom-enabled').value === 'true'
+    };
+    var caps = customCapabilities(row.querySelector('.custom-caps').value);
+    if (label) entry.label = label;
+    if (caps) entry.capabilities = caps;
+    lanes.push(entry);
+  });
+  return {
+    enabled: el('customEnabled').value === 'true',
+    placement: el('customPlacement').value === 'fallback' ? 'fallback' : 'lead',
+    lanes: lanes
+  };
+}
+
+// ---- Sign in with ChatGPT ------------------------------------------------
+
+/* The account panel is live server state rather than config: the bridge knows
+   who is signed in, what the grant covers, and whether a browser hand-off is in
+   flight. Sign-in finishes on OpenAI's own loopback redirect (not this bridge),
+   so the page can only poll for it — never await it. */
+
+var chatgptPlanUnavailable = false;
+
+/* OpenAI's own mark. Inline because the page loads nothing from the network. */
+var CHATGPT_MARK_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/></svg>';
+
+/* A separate helper from api() because a 501 carrying error.code
+   "not_implemented" is not a failure here: it means this bridge was built
+   without the lane, and the section says so instead of printing HTTP codes. */
+async function chatgptPlanApi(path, opts) {
+  var res = await fetch(path, opts);
+  var body = await res.json().catch(function () { return {}; });
+  if (!res.ok) {
+    var err = new Error((body && body.error && body.error.message) || ('HTTP ' + res.status));
+    err.code = body && body.error ? body.error.code : '';
+    throw err;
+  }
+  return body;
+}
+
+function chatgptPlanUnsupported(err) {
+  return !!(err && err.code === 'not_implemented');
+}
+
+function chatgptPlanClock(value) {
+  var at = new Date(value);
+  return isNaN(at.getTime()) ? String(value) : at.toLocaleString();
+}
+
+/* Token expiry, said the way it matters: a refreshable account renews itself,
+   one without a refresh token needs a human before the token lapses. */
+function chatgptPlanTokenText(account) {
+  if (!account.expiresAt) return 'no token expiry recorded';
+  if (account.expired) {
+    return 'access token expired ' + chatgptPlanClock(account.expiresAt) +
+      (account.refreshable ? ' — renewed on the next request' : ' — sign in again');
+  }
+  return 'access token valid until ' + chatgptPlanClock(account.expiresAt) +
+    (account.refreshable ? '' : ' — no refresh token, so sign in again before then');
+}
+
+/* OpenAI's guidelines fix this wording and the mark; the button is the only way
+   the page asks for plan access, so every entry point uses the same one. */
+function chatgptPlanSignInButtonHtml(opts) {
+  var kind = opts && opts.forceConsent ? 'plan-force-consent' : 'plan-signin';
+  var attrs = opts && opts.accountKey ? ' data-account="' + esc(opts.accountKey) + '"' : '';
+  return '<button class="btn-chatgpt ' + kind + '" type="button"' + attrs + '>' + CHATGPT_MARK_SVG + 'Continue with ChatGPT</button>';
+}
+
+/* The attempt in flight: the status object names it, and the attempt itself
+   carries the authorization URL the fallback link needs. A terminal attempt
+   never renders as pending, so a finished sign-in cannot leave the panel
+   waiting on a browser that already came back. */
+function chatgptPlanPending(status) {
+  var pending = status && status.pendingSignIn;
+  var attempt = state.chatgptPlanAttempt;
+  if (pending && pending.attemptId && !(attempt && attempt.attemptId === pending.attemptId)) {
+    return { attemptId: pending.attemptId, status: 'pending', startedAt: pending.startedAt, expiresAt: pending.expiresAt };
+  }
+  if (attempt && attempt.status === 'pending' && (!attempt.expiresAt || Date.parse(attempt.expiresAt) > Date.now())) return attempt;
+  return null;
+}
+
+function renderChatGptPlanAccount(status) {
+  var box = el('chatgpt-account');
+  if (!box) return;
+  if (chatgptPlanUnavailable) {
+    box.innerHTML = '<div class="muted">This bridge was built without Sign in with ChatGPT support.</div>';
+    return;
+  }
+  var plan = status || {};
+  var account = plan.account || null;
+  var accounts = plan.accounts || [];
+  var pending = chatgptPlanPending(plan);
+  var html = '';
+
+  if (pending) {
+    html += '<div class="plan-account">' +
+      '<span class="status"><span class="dot half-open"></span>waiting for your browser</span>' +
+      '<span class="muted">finish the sign-in in the tab that just opened — this panel updates on its own.</span>' +
+      '<button class="btn plan-cancel" type="button" data-attempt="' + esc(pending.attemptId) + '">cancel</button>' +
+      '</div>';
+    html += pending.authUrl
+      ? '<div class="muted" style="font-size:12px">browser did not open? ' +
+        '<a href="' + esc(pending.authUrl) + '" target="_blank" rel="noreferrer noopener">open the sign-in page</a>' +
+        (pending.expiresAt ? ' — that link stops working at ' + esc(chatgptPlanClock(pending.expiresAt)) : '') + '</div>'
+      : '<div class="muted" style="font-size:12px">reading the authorization URL from the bridge…</div>';
+    box.innerHTML = html;
+    return;
+  }
+
+  if (account) {
+    html += '<div class="plan-account">' +
+      '<span class="dot key-set"></span>' +
+      '<span class="who">' + esc(account.label || account.key) + '</span>' +
+      (account.key === plan.activeAccountKey ? '<span class="badge">active</span>' : '') +
+      '<span class="badge"' + (account.planUsage ? '' : ' style="border-color:var(--warn);color:var(--warn)"') + '>' +
+        (account.planUsage ? 'plan usage granted' : 'plan usage not granted') + '</span>' +
+      '<span class="muted">' + esc(chatgptPlanTokenText(account)) + '</span>' +
+      '<button class="btn danger plan-signout" type="button" data-account="' + esc(account.key) + '">sign out</button>' +
+      '</div>';
+    if (!account.planUsage) {
+      // Signed in, but the grant lacks chatgpt.tokens.use.direct: requests will
+      // not spend the plan until consent is asked for again.
+      html += '<div class="warnbox" style="margin:6px 0 0">This account is signed in, but ChatGPT plan usage was not granted — requests will not spend the plan. ' +
+        'Ask for it again and accept the scope set: ' + chatgptPlanSignInButtonHtml({ forceConsent: true }) + '</div>';
+    }
+    box.innerHTML = html;
+    return;
+  }
+
+  var saved = accounts[0];
+  var failed = state.chatgptPlanAttempt;
+  html += '<div class="plan-account">' +
+    '<span class="dot key-missing"></span>' +
+    '<span class="muted">' + (saved
+      ? 'ChatGPT plan usage was not granted for the saved account — sign in again to grant it.'
+      : 'No ChatGPT account is connected yet.') + '</span>' +
+    '</div>';
+  if (failed && failed.status === 'failed' && failed.error) {
+    html += '<div class="muted" style="font-size:12px;color:var(--bad)">The last sign-in failed: ' + esc(failed.error) + '</div>';
+  }
+  html += '<div class="plan-account">' + chatgptPlanSignInButtonHtml(saved ? { accountKey: saved.key } : null) + '</div>';
+  box.innerHTML = html;
+}
+
+/* Saved accounts, shown whenever the choice matters: more than one is saved, or
+   one is saved but no longer signed in and needs a fresh consent. */
+function renderChatGptPlanSavedAccounts(status) {
+  var box = el('chatgpt-plan-accounts');
+  if (!box) return;
+  var plan = status || {};
+  var accounts = plan.accounts || [];
+  if (chatgptPlanUnavailable || (accounts.length < 2 && (plan.signedIn || !accounts.length))) { box.innerHTML = ''; return; }
+  box.innerHTML = accounts.map(function (a) {
+    var isActive = a.key === plan.activeAccountKey;
+    return '<div class="plan-account">' +
+      '<span class="dot ' + (a.planUsage ? 'key-set' : 'key-missing') + '"></span>' +
+      '<span class="who">' + esc(a.label || a.key) + '</span>' +
+      (isActive ? '<span class="badge">active</span>' : '') +
+      '<span class="muted">' + esc(a.planUsage ? 'plan usage granted' : 'plan usage not granted') + ' · ' +
+        esc(a.expiresAt ? (a.expired ? 'token expired ' : 'token until ') + chatgptPlanClock(a.expiresAt) : 'no token expiry recorded') + '</span>' +
+      '<button class="btn plan-activate" type="button" data-account="' + esc(a.key) + '"' + (isActive ? ' disabled' : '') + '>activate</button>' +
+      '<button class="btn danger plan-signout" type="button" data-account="' + esc(a.key) + '">sign out</button>' +
+      '</div>';
+  }).join('');
+}
+
+/* Option lists are built from what the bridge last reported, never from config:
+   an account key the bridge does not know would route to nothing. */
+function renderChatGptPlanAccountOptions(preferred) {
+  var sel = el('chatgptPlanAccount');
+  if (!sel) return;
+  var keep = preferred === undefined ? sel.value : preferred;
+  var accounts = ((state.chatgptPlan || {}).accounts) || [];
+  var seen = {};
+  var opts = ['<option value="">(the active account)</option>'];
+  accounts.forEach(function (a) {
+    if (!a || !a.key || seen[a.key]) return;
+    seen[a.key] = true;
+    opts.push('<option value="' + esc(a.key) + '">' + esc(a.label || a.key) + '</option>');
+  });
+  // A stored key with no matching account stays selectable: the bridge's
+  // validator should name it, not have the page drop it on the next Apply.
+  if (keep && !seen[keep]) opts.push('<option value="' + esc(keep) + '">' + esc(keep) + ' — not signed in on this bridge</option>');
+  sel.innerHTML = opts.join('');
+  sel.value = keep || '';
+  sel.disabled = !accounts.length && !keep;
+}
+
+/* The pin list is the model slots themselves, so it is rebuilt from the chips:
+   a slot removed by hand must not stay pinnable. */
+function renderChatGptPlanPinned(preferred) {
+  var sel = el('chatgptPlanPinnedModel');
+  if (!sel) return;
+  var keep = preferred === undefined ? sel.value : preferred;
+  var chips = document.querySelectorAll('#chatgpt-plan-models .chips .chip');
+  var seen = {};
+  var opts = ['<option value="">(the first model slot)</option>'];
+  Array.prototype.forEach.call(chips, function (c) {
+    var id = c.dataset.model;
+    if (!id || seen[id]) return;
+    seen[id] = true;
+    opts.push('<option value="' + esc(id) + '">' + esc(chatgptPlanModelLabel(id)) + '</option>');
+  });
+  if (keep && !seen[keep]) opts.push('<option value="' + esc(keep) + '">' + esc(keep) + ' — not in the slots</option>');
+  sel.innerHTML = opts.join('');
+  sel.value = keep || '';
+  sel.disabled = el('chatgptPlanMode').value !== 'pinned';
+}
+
+function chatgptPlanModelLabel(id) {
+  var hit = (state.chatgptPlanModels || []).find(function (m) { return m && m.id === id; });
+  return hit && hit.name ? hit.name + ' (' + id + ')' : id;
+}
+
+/* Same chip editor as the custom lanes: the account's own catalog is only read
+   when asked for, because ModelHitch never guesses a plan model slug. */
+function chatgptPlanModelsEditorHtml(models) {
+  var chosen = models || [];
+  return '<div class="lane-models">' +
+      '<div class="chips">' + chosen.map(modelChipHtml).join('') + '</div>' +
+      '<div class="model-add-row">' +
+        '<select class="model-add"><option value="">(load the account, or type a slug)</option></select>' +
+        '<input type="text" class="model-add-custom" placeholder="type a model slug + Enter" />' +
+      '</div>' +
+      '<div class="no-models-hint">empty = the bridge reads the signed-in account catalog at startup</div>' +
+    '</div>';
+}
+
+function renderChatGptPlan() {
+  var cfg = state.config || {};
+  var plan = cfg.chatgptPlan || { enabled: false, mode: 'rotation', placement: 'lead', onLimit: 'rotate', models: [] };
+  el('chatgptPlanEnabled').value = String(!!plan.enabled);
+  el('chatgptPlanMode').value = plan.mode === 'pinned' ? 'pinned' : 'rotation';
+  el('chatgptPlanPlacement').value = plan.placement === 'fallback' ? 'fallback' : 'lead';
+  el('chatgptPlanOnLimit').value = plan.onLimit === 'stop' ? 'stop' : 'rotate';
+  el('chatgpt-plan-models').innerHTML = chatgptPlanModelsEditorHtml(plan.models || []);
+  renderChatGptPlanAccountOptions(plan.accountKey || '');
+  renderChatGptPlanPinned(plan.pinnedModel || '');
+}
+
+/* Config for the lane. Like the custom lanes this keeps whatever is on screen —
+   the bridge's validator names a missing value better than the page guesses. */
+function collectChatGptPlan() {
+  var models = Array.prototype.map.call(document.querySelectorAll('#chatgpt-plan-models .chips .chip'), function (c) { return c.dataset.model; });
+  var plan = {
+    enabled: el('chatgptPlanEnabled').value === 'true',
+    mode: el('chatgptPlanMode').value === 'pinned' ? 'pinned' : 'rotation',
+    placement: el('chatgptPlanPlacement').value === 'fallback' ? 'fallback' : 'lead',
+    // An empty list is meaningful (ask the account), so it is always sent; the
+    // keys that mean "no preference" are only sent when they are set.
+    models: models,
+    onLimit: el('chatgptPlanOnLimit').value === 'stop' ? 'stop' : 'rotate'
+  };
+  var pinnedModel = el('chatgptPlanPinnedModel').value.trim();
+  var accountKey = el('chatgptPlanAccount').value.trim();
+  if (pinnedModel) plan.pinnedModel = pinnedModel;
+  if (accountKey) plan.accountKey = accountKey;
+  return plan;
+}
+
+/* A second click while the first request is in flight would fight the bridge's
+   own one-attempt-at-a-time rule, so the buttons are held shut until it lands. */
+var chatgptPlanStarting = false;
+
+async function startChatGptPlanSignIn(body) {
+  if (chatgptPlanStarting) return;
+  chatgptPlanStarting = true;
+  try {
+    var res = await chatgptPlanApi('/v1/chatgpt-plan/sign-in', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || { registration: true })
+    });
+    state.chatgptPlanAttempt = res.attempt || null;
+    await refreshChatGptPlan();
+  } catch (err) {
+    if (chatgptPlanUnsupported(err)) { chatgptPlanUnavailable = true; renderChatGptPlanAccount(null); renderChatGptPlanSavedAccounts(null); return; }
+    showErrors(['Could not start the ChatGPT sign-in: ' + err.message]);
+  } finally {
+    chatgptPlanStarting = false;
+  }
+}
+
+async function cancelChatGptPlanSignIn(attemptId) {
+  try {
+    await chatgptPlanApi('/v1/chatgpt-plan/sign-in/' + encodeURIComponent(attemptId) + '/cancel', { method: 'POST' });
+  } catch (err) {
+    // The attempt may have settled between the click and the request; the next
+    // status poll is the authority either way.
+    if (!chatgptPlanUnsupported(err)) showErrors(['Could not cancel the ChatGPT sign-in: ' + err.message]);
+  }
+  refreshChatGptPlan();
+}
+
+async function activateChatGptPlanAccount(accountKey) {
+  try {
+    await chatgptPlanApi('/v1/chatgpt-plan/activate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accountKey: accountKey })
+    });
+    renderChatGptPlanAccountOptions(accountKey);
+    refreshChatGptPlan();
+  } catch (err) {
+    if (chatgptPlanUnsupported(err)) { chatgptPlanUnavailable = true; renderChatGptPlanAccount(null); return; }
+    showErrors(['Could not activate that ChatGPT account: ' + err.message]);
+  }
+}
+
+async function signOutChatGptPlanAccount(accountKey) {
+  var status = el('chatgpt-plan-status');
+  try {
+    var res = await chatgptPlanApi('/v1/chatgpt-plan/sign-out', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accountKey: accountKey, revoke: true })
+    });
+    if (status) {
+      // A revocation the server could not confirm is a warning, not a failure:
+      // the local tokens are gone either way.
+      status.textContent = (res.warnings && res.warnings.length)
+        ? res.warnings.join(' ')
+        : (res.revoked ? 'Signed out and revoked at ChatGPT.' : 'Signed out locally.');
+    }
+    await refreshChatGptPlan();
+  } catch (err) {
+    if (chatgptPlanUnsupported(err)) { chatgptPlanUnavailable = true; renderChatGptPlanAccount(null); return; }
+    showErrors(['Could not sign out of ChatGPT: ' + err.message]);
+  }
+}
+
+async function loadChatGptPlanModels() {
+  var status = el('chatgpt-plan-status');
+  if (status) status.textContent = 'Reading the model list from the account…';
+  try {
+    var res = await chatgptPlanApi('/v1/chatgpt-plan/models', { method: 'POST' });
+    var models = res.models || [];
+    var box = el('chatgpt-plan-models');
+    // The editor is rendered from config; a config that failed to load leaves
+    // nothing to add chips to, so it is created here rather than throwing.
+    if (!box.querySelector('.lane-models')) box.innerHTML = chatgptPlanModelsEditorHtml([]);
+    var addSel = box.querySelector('.model-add');
+    state.chatgptPlanModels = models;
+    models.forEach(function (m) { if (m && m.id) addModelChip(addSel, m.id); });
+    renderChatGptPlanPinned();
+    if (status) {
+      status.textContent = models.length
+        ? 'Loaded ' + models.length + ' model' + (models.length === 1 ? '' : 's') + ' from the account — remove the slots you do not want, then Apply.'
+        : 'The account reported no models.';
+    }
+  } catch (err) {
+    if (chatgptPlanUnsupported(err)) {
+      chatgptPlanUnavailable = true;
+      renderChatGptPlanAccount(null);
+      renderChatGptPlanSavedAccounts(null);
+      if (status) status.textContent = '';
+      return;
+    }
+    if (status) status.textContent = 'Could not read the account models: ' + err.message;
+  }
+}
+
+/* Same shape as refreshHealth(): a tick that swallows transient failures, but
+   faster, because the panel changes while the user is over in the browser. */
+async function refreshChatGptPlan() {
+  try {
+    var status = (await chatgptPlanApi('/v1/chatgpt-plan')) || {};
+    chatgptPlanUnavailable = false;
+    state.chatgptPlan = status;
+    var pending = status.pendingSignIn;
+    var known = state.chatgptPlanAttempt;
+    // The attempt record outlives the pending flag and carries the fallback
+    // authorization URL, so it is refreshed until it reaches a terminal status.
+    var attemptId = (pending && pending.attemptId) || (known && known.status === 'pending' ? known.attemptId : '');
+    if (attemptId && (!known || known.attemptId !== attemptId || known.status === 'pending')) {
+      try {
+        var res = await chatgptPlanApi('/v1/chatgpt-plan/sign-in/' + encodeURIComponent(attemptId));
+        state.chatgptPlanAttempt = res.attempt || known || null;
+      } catch (ignored) { /* the bridge may have restarted mid-attempt */ }
+    } else if (status.signedIn) {
+      state.chatgptPlanAttempt = null;
+    }
+    renderChatGptPlanAccount(status);
+    renderChatGptPlanSavedAccounts(status);
+    renderChatGptPlanAccountOptions();
+  } catch (err) {
+    if (chatgptPlanUnsupported(err)) {
+      chatgptPlanUnavailable = true;
+      renderChatGptPlanAccount(null);
+      renderChatGptPlanSavedAccounts(null);
+      return;
+    }
+    /* the bridge may be mid-restart — the next tick retries */
+  }
+}
+
+function setupChatGptPlanListeners() {
+  var load = el('chatgptPlanLoadModels');
+  if (load) load.addEventListener('click', function () { loadChatGptPlanModels(); });
+  var mode = el('chatgptPlanMode');
+  if (mode) mode.addEventListener('change', function () { renderChatGptPlanPinned(); });
+
+  document.addEventListener('click', function (ev) {
+    var t = ev.target;
+    if (!t.classList) return;
+    if (t.classList.contains('plan-signin')) {
+      // No key means no saved registration to reauthorize, so this is a fresh one.
+      startChatGptPlanSignIn(t.dataset.account ? { accountKey: t.dataset.account } : { registration: true });
+    } else if (t.classList.contains('plan-force-consent')) {
+      startChatGptPlanSignIn({ forceConsent: true });
+    } else if (t.classList.contains('plan-cancel')) {
+      cancelChatGptPlanSignIn(t.dataset.attempt);
+    } else if (t.classList.contains('plan-activate')) {
+      activateChatGptPlanAccount(t.dataset.account);
+    } else if (t.classList.contains('plan-signout')) {
+      signOutChatGptPlanAccount(t.dataset.account);
+    }
+    // Chip edits run through the page-wide lane listeners, which were registered
+    // first — so the pin list is rebuilt from the DOM as it now stands.
+    if (t.closest && t.closest('#chatgpt-plan-models')) renderChatGptPlanPinned();
+  });
+  document.addEventListener('change', function (ev) {
+    var t = ev.target;
+    if (t.closest && t.closest('#chatgpt-plan-models')) renderChatGptPlanPinned();
+  });
+  document.addEventListener('keydown', function (ev) {
+    var t = ev.target;
+    if (ev.key === 'Enter' && t.closest && t.closest('#chatgpt-plan-models')) renderChatGptPlanPinned();
+  });
 }
 
 // ---- catalog (advanced) --------------------------------------------------
@@ -1137,6 +1832,8 @@ function assemble() {
     imageGeneration: collectImageGeneration(),
     cloudAgent: collectCloudAgent(),
     opencodeByok: collectOpenCodeByok(),
+    customLanes: collectCustomLanes(),
+    chatgptPlan: collectChatGptPlan(),
     keys: collectKeys()
   };
 }
@@ -1149,8 +1846,9 @@ async function loadAll() {
     state.builtin = cat.builtin || [];
     var models = await api('/v1/models');
     state.models = models.data || [];
-    renderImageGeneration(); renderCloudAgent(); renderWorkspaceTarget(); renderProviders(); renderOpenCode(); renderOpenCodeByok(); renderCatalog(); renderPolicy(); renderReliability();
+    renderImageGeneration(); renderCloudAgent(); renderWorkspaceTarget(); renderProviders(); renderOpenCode(); renderOpenCodeByok(); renderCustomLanes(); renderChatGptPlan(); renderCatalog(); renderPolicy(); renderReliability();
     refreshHealth();
+    refreshChatGptPlan();
   } catch (err) {
     showErrors(['Failed to load settings: ' + err.message]);
   }
@@ -1201,6 +1899,17 @@ document.addEventListener('click', function (ev) {
     renderByokPinOptions();
     return;
   }
+  if (t.classList && t.classList.contains('custom-remove')) {
+    var laneEl = t.closest('.custom-lane');
+    var box = laneEl.parentNode;
+    laneEl.remove();
+    // Removing the last lane should leave the same "add one" prompt the section
+    // starts with, not a silently empty box.
+    if (box && !box.querySelector('.custom-lane')) {
+      box.innerHTML = '<div class="empty">no custom lanes yet — add one when your provider is not in the list above</div>';
+    }
+    return;
+  }
   if (t.classList && t.classList.contains('add-lane')) {
     var group = t.dataset.into;
     var box = el(group + '-lanes');
@@ -1238,6 +1947,15 @@ document.addEventListener('change', function (ev) {
   }
   if (t.classList && t.classList.contains('byok-id')) {
     renderByokPinOptions();
+    return;
+  }
+  if (t.classList && t.classList.contains('custom-id')) {
+    // The provider id (and therefore the key slot) follows the lane id, so the
+    // hint has to follow it too.
+    var row = t.closest('.custom-lane');
+    var hint = row.querySelector('.no-models-hint.mono');
+    var laneId = t.value.trim();
+    if (hint) hint.textContent = laneId ? customEnvVar(laneId) : 'env fallback: MODELHITCH_CUSTOM_<ID>_API_KEY';
     return;
   }
 });
@@ -1312,9 +2030,25 @@ function setupByokListeners() {
   });
 }
 
+function setupCustomLaneListeners() {
+  var add = el('customAdd');
+  if (add) add.addEventListener('click', function () {
+    var box = el('custom-lanes');
+    var empty = box.querySelector('.empty');
+    if (empty) empty.remove();
+    box.insertAdjacentHTML('beforeend', customLaneRowHtml({ enabled: true, schema: 'auto', onLimit: 'rotate', models: [] }));
+    el('customEnabled').value = 'true';
+  });
+}
+
 setupOpenCodeListeners();
 setupByokListeners();
+setupCustomLaneListeners();
+setupChatGptPlanListeners();
 setInterval(refreshHealth, 5000);
+// The account panel changes while the user is over in the browser, so it polls
+// faster than lane health.
+setInterval(refreshChatGptPlan, 2000);
 loadAll();
 </script>
 </body>

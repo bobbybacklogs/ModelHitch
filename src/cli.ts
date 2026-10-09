@@ -42,8 +42,10 @@ import {
   readConfigFile,
   writeConfigFile,
 } from './config-file.js';
-import type { ModelHitchConfig, OpenCodeByokConnection } from './config.js';
+import type { CustomLaneConfig, ModelHitchConfig, OpenCodeByokConnection } from './config.js';
 import { OPENCODE_BYOK_SCHEMAS } from './config.js';
+import type { CustomLaneSchema } from './providers/custom-lane.js';
+import { CUSTOM_LANE_SCHEMAS } from './providers/custom-lane.js';
 import type { OpenCodeByokSchema } from './providers/opencode-byok.js';
 import { MemoryKeyStore } from './storage/memory.js';
 import { CircuitBreaker } from './core/circuit-breaker.js';
@@ -53,6 +55,23 @@ import { bridgeProviders } from './bridge-providers.js';
 import { defaultProviders } from './registry.js';
 import { applyOpenCodeByokPlan, describeOpenCodeByokPlan, openCodeByokApiKeys } from './opencode-byok.js';
 import type { OpenCodeLocalState } from './opencode-byok.js';
+import { applyCustomLanesPlan, customLaneApiKeys, describeCustomLanesPlan } from './custom-lanes.js';
+import {
+  applyChatGptPlanPlan,
+  CHATGPT_PLAN_PROVIDER_ID,
+  CHATGPT_PLAN_USAGE_SETTINGS_URL,
+  chatGptPlanConfig,
+  describeChatGptPlan,
+  resolveChatGptPlan,
+} from './chatgpt-plan.js';
+import type { ChatGptPlanConfig } from './config.js';
+import {
+  ChatGptPlanAuth,
+  describeChatGptPlanAccount,
+  defaultChatGptPlanCredentialsPath,
+} from './chatgpt-plan-auth.js';
+import { listChatGptPlanAccountModels } from './chatgpt-plan-lane.js';
+import { createChatGptPlanProvider } from './providers/chatgpt-plan.js';
 import { readOpenCodeLocalState } from './opencode-state.js';
 import { validateCursorCloudApiKey, CURSOR_CLOUD_PROVIDER_ID } from './providers/cursor-cloud.js';
 import { CursorCloudSessionStore } from './providers/cursor-cloud-session.js';
@@ -223,6 +242,78 @@ function mergeOpenCodeByokConnections(
 }
 
 /**
+ * Parse the repeatable custom-lane flags in argv order, so
+ * `--custom-lane <id> --custom-lane-url <url> --custom-lane-models a,b` scopes
+ * the URL and models to the lane that immediately precedes them.
+ */
+function customLanesFromArgs(argv: string[] = process.argv): CustomLaneConfig[] {
+  const lanes: CustomLaneConfig[] = [];
+  const last = () => lanes[lanes.length - 1];
+  for (let i = 0; i < argv.length; i++) {
+    const { name, inline } = splitFlag(argv[i] ?? '');
+    if (!name.startsWith('--custom-lane')) continue;
+    const next = argv[i + 1];
+    const spaced = inline === undefined && next !== undefined && !next.startsWith('--') ? next : undefined;
+    const value = inline ?? spaced;
+    const consumed = spaced !== undefined;
+    switch (name) {
+      case '--custom-lane':
+        // A lane is not usable without an endpoint and models, so it is created
+        // here and completed by the flags that follow.
+        if (value) lanes.push({ id: value, baseUrl: '', models: [], enabled: true });
+        if (consumed) i++;
+        break;
+      case '--custom-lane-label':
+        if (value && last()) last()!.label = value;
+        if (consumed) i++;
+        break;
+      case '--custom-lane-url':
+        if (value && last()) last()!.baseUrl = value;
+        if (consumed) i++;
+        break;
+      case '--custom-lane-models':
+        if (value && last()) last()!.models = value.split(',').map((m) => m.trim()).filter(Boolean);
+        if (consumed) i++;
+        break;
+      case '--custom-lane-schema':
+        if (value && last() && CUSTOM_LANE_SCHEMAS.includes(value as CustomLaneSchema)) {
+          last()!.schema = value as CustomLaneSchema;
+        }
+        if (consumed) i++;
+        break;
+      case '--custom-lane-on-limit':
+        if (value && last() && (value === 'rotate' || value === 'stop')) last()!.onLimit = value;
+        if (consumed) i++;
+        break;
+      default:
+        break;
+    }
+  }
+  return lanes;
+}
+
+/** Replace same-id custom lanes in place, append the rest. */
+function mergeCustomLanes(
+  existing: readonly CustomLaneConfig[],
+  incoming: readonly CustomLaneConfig[],
+): CustomLaneConfig[] {
+  const out = existing.map((lane) => ({ ...lane }));
+  for (const lane of incoming) {
+    const index = out.findIndex((candidate) => candidate.id === lane.id);
+    if (index === -1) out.push({ ...lane });
+    else {
+      // The flags that were actually passed win; an unset flag never erases a
+      // stored endpoint or model list.
+      const merged: CustomLaneConfig = { ...out[index], ...lane };
+      if (!lane.baseUrl && out[index]?.baseUrl) merged.baseUrl = out[index]!.baseUrl;
+      if (!lane.models?.length && out[index]?.models?.length) merged.models = out[index]!.models;
+      out[index] = merged;
+    }
+  }
+  return out;
+}
+
+/**
  * Turn the local OpenCode snapshot into BYOK connection candidates: one per
  * provider the user actually runs, carrying the models they actually chose.
  * The id is the OpenCode provider name, which the user replaces with the
@@ -314,6 +405,38 @@ OpenCode Console BYOK flags (https://opencode.ai/v2/docs/console/byok/):
   (or OPENCODE_API_KEY) is reused, with keys.opencode-byok / keys.opencode-byok-<slug>
   as per-connection overrides.
 
+Custom BYOK lane flags (a provider we do not ship, used as an ordinary lane):
+  --custom-lanes                 enable custom lanes (alias: --no-custom-lanes)
+  --custom-lane <id>             add a lane by id (repeatable; becomes provider custom-<id>)
+  --custom-lane-url <url>        endpoint for the preceding lane, e.g. https://api.example.com/v1
+  --custom-lane-models <a,b>     model slots for the preceding lane — typed by hand, never polled
+  --custom-lane-label <text>     label for the preceding lane
+  --custom-lane-schema <s>       auto (default) | chat-completions | responses | anthropic | google
+  --custom-lane-on-limit <b>     rotate (default) or stop
+  --custom-lanes-placement <p>   lead (default) or fallback
+  Keys resolve from keys.custom-<id>, then the lane's apiKeyEnvVar, then
+  MODELHITCH_CUSTOM_<ID>_API_KEY. ModelHitch never calls GET /models on a custom
+  lane: the slots you type are exactly what the lane serves.
+  on-limit=stop makes the lane terminal: a rate limit or empty account surfaces
+  instead of spending another provider, and stays that way while it is parked.
+
+Sign in with ChatGPT flags (spend the user's ChatGPT plan as a lane):
+  --chatgpt-plan                 enable the chatgpt-plan lane (alias: --no-chatgpt-plan)
+  --chatgpt-plan-models <a,b>    model slugs for the lane; omit to read the signed-in account
+  --chatgpt-plan-mode <m>        rotation (default) or pinned
+  --chatgpt-plan-pin <slug>      model to lead when mode is pinned
+  --chatgpt-plan-placement <p>   lead (default) or fallback
+  --chatgpt-plan-on-limit <b>    rotate (default) or stop
+  --chatgpt-plan-account <key>   saved account to serve this lane (default: the active one)
+  modelhitch chatgpt-plan sign-in [--account <key>] [--register] [--force-consent] [--no-open]
+  modelhitch chatgpt-plan status [--json] | models | accounts | use --account <key> | sign-out
+  The lane is provider id chatgpt-plan: route explicitly as chatgpt-plan/<slug>, or
+  rotate/pin it with the flags above. Tokens live in
+  ~/.modelhitch/chatgpt-plan.json (mode 0600), never in config.json, and never in
+  an API key. Sign-in happens in your system browser through a loopback callback;
+  no client secret is involved. Requests set store:false and stream:true, which
+  this route requires, so temperature and maxTokens are not sent.
+
 Setup options (with \`setup <agent>\` or \`setup zstack [agent]\`):
   modelhitch setup codex                         install to the agent user skill directory
   modelhitch setup all --project                 install project skills for all four agents
@@ -377,6 +500,16 @@ async function runBridge(): Promise<void> {
   const byokSync = argsHasFlag(['--opencode-byok-sync']) ? true : argsHasFlag(['--no-opencode-byok-sync']) ? false : undefined;
   const byokConnections = openCodeByokConnectionsFromArgs();
   const byokImport = argsHasFlag(['--opencode-byok-import']);
+  const customFlag = argsHasFlag(['--custom-lanes']) ? true : argsHasFlag(['--no-custom-lanes']) ? false : undefined;
+  const customPlacementFlag = flagValue('--custom-lanes-placement');
+  const customLaneArgs = customLanesFromArgs();
+  const chatgptPlanFlag = argsHasFlag(['--chatgpt-plan']) ? true : argsHasFlag(['--no-chatgpt-plan']) ? false : undefined;
+  const chatgptPlanMode = flagValue('--chatgpt-plan-mode');
+  const chatgptPlanPin = flagValue('--chatgpt-plan-pin');
+  const chatgptPlanPlacement = flagValue('--chatgpt-plan-placement');
+  const chatgptPlanOnLimit = flagValue('--chatgpt-plan-on-limit');
+  const chatgptPlanAccount = flagValue('--chatgpt-plan-account');
+  const chatgptPlanModelsFlag = flagValue('--chatgpt-plan-models');
   // Reading the local OpenCode install costs a DB scan, so it stays lazy: the
   // import flag reads it now, `syncFromOpenCode` reads it when providers are
   // built, and the settings UI reads it through /v1/opencode-state on demand.
@@ -467,6 +600,75 @@ async function runBridge(): Promise<void> {
       return;
     }
   }
+  if (customPlacementFlag !== undefined && customPlacementFlag !== 'lead' && customPlacementFlag !== 'fallback') {
+    console.error(`--custom-lanes-placement must be "lead" or "fallback" (got "${customPlacementFlag}").`);
+    process.exitCode = 1;
+    return;
+  }
+  if (customFlag !== undefined || customPlacementFlag !== undefined || customLaneArgs.length > 0) {
+    const existing = config.customLanes;
+    const lanes = mergeCustomLanes(existing?.lanes ?? [], customLaneArgs);
+    // Naming a lane is a request to use it: only an explicit --no-custom-lanes
+    // (or a document that already disabled the block) keeps the block off.
+    const enabled = customFlag ?? (customLaneArgs.length > 0 ? true : existing?.enabled ?? lanes.length > 0);
+    config.customLanes = {
+      enabled,
+      placement: customPlacementFlag === 'lead' || customPlacementFlag === 'fallback'
+        ? customPlacementFlag
+        : existing?.placement ?? 'lead',
+      lanes,
+    };
+  }
+  if (
+    chatgptPlanFlag !== undefined ||
+    chatgptPlanMode !== undefined ||
+    chatgptPlanPin !== undefined ||
+    chatgptPlanPlacement !== undefined ||
+    chatgptPlanOnLimit !== undefined ||
+    chatgptPlanAccount !== undefined ||
+    chatgptPlanModelsFlag !== undefined
+  ) {
+    const existing = chatGptPlanConfig(config);
+    if (chatgptPlanMode !== undefined && chatgptPlanMode !== 'rotation' && chatgptPlanMode !== 'pinned') {
+      console.error(`--chatgpt-plan-mode must be "rotation" or "pinned" (got "${chatgptPlanMode}").`);
+      process.exitCode = 1;
+      return;
+    }
+    if (chatgptPlanPlacement !== undefined && chatgptPlanPlacement !== 'lead' && chatgptPlanPlacement !== 'fallback') {
+      console.error(`--chatgpt-plan-placement must be "lead" or "fallback" (got "${chatgptPlanPlacement}").`);
+      process.exitCode = 1;
+      return;
+    }
+    if (chatgptPlanOnLimit !== undefined && chatgptPlanOnLimit !== 'rotate' && chatgptPlanOnLimit !== 'stop') {
+      console.error(`--chatgpt-plan-on-limit must be "rotate" or "stop" (got "${chatgptPlanOnLimit}").`);
+      process.exitCode = 1;
+      return;
+    }
+    // Naming a model slot is a request to use the lane, matching the
+    // custom-lane rule: only an explicit --no-chatgpt-plan turns it back off.
+    const enabled = chatgptPlanFlag ?? (chatgptPlanModelsFlag !== undefined ? true : existing?.enabled ?? false);
+    const models = chatgptPlanModelsFlag !== undefined
+      ? [...new Set(chatgptPlanModelsFlag.split(',').map((m) => m.trim()).filter(Boolean))]
+      : existing?.models ?? [];
+    const block: ChatGptPlanConfig = {
+      enabled,
+      mode: chatgptPlanMode === 'rotation' || chatgptPlanMode === 'pinned' ? chatgptPlanMode : existing?.mode ?? 'rotation',
+      placement:
+        chatgptPlanPlacement === 'lead' || chatgptPlanPlacement === 'fallback'
+          ? chatgptPlanPlacement
+          : existing?.placement ?? 'lead',
+      onLimit:
+        chatgptPlanOnLimit === 'rotate' || chatgptPlanOnLimit === 'stop'
+          ? chatgptPlanOnLimit
+          : existing?.onLimit ?? 'rotate',
+      models,
+    };
+    if (chatgptPlanPin !== undefined) block.pinnedModel = chatgptPlanPin;
+    else if (existing?.pinnedModel) block.pinnedModel = existing.pinnedModel;
+    if (chatgptPlanAccount !== undefined) block.accountKey = chatgptPlanAccount;
+    else if (existing?.accountKey) block.accountKey = existing.accountKey;
+    config.chatgptPlan = block;
+  }
   // Merge env-sourced keys so a bridge without a written keys block still works
   // (and the settings UI can show which providers already have credentials).
   config.keys = keysFromEnv(config.keys ?? {});
@@ -510,19 +712,81 @@ async function runBridge(): Promise<void> {
     }
   }
   const byokState = config.opencodeByok?.syncFromOpenCode ? openCodeStateLazy() : openCodeState;
-  const providers = bridgeProviders(baseProviders, config, cloudSessionStore, { openCodeState: byokState });
+  // Sign in with ChatGPT: the credential store is created before the provider
+  // set so the lane can be built with it. It owns the token file and the
+  // sign-in flow, and the server's account routes read it through a small
+  // adapter below.
+  const chatgptPlanAuth = new ChatGptPlanAuth({ path: defaultChatGptPlanCredentialsPath() });
+  /**
+   * Model slugs the lane serves.
+   *
+   * The config wins when it names slots. Otherwise the signed-in account is
+   * asked once at startup, because ChatGPT plan catalogs are account-specific
+   * and a guessed slug would be a lane that 404s.
+   */
+  let chatgptPlanAccountModels: string[] = [];
+  const refreshChatGptPlanAccountModels = async (): Promise<string[]> => {
+    if (chatGptPlanConfig(config)?.models?.length) {
+      chatgptPlanAccountModels = [];
+      return chatgptPlanAccountModels;
+    }
+    chatgptPlanAccountModels = await listChatGptPlanAccountModels({ tokens: chatgptPlanAuth });
+    return chatgptPlanAccountModels;
+  };
+  if (config.chatgptPlan?.enabled) await refreshChatGptPlanAccountModels();
+
+  const chatgptPlanContext = () => ({
+    chatgptPlanTokens: chatgptPlanAuth,
+    chatgptPlanAccountModels,
+  });
+  const providers = bridgeProviders(baseProviders, config, cloudSessionStore, {
+    openCodeState: byokState,
+    ...chatgptPlanContext(),
+  });
   await validateCloudAgentKey(config);
 
-  // Console BYOK joins the lane plan: rotation puts every connection × model at
-  // the front of the plan, pinned keeps one connection primary. Both leave the
-  // configured policy directly behind as the fallback.
-  const byokPlan = applyOpenCodeByokPlan({
-    config,
-    policy: policyFromConfig(config),
-    defaultProviderId: config.defaultProviderId,
-    defaultModel: config.defaultModel,
-    state: byokState,
-  });
+  /**
+   * Compose the routing plan from the current config and runtime state.
+   *
+   * Three blocks layer in a fixed order, each one merging on top of the last:
+   *
+   *   OpenCode BYOK   rotation puts every connection × model at the front and
+   *                   pinned keeps one connection primary; either way the
+   *                   configured policy sits directly behind as the fallback.
+   *   custom lanes    `lead` puts them in front of everything (adding a lane is
+   *                   a request to route to it), `fallback` appends them behind
+   *                   the buffet as a last resort.
+   *   ChatGPT plan    same two choices, merged last so `lead` makes the plan
+   *                   the primary route with the whole stack behind it.
+   *
+   * One function because three call sites need the identical result: startup,
+   * a settings Apply, and a ChatGPT sign-in or account switch.
+   */
+  const composePlan = (state: OpenCodeLocalState | undefined) => {
+    const byokPlan = applyOpenCodeByokPlan({
+      config,
+      policy: policyFromConfig(config),
+      defaultProviderId: config.defaultProviderId,
+      defaultModel: config.defaultModel,
+      state,
+    });
+    const customPlan = applyCustomLanesPlan({
+      config,
+      policy: byokPlan.policy,
+      defaultProviderId: byokPlan.defaultProviderId,
+      defaultModel: byokPlan.defaultModel,
+    });
+    const chatgptPlan = applyChatGptPlanPlan({
+      config,
+      policy: customPlan.policy,
+      defaultProviderId: customPlan.defaultProviderId,
+      defaultModel: customPlan.defaultModel,
+      accountModels: chatgptPlanAccountModels,
+    });
+    return { byokPlan, customPlan, chatgptPlan };
+  };
+
+  const { byokPlan, customPlan, chatgptPlan } = composePlan(byokState);
   // `--provider <id>` pins routing for the life of this process only.
   if (pinnedProviderId && !providers.some((p) => p.id === pinnedProviderId)) {
     console.error(
@@ -534,20 +798,37 @@ async function runBridge(): Promise<void> {
 
   const server = createModelHitchServer({
     providers,
-    defaultProviderId: pinnedProviderId ?? byokPlan.defaultProviderId ?? config.defaultProviderId ?? 'vercel-ai-gateway',
-    defaultModel: pinnedProviderId ? config.defaultModel : byokPlan.defaultModel ?? config.defaultModel,
+    defaultProviderId: pinnedProviderId ?? chatgptPlan.defaultProviderId ?? config.defaultProviderId ?? 'vercel-ai-gateway',
+    defaultModel: pinnedProviderId ? config.defaultModel : chatgptPlan.defaultModel ?? config.defaultModel,
     pinnedProviderId,
     openCodeState: () => openCodeStateLazy(),
+    // The account panel and sign-in flow for the ChatGPT plan lane. Sign-in
+    // finishes on its own loopback listener, so the page polls status rather
+    // than waiting on a request here.
+    chatGptPlan: {
+      status: () => chatgptPlanAuth.status(),
+      beginSignIn: (options) => chatgptPlanAuth.beginSignIn(options),
+      signInAttempt: (attemptId) => chatgptPlanAuth.signInAttempt(attemptId),
+      cancelSignIn: (attemptId) => chatgptPlanAuth.cancelSignIn(attemptId),
+      signOut: (options) => chatgptPlanAuth.signOut(options),
+      activate: (accountKey) => chatgptPlanAuth.activate(accountKey),
+      // Deliberately independent of `enabled`: the settings page loads the
+      // account's catalog before the user turns the lane on.
+      listModels: async () => {
+        const probe = createChatGptPlanProvider({ tokens: chatgptPlanAuth });
+        return probe.listModels ? probe.listModels({}) : [];
+      },
+    },
     imageGeneration: config.imageGeneration,
     cloudAgent: config.cloudAgent,
     maxBodyBytes,
-    policy: byokPlan.policy,
+    policy: chatgptPlan.policy,
     cooldown,
     catalogSource,
     keystore,
     // Keys from the config file / env are available from the very first request —
     // no Apply needed for keys already stored locally.
-    apiKeys: { ...config.keys, ...openCodeByokApiKeys(config, { state: byokState }) },
+    apiKeys: { ...config.keys, ...openCodeByokApiKeys(config, { state: byokState }), ...customLaneApiKeys(config) },
     usagePersistence: true,
     logger: (line) => console.log(line),
     onFailover: (event) =>
@@ -582,7 +863,7 @@ async function runBridge(): Promise<void> {
         // Apply immediately — hot reload. Optional fields absent from the
         // incoming document must be cleared first: Object.assign alone would
         // keep stale values (e.g. a catalog block the UI just unchecked).
-        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'defaultWorkspaceTarget', 'cooldown', 'imageGeneration', 'cloudAgent', 'opencodeByok'] as const) {
+        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'defaultWorkspaceTarget', 'cooldown', 'imageGeneration', 'cloudAgent', 'opencodeByok', 'customLanes', 'chatgptPlan'] as const) {
           delete (config as unknown as Record<string, unknown>)[k];
         }
         Object.assign(config, asConfig);
@@ -594,21 +875,19 @@ async function runBridge(): Promise<void> {
           // change, so re-read the OpenCode install when the block asks for it.
           const state = config.opencodeByok?.syncFromOpenCode ? readOpenCodeLocalState() : undefined;
           openCodeStateCache = state;
-          const applyProviders = (base: Provider[]) => bridgeProviders(base, config, cloudSessionStore, { openCodeState: state });
-          const plan = applyOpenCodeByokPlan({
-            config,
-            policy: policyFromConfig(config),
-            defaultProviderId: config.defaultProviderId,
-            defaultModel: config.defaultModel,
-            state,
-          });
+          // The ChatGPT plan block may have just been scoped to new model
+          // slots, or turned on for an account that is already signed in.
+          await refreshChatGptPlanAccountModels();
+          const applyProviders = (base: Provider[]) =>
+            bridgeProviders(base, config, cloudSessionStore, { openCodeState: state, ...chatgptPlanContext() });
+          const plan = composePlan(state);
           const routeDefaults = {
-            defaultProviderId: pinnedProviderId ?? plan.defaultProviderId ?? config.defaultProviderId,
-            defaultModel: pinnedProviderId ? config.defaultModel : plan.defaultModel ?? config.defaultModel,
+            defaultProviderId: pinnedProviderId ?? plan.chatgptPlan.defaultProviderId ?? config.defaultProviderId,
+            defaultModel: pinnedProviderId ? config.defaultModel : plan.chatgptPlan.defaultModel ?? config.defaultModel,
             pinnedProviderId,
             openCodeState: () => openCodeStateLazy(),
-            policy: plan.policy,
-            apiKeys: { ...config.keys, ...openCodeByokApiKeys(config, { state }) },
+            policy: plan.chatgptPlan.policy,
+            apiKeys: { ...config.keys, ...openCodeByokApiKeys(config, { state }), ...customLaneApiKeys(config) },
           };
           if (wantsCatalog && !catalogSource) {
             const src = createCatalogSource({ ...nextCatalog, registry: defaultProviders });
@@ -655,10 +934,42 @@ async function runBridge(): Promise<void> {
     },
   });
 
+  /**
+   * Re-plan and push to the running server.
+   *
+   * Signing in, signing out, or switching accounts changes which model slugs
+   * the lane serves, so the provider set and the routing plan both have to be
+   * rebuilt. Without this the lane would only appear after a restart, and the
+   * settings page would show a signed-in account that serves nothing.
+   */
+  const applyChatGptPlanChange = async (): Promise<void> => {
+    await refreshChatGptPlanAccountModels();
+    const state = openCodeStateCache;
+    const plan = composePlan(state);
+    server.reconfigure({
+      providers: bridgeProviders(catalogSource ? catalogSource.providers() : baseProviders, config, cloudSessionStore, {
+        openCodeState: state,
+        ...chatgptPlanContext(),
+      }),
+      policy: plan.chatgptPlan.policy,
+      defaultProviderId: pinnedProviderId ?? plan.chatgptPlan.defaultProviderId ?? config.defaultProviderId,
+      defaultModel: pinnedProviderId ? config.defaultModel : plan.chatgptPlan.defaultModel ?? config.defaultModel,
+    });
+    const summary = describeChatGptPlan(plan.chatgptPlan);
+    if (summary) console.log(`[chatgpt-plan] ${summary}`);
+  };
+  chatgptPlanAuth.onAccountChange(() => {
+    void applyChatGptPlanChange().catch((err: unknown) => {
+      console.error(`[chatgpt-plan] Could not apply the account change: ${(err as Error).message}`);
+    });
+  });
+
   const { url } = await server.listen(port, host);
   const byokSummary = describeOpenCodeByokPlan(byokPlan, config);
+  const customSummary = describeCustomLanesPlan(customPlan);
+  const chatgptPlanSummary = describeChatGptPlan(chatgptPlan);
   console.log(`\nModelHitch bridge v${VERSION} listening on ${url}
-${pinnedProviderId ? `\nPinned to provider: ${pinnedProviderId} (--provider; other providers are used only when it is depleted or erroring)\n` : ''}${byokSummary ? `\n${byokSummary}\n` : ''}
+${pinnedProviderId ? `\nPinned to provider: ${pinnedProviderId} (--provider; other providers are used only when it is depleted or erroring)\n` : ''}${byokSummary ? `\n${byokSummary}\n` : ''}${customSummary ? `\n${customSummary}\n` : ''}${chatgptPlanSummary ? `\n${chatgptPlanSummary}\n` : ''}${chatgptPlanAuth.status().signedIn ? '' : chatGptPlanConfig(config)?.enabled ? `\nSign in to your ChatGPT account to serve this lane: open ${url}/settings (or run \`modelhitch chatgpt-plan sign-in\`).\n` : ''}
 Point any OpenAI-compatible client (Android Studio Agent Mode, JetBrains AI,
 Cursor, Codex CLI, Claude Code, Gemini CLI, ...) at:
 
@@ -1039,10 +1350,149 @@ async function runWebWorkspace(): Promise<void> {
   await openBridgePage('/workspace', 'workspace');
 }
 
+/**
+ * `modelhitch chatgpt-plan …` — the Sign in with ChatGPT account surface from
+ * a terminal, for the same credential file the bridge and /settings use.
+ *
+ * The bridge is not required: sign in here, then start (or restart) the bridge
+ * and the lane serves against the saved account.
+ */
+async function runChatGptPlanCommand(args: string[]): Promise<void> {
+  const sub = args[0] ?? 'status';
+  const auth = new ChatGptPlanAuth({ path: defaultChatGptPlanCredentialsPath() });
+
+  if (sub === 'status') {
+    const status = auth.status();
+    if (args.includes('--json')) {
+      console.log(JSON.stringify(status, null, 2));
+      return;
+    }
+    console.log(`Credentials: ${status.credentialsPath}`);
+    console.log(`Host id:     ${status.hostId}`);
+    if (!status.signedIn) {
+      console.log('\nNo ChatGPT account is signed in.');
+      console.log('Sign in with: modelhitch chatgpt-plan sign-in');
+      return;
+    }
+    for (const account of status.accounts) {
+      const marker = account.active ? '*' : ' ';
+      const plan = account.planUsage ? 'plan usage enabled' : 'plan usage NOT granted';
+      const expiry = account.expiresAt ? `access token expires ${account.expiresAt}` : 'no expiry recorded';
+      console.log(`${marker} ${account.label} — ${plan} — ${expiry}`);
+      console.log(`    ${describeChatGptPlanAccount(auth.accounts().find((a) => a.key === account.key)!)}`);
+    }
+    console.log(`\nManage plan and per-app limits: ${CHATGPT_PLAN_USAGE_SETTINGS_URL}`);
+    return;
+  }
+
+  if (sub === 'sign-in') {
+    const accountKey = flagValue('--account');
+    const registration = argsHasFlag(['--register']);
+    const forceConsent = argsHasFlag(['--force-consent']);
+    const noOpen = argsHasFlag(['--no-open']);
+    try {
+      const attempt = await auth.beginSignIn({
+        ...(accountKey ? { accountKey } : {}),
+        ...(registration ? { registration: true } : {}),
+        ...(forceConsent ? { forceConsent: true } : {}),
+        open: !noOpen,
+      });
+      console.log(`${noOpen ? 'Open this URL to sign in with ChatGPT:' : 'Opened your browser to sign in with ChatGPT.'}`);
+      console.log(`\n  ${attempt.authUrl}\n`);
+      console.log('Waiting for the browser to come back… (Ctrl+C to cancel)');
+      const account = await auth.waitForSignIn(attempt.attemptId);
+      console.log(`\nSigned in as ${account.label}.`);
+      if (!account.planUsage) {
+        console.log(
+          'ChatGPT plan usage was NOT granted, so this lane cannot spend the plan yet.\n' +
+            `Re-request it with: modelhitch chatgpt-plan sign-in --force-consent\n` +
+            `Or enable it in ChatGPT settings: ${CHATGPT_PLAN_USAGE_SETTINGS_URL}`,
+        );
+        return;
+      }
+      console.log('Eligible requests can now use your ChatGPT plan.');
+    } catch (err) {
+      console.error(`Sign-in failed: ${(err as Error).message}`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (sub === 'models') {
+    const models = await listChatGptPlanAccountModels({ tokens: auth });
+    if (!models.length) {
+      console.error(
+        'No models were returned. Sign in first (modelhitch chatgpt-plan sign-in), or the account catalogue could not be read.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+    for (const model of models) console.log(model);
+    console.log(`\nUse them as chatgpt-plan/<slug>. Add slots to the lane with:`);
+    console.log(`  modelhitch bridge --chatgpt-plan --chatgpt-plan-models ${models.slice(0, 3).join(',')}`);
+    return;
+  }
+
+  if (sub === 'accounts') {
+    const accounts = auth.status().accounts;
+    if (!accounts.length) {
+      console.log('No saved ChatGPT accounts.');
+      return;
+    }
+    for (const account of accounts) {
+      console.log(`${account.active ? '*' : ' '} ${account.label}`);
+      console.log(`    key: ${account.key}`);
+    }
+    return;
+  }
+
+  if (sub === 'use') {
+    const accountKey = flagValue('--account') ?? args[1];
+    if (!accountKey) {
+      console.error('Usage: modelhitch chatgpt-plan use --account <accountKey>');
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      auth.activate(accountKey);
+      console.log(`Active ChatGPT account: ${auth.describeAccount()}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (sub === 'sign-out') {
+    const accountKey = flagValue('--account');
+    try {
+      const result = await auth.signOut({
+        ...(accountKey ? { accountKey } : {}),
+        ...(argsHasFlag(['--no-revoke']) ? { revoke: false } : {}),
+      });
+      console.log(
+        result.revoked
+          ? 'Signed out and revoked the renewable session.'
+          : 'Signed out locally. Remote revocation was skipped or not confirmed.',
+      );
+      for (const warning of result.warnings) console.warn(`  ! ${warning}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  console.error(`Unknown chatgpt-plan subcommand: ${sub}`);
+  console.error('  status | sign-in | models | accounts | use | sign-out');
+  process.exitCode = 1;
+}
+
 /** Logo is for interactive help; keep background/status/stop output script-friendly. */
 function shouldPrintLogo(args: string[]): boolean {
   const [cmd] = args;
   if (cmd === 'settings' || cmd === 'status' || cmd === 'stop') return false;
+  if (cmd === 'chatgpt-plan') return false;
   if (cmd === '-v' || cmd === '--version') return false;
   if (cmd === 'bridge' && (args.includes('--background') || args.includes('-b'))) return false;
   return true;
@@ -1099,6 +1549,9 @@ async function main(): Promise<void> {
       break;
     case 'cloud':
       await runCloudCommand(args.slice(1));
+      break;
+    case 'chatgpt-plan':
+      await runChatGptPlanCommand(args.slice(1));
       break;
     case 'workspace':
       await runWebWorkspace();
