@@ -34,9 +34,15 @@ beforeAll(() => {
 afterAll(async () => {
   // The killed `node` child releases its handle on the sandbox directory a
   // moment after the kill lands, and Windows refuses to remove a directory with
-  // a live handle. Give it that moment, then retry.
+  // a live handle. Give it that moment, then retry — and treat a survivor as
+  // scratch, not a failure: this is teardown, and a sync client (OneDrive) or a
+  // loaded machine can hold the handle past the whole retry budget.
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_000));
-  rmSync(SANDBOX, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
+  try {
+    rmSync(SANDBOX, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
+  } catch {
+    /* leftover scratch directory — never a test result */
+  }
 });
 
 describe('parseToolTimeout', () => {

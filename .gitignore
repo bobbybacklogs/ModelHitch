@@ -13,6 +13,8 @@ android-sdk/local.properties
 modelhitch-dotnet/**/bin/
 modelhitch-dotnet/**/obj/
 modelhitch-dotnet/artifacts/
+# Harness test scratch dirs (created and removed per run)
+tests/.tmp-*/
 *.log
 .DS_Store
 .env
