@@ -153,6 +153,25 @@ async function handleGetSession(
   sendJson(res, 200, session);
 }
 
+/** Titles a session is given before anyone has said what it is about. */
+const PLACEHOLDER_TITLES = new Set(['Untitled', 'New session']);
+const AUTO_TITLE_MAX = 60;
+
+/**
+ * Name a session after the first thing asked of it.
+ *
+ * The first prompt is the best name a session has, and a rail full of
+ * "Untitled" rows is unusable — but only a placeholder is replaced: a title
+ * someone chose is theirs to keep.
+ */
+function autoTitle(session: ChatSession, prompt: string): void {
+  if (session.messages.length > 0) return;
+  if (session.title.trim() && !PLACEHOLDER_TITLES.has(session.title.trim())) return;
+  const line = prompt.trim().split('\n')[0]!.trim();
+  if (!line) return;
+  session.title = line.length > AUTO_TITLE_MAX ? `${line.slice(0, AUTO_TITLE_MAX - 1)}…` : line;
+}
+
 async function handleAppendMessage(
   id: string,
   body: unknown,
@@ -175,6 +194,7 @@ async function handleAppendMessage(
     sendJson(res, 404, { error: { message: 'Session not found.', code: 'not_found' } });
     return;
   }
+  autoTitle(session, prompt);
   session.messages.push({ role: 'user', content: prompt });
   try {
     const result = await runChat(ctx, session.target, session.messages);

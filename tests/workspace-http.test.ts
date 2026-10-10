@@ -203,6 +203,62 @@ describe('workspace HTTP sessions', () => {
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe('invalid_id');
   });
+
+  it('names an untitled session after its first prompt', async () => {
+    const created = await fetch(`${base}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: { kind: 'rotation' } }),
+    });
+    const session = (await created.json()) as ChatSession;
+    expect(session.title).toBe('Untitled');
+
+    const first = await fetch(`${base}/v1/sessions/${encodeURIComponent(session.id)}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'why is the sky blue?\nsecond line is not the title' }),
+    });
+    const titled = (await first.json()) as ChatSession;
+    expect(titled.title).toBe('why is the sky blue?');
+
+    // Later turns are not titles: the name is set once, from the first prompt.
+    const second = await fetch(`${base}/v1/sessions/${encodeURIComponent(session.id)}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'and at night?' }),
+    });
+    expect(((await second.json()) as ChatSession).title).toBe('why is the sky blue?');
+  });
+
+  it('keeps a title the caller chose, and trims a long first prompt', async () => {
+    const named = await fetch(`${base}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Chosen name', target: { kind: 'rotation' } }),
+    });
+    const chosen = (await named.json()) as ChatSession;
+    const kept = await fetch(`${base}/v1/sessions/${encodeURIComponent(chosen.id)}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'this should not become the title' }),
+    });
+    expect(((await kept.json()) as ChatSession).title).toBe('Chosen name');
+
+    const long = await fetch(`${base}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const untitled = (await long.json()) as ChatSession;
+    const trimmed = await fetch(`${base}/v1/sessions/${encodeURIComponent(untitled.id)}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'x'.repeat(200) }),
+    });
+    const titled = (await trimmed.json()) as ChatSession;
+    expect(titled.title).toHaveLength(60);
+    expect(titled.title.endsWith('…')).toBe(true);
+  });
 });
 
 describe('workspace HTTP work orders', () => {
