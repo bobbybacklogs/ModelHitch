@@ -18,7 +18,10 @@ import type { Policy, TrustListEntry } from '../core/policy.js';
  * - Entries carry the real route (`providerId/modelId`), never an alias. A lane
  *   picked from a picker and a lane reached by rotation are the same request,
  *   so nothing has to translate between the two, and `GET /v1/models/:id`
- *   answers for a lane exactly as it does for any other model.
+ *   answers for a lane exactly as it does for any other model. The one
+ *   deliberate exception is `AUTO_MODEL_ID` below: it is not an alias for a
+ *   lane, it is the plan itself, and the router resolves it the same way on
+ *   every wire.
  * - Ids are always fully qualified, even for the default provider. A bare id
  *   means "the default provider" to the router, which is not what a lane says —
  *   and a bare id can be shadowed by a provider of the same name (the default
@@ -31,6 +34,27 @@ import type { Policy, TrustListEntry } from '../core/policy.js';
  * Pure data + pure functions (no `node:*`, no config, no HTTP) so the server
  * and the tests compute the same entries.
  */
+
+/**
+ * The id that stands for the whole plan.
+ *
+ * A client that points at the bridge as a custom endpoint has to send *some*
+ * model name — VS Code "Add model", Cline/Cursor provider entries and Codex
+ * `model_providers` all require one — and every name it could send picks one
+ * lane. This id picks the plan instead: the bridge routes it exactly as it
+ * routes a request that omits `model`, so the default lane leads and the whole
+ * rotation sits behind it. One id, however many lanes the user configured.
+ *
+ * The id is fixed rather than configurable because it is the one thing a
+ * client's saved config can rely on: a bridge whose plan changed under it, or
+ * a client copied between bridges, still means the same request.
+ */
+export const AUTO_MODEL_ID = 'modelhitch/auto';
+
+/** True when a client asked for the plan rather than for one lane. */
+export function isAutoModelId(modelInput: unknown): boolean {
+  return typeof modelInput === 'string' && modelInput.trim().toLowerCase() === AUTO_MODEL_ID;
+}
 
 /** Where a lane sits in the plan. */
 export type PlanTier =
@@ -178,6 +202,46 @@ export function planModelEntries(
 /** The route a client sends back after picking a lane: `providerId/modelId`. */
 export function laneRoute(lane: FailoverTarget): string {
   return `${lane.providerId}/${lane.model}`;
+}
+
+/**
+ * The `modelhitch` payload the auto id is published with. It carries the same
+ * entries the catalog lists for the plan, so a client (or a person reading
+ * `GET /v1/models/modelhitch/auto`) can see what the id expands to without
+ * asking which lanes the plan holds.
+ */
+export interface AutoModelMeta {
+  kind: 'auto';
+  /** Every lane the id will try, in order — the plan rows themselves. */
+  lanes: PlanModelEntry[];
+}
+
+/** The auto id as the catalog publishes it. */
+export interface AutoModelEntry {
+  /** Always `AUTO_MODEL_ID`. */
+  id: string;
+  name: string;
+  modelhitch: AutoModelMeta;
+}
+
+/** Picker label for the auto id: "ModelHitch Auto · whole rotation · 4 lanes". */
+export function autoModelLabel(laneCount: number): string {
+  if (laneCount <= 0) return 'ModelHitch Auto · the bridge default';
+  return `ModelHitch Auto · whole rotation · ${laneCount} lane${laneCount === 1 ? '' : 's'}`;
+}
+
+/** Build the auto id's catalog entry from the plan entries it stands for. */
+export function autoModelEntry(lanes: readonly PlanModelEntry[]): AutoModelEntry {
+  return {
+    id: AUTO_MODEL_ID,
+    name: autoModelLabel(lanes.length),
+    modelhitch: { kind: 'auto', lanes: [...lanes] },
+  };
+}
+
+/** Narrow a catalog entry's `modelhitch` payload to the auto id's. */
+export function isAutoModelMeta(value: unknown): value is AutoModelMeta {
+  return typeof value === 'object' && value !== null && (value as { kind?: unknown }).kind === 'auto';
 }
 
 /** Everything a label needs, loosened so callers can pass a partial lane. */

@@ -21,12 +21,19 @@ export type { ModelHitchServerOptions } from './server/server.js';
 
 // the bridge's routing plan as pickable models (`GET /v1/models` lane entries)
 export {
+  AUTO_MODEL_ID,
+  autoModelEntry,
+  autoModelLabel,
   displayModelName,
+  isAutoModelId,
+  isAutoModelMeta,
   laneLabel,
   laneRoute,
   planLanes,
   planModelEntries,
   providerDisplayName,
+  type AutoModelEntry,
+  type AutoModelMeta,
   type PlanLane,
   type PlanLanesInput,
   type PlanModelEntriesOptions,

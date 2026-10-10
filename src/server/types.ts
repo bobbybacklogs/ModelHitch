@@ -7,7 +7,7 @@
  * streaming, usage), without pretending to implement the entire API surface.
  */
 
-import type { PlanModelEntry } from './lane-catalog.js';
+import type { AutoModelMeta, PlanModelEntry } from './lane-catalog.js';
 
 /** A content part inside an OpenAI message (text or image_url). */
 export interface OpenAIContentPart {
@@ -119,8 +119,10 @@ export interface OpenAIModelEntry {
   /** Display label, e.g. "DeepSeek V4 Pro · OpenCode Go · trusted lane 1". */
   name?: string;
   /**
-   * Present only on entries that describe a lane of the bridge's routing plan
-   * (see `src/server/lane-catalog.ts`), never on plain catalog entries.
+   * Present only on entries that describe the bridge's routing plan: either a
+   * lane of it (`PlanModelEntry`) or the plan itself, under the auto id
+   * (`AutoModelMeta`, see `src/server/lane-catalog.ts`). Never on plain
+   * catalog entries.
    */
-  modelhitch?: PlanModelEntry;
+  modelhitch?: PlanModelEntry | AutoModelMeta;
 }

@@ -65,7 +65,15 @@ import {
 } from './responses.js';
 import { clearConversations, findConversationWithToolCall, rememberConversation } from './conversation-state.js';
 import { normalizeBodyImages } from './local-images.js';
-import { planLanes, planModelEntries, laneRoute, type PlanLane, type PlanModelEntry } from './lane-catalog.js';
+import {
+  autoModelEntry,
+  isAutoModelId,
+  laneRoute,
+  planLanes,
+  planModelEntries,
+  type PlanLane,
+  type PlanModelEntry,
+} from './lane-catalog.js';
 import { resolveOutboundSessionId } from '../core/session.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
 import type { CloudAgentConfig, ImageGenerationConfig } from '../config.js';
@@ -599,17 +607,30 @@ export class OpenAICompatibleServer {
    * whole rotation.
    */
   private routeRequest(modelInput: string | undefined): RoutedRequest {
-    const natural = routeModel(modelInput, this.providers, this.options.defaultProviderId);
+    const requestedInput = this.normalizeModel(modelInput);
+    const natural = routeModel(requestedInput, this.providers, this.options.defaultProviderId);
     const pinned = this.pinnedProvider();
     if (!pinned || pinned.id === natural.provider.id) {
       return { provider: natural.provider, model: natural.model };
     }
-    const requested = typeof modelInput === 'string' && modelInput.trim() ? natural.model : undefined;
+    const requested = requestedInput && requestedInput.trim() ? natural.model : undefined;
     return {
       provider: pinned,
       model: requested ?? this.pinnedDefaultModel(pinned),
       displaced: { providerId: natural.provider.id, model: natural.model },
     };
+  }
+
+  /**
+   * The model a request asked for, or `undefined` for the auto id.
+   *
+   * `modelhitch/auto` is not a lane, it is the plan — so it is resolved here,
+   * once, into "the request named no model". Every wire then reaches it through
+   * the routing an unqualified request already gets (default lane, provider
+   * pin, the rotation behind it) instead of a second path that could drift.
+   */
+  private normalizeModel(modelInput: string | undefined): string | undefined {
+    return isAutoModelId(modelInput) ? undefined : modelInput;
   }
 
   /**
@@ -1125,14 +1146,15 @@ export class OpenAICompatibleServer {
     if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'messages' array.", { status: 400 });
     }
-    this.assertCloudAgentModel(body.model);
-    const route = this.routeRequest(body.model);
+    const requestedModel = this.normalizeModel(body.model);
+    this.assertCloudAgentModel(requestedModel);
+    const route = this.routeRequest(requestedModel);
     const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
     let params = mapRequest(body, model);
     params.sessionId = resolveOutboundSessionId(req.headers, params.messages);
-    if (!this.options.pinnedProviderId && this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
+    if (!this.options.pinnedProviderId && this.options.defaultModel && !requestedModel) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
 
     if (body.stream === true) {
@@ -1301,14 +1323,15 @@ export class OpenAICompatibleServer {
     if (!body || (!hasInput && !hasInstructions)) {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'input' array or 'instructions'.", { status: 400 });
     }
-    this.assertCloudAgentModel(body.model);
-    const route = this.routeRequest(body.model);
+    const requestedModel = this.normalizeModel(body.model);
+    this.assertCloudAgentModel(requestedModel);
+    const route = this.routeRequest(requestedModel);
     const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
     let params = mapResponsesRequest(body, model);
     params.sessionId = resolveOutboundSessionId(req.headers, params.messages);
-    if (!this.options.pinnedProviderId && this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
+    if (!this.options.pinnedProviderId && this.options.defaultModel && !requestedModel) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
 
     // Stateful continuation: the client sliced prior turns out and references
@@ -1447,14 +1470,15 @@ export class OpenAICompatibleServer {
     if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'messages' array.", { status: 400 });
     }
-    this.assertCloudAgentModel(body.model);
-    const route = this.routeRequest(body.model);
+    const requestedModel = this.normalizeModel(body.model);
+    this.assertCloudAgentModel(requestedModel);
+    const route = this.routeRequest(requestedModel);
     const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
     let params = mapAnthropicRequest(body, model);
     params.sessionId = resolveOutboundSessionId(req.headers, params.messages);
-    if (!this.options.pinnedProviderId && this.options.defaultModel && !body.model) params.model = this.options.defaultModel;
+    if (!this.options.pinnedProviderId && this.options.defaultModel && !requestedModel) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
 
     if (body.stream === true) {
@@ -1576,15 +1600,17 @@ export class OpenAICompatibleServer {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'contents' array.", { status: 400 });
     }
     // The model lives in the URL path for the Google wire; body.model (if any)
-    // is a fallback for clients that send it anyway.
-    this.assertCloudAgentModel(modelFromPath || body.model);
-    const route = this.routeRequest(modelFromPath || body.model);
+    // is a fallback for clients that send it anyway. The auto id works from
+    // either place: `/v1beta/models/modelhitch/auto:generateContent`.
+    const requestedModel = this.normalizeModel(modelFromPath || body.model);
+    this.assertCloudAgentModel(requestedModel);
+    const route = this.routeRequest(requestedModel);
     const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
     let params = mapGeminiRequest(body, model);
     params.sessionId = resolveOutboundSessionId(req.headers, params.messages);
-    if (!this.options.pinnedProviderId && this.options.defaultModel && !modelFromPath && !body.model) params.model = this.options.defaultModel;
+    if (!this.options.pinnedProviderId && this.options.defaultModel && !requestedModel) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
 
     if (stream) {
@@ -1681,11 +1707,13 @@ export class OpenAICompatibleServer {
   // ---------------------------------------------------------------------------
 
   private async modelCatalog(): Promise<OpenAIModelEntry[]> {
-    // The plan leads: a picker renders the list in order, and the lanes are the
-    // answer to "which of these hundreds of ids should I choose". Plain entries
-    // whose id the plan already published are dropped, so a lane is described
-    // once — by its plan entry, which is the one carrying a name and a tier.
-    const plan: OpenAIModelEntry[] = this.planModels().map((lane) => ({
+    // The auto id leads, then the plan: a picker renders the list in order, and
+    // the lanes are the answer to "which of these hundreds of ids should I
+    // choose". Plain entries whose id the plan already published are dropped,
+    // so a lane is described once — by its plan entry, which is the one
+    // carrying a name and a tier.
+    const lanes = this.planModels();
+    const plan: OpenAIModelEntry[] = lanes.map((lane) => ({
       id: lane.id,
       object: 'model',
       created: 0,
@@ -1693,6 +1721,23 @@ export class OpenAICompatibleServer {
       name: lane.name,
       modelhitch: lane,
     }));
+
+    // The one row that means "let the bridge decide". It is published whenever
+    // there is a bridge to decide with, plan or not: a client that demands a
+    // model name can save it, and it keeps meaning the same request when the
+    // plan behind it changes — or when the same client is pointed at another
+    // bridge.
+    if (this.providers.length > 0) {
+      const auto = autoModelEntry(lanes);
+      plan.unshift({
+        id: auto.id,
+        object: 'model',
+        created: 0,
+        owned_by: 'modelhitch',
+        name: auto.name,
+        modelhitch: auto.modelhitch,
+      });
+    }
 
     const out: OpenAIModelEntry[] = [];
     const seen = new Set(plan.map((entry) => entry.id));

@@ -625,6 +625,9 @@ function renderWorkspaceTarget() {
   var sel = el('workspaceTarget');
   var opts = ['<option value="rotation">rotation</option>'];
   (state.models || []).forEach(function (m) {
+    // "rotation" is the option that means the whole plan; the catalog's auto
+    // id is that same request, so it is not a second choice here.
+    if (m && m.modelhitch && m.modelhitch.kind === 'auto') return;
     var val = workspaceTargetValue(m);
     opts.push('<option value="' + esc(val) + '"' + (val === selected ? ' selected' : '') + '>' + esc(val) + '</option>');
   });

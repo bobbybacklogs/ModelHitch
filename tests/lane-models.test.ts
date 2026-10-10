@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  AUTO_MODEL_ID,
   createModelHitchServer,
   createOpenAICompatibleProvider,
   mockProvider,
@@ -46,6 +47,15 @@ type ModelEntry = {
   modelhitch?: { tier: string; laneIndex: number; providerId: string; model: string; terminal: boolean };
 };
 
+/**
+ * The auto id (`modelhitch/auto`) leads every catalog and stands for the plan
+ * as a whole — it is covered by its own suite. These tests are about the lanes
+ * behind it, so they read the list without it.
+ */
+function lanesOf(data: ModelEntry[]): ModelEntry[] {
+  return data.filter((entry) => entry.id !== AUTO_MODEL_ID);
+}
+
 describe('GET /v1/models with a plan (policy)', () => {
   let server: OpenAICompatibleServer;
   let base: string;
@@ -70,7 +80,7 @@ describe('GET /v1/models with a plan (policy)', () => {
   }
 
   it('publishes the trusted lane, then the fallback lane, ahead of the catalog', async () => {
-    const data = await models();
+    const data = lanesOf(await models());
     expect(data.slice(0, 2).map((entry) => entry.id)).toEqual(['mock-model', 'lane-two/two-model']);
     expect(data.slice(2).map((entry) => entry.id)).toEqual(['extra-model']);
   });
@@ -90,13 +100,13 @@ describe('GET /v1/models with a plan (policy)', () => {
   });
 
   it('names the lane with its model, provider, and tier', async () => {
-    const data = await models();
+    const data = lanesOf(await models());
     expect(data[0]?.name).toBe('Mock Model · Mock (deterministic) · trusted lane 1');
     expect(data[1]?.name).toBe('Two Model · Lane Two · fallback lane 1');
   });
 
   it('carries lane metadata a picker can group by', async () => {
-    const data = await models();
+    const data = lanesOf(await models());
     expect(data[0]?.modelhitch).toEqual({
       id: 'mock-model',
       providerId: 'mock',
@@ -117,7 +127,7 @@ describe('GET /v1/models with a plan (policy)', () => {
   });
 
   it('describes a lane once, and only the plan carries lane metadata', async () => {
-    const data = await models();
+    const data = lanesOf(await models());
     expect(data.filter((entry) => entry.id === 'mock-model')).toHaveLength(1);
     expect(data.filter((entry) => !entry.modelhitch).map((entry) => entry.id)).toEqual(['extra-model']);
   });
@@ -170,7 +180,7 @@ describe('GET /v1/models when a bare lane id would be shadowed', () => {
     });
     try {
       const data = ((await (await fetch(`${base}/v1/models`)).json()) as { data: ModelEntry[] }).data;
-      const lane = data.find((entry) => entry.modelhitch);
+      const lane = lanesOf(data).find((entry) => entry.modelhitch);
       expect(lane?.id).toBe('gateway/openai/gpt-5.4');
       // The catalog's own bare entry is left alone — the plan does not claim it.
       expect(data.find((entry) => entry.id === 'openai/gpt-5.4')?.modelhitch).toBeUndefined();
@@ -185,8 +195,10 @@ describe('GET /v1/models without a plan', () => {
     const { server, base } = await startServer({ providers: [mockProvider, laneTwo], defaultProviderId: 'mock' });
     try {
       const data = ((await (await fetch(`${base}/v1/models`)).json()) as { data: ModelEntry[] }).data;
-      expect(data.some((entry) => entry.modelhitch)).toBe(false);
-      expect(data.some((entry) => entry.name !== undefined)).toBe(false);
+      // The auto id is the one row that still carries plan metadata: with no
+      // plan behind it, it means "the bridge default" and nothing else does.
+      expect(data.filter((entry) => entry.modelhitch).map((entry) => entry.id)).toEqual([AUTO_MODEL_ID]);
+      expect(data.filter((entry) => entry.name !== undefined).map((entry) => entry.id)).toEqual([AUTO_MODEL_ID]);
     } finally {
       await server.close();
     }
@@ -212,7 +224,7 @@ describe('GET /v1/models with auto-mode', () => {
       autoMode: { lanes: [{ providerId: 'lane-two', model: 'two-model' }] },
     });
     try {
-      const data = ((await (await fetch(`${base}/v1/models`)).json()) as { data: ModelEntry[] }).data;
+      const data = lanesOf(((await (await fetch(`${base}/v1/models`)).json()) as { data: ModelEntry[] }).data);
       expect(data.slice(0, 2).map((entry) => entry.id)).toEqual(['mock-model', 'lane-two/two-model']);
       expect(data[0]?.modelhitch).toMatchObject({ tier: 'primary', laneIndex: 1 });
       expect(data[1]?.modelhitch).toMatchObject({ tier: 'fallback', laneIndex: 1 });
