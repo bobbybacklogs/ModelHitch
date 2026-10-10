@@ -360,6 +360,38 @@ and ignores the incoming Authorization header, so you can supply any harmless br
 placeholder such as `sk-bridge-local` — never a real user key — solely to satisfy that client-side
 validation.
 
+### The auto id: one name for the whole plan
+
+Clients that treat the bridge as a custom endpoint insist on a model name, and a name is a lane. So
+the bridge publishes one id of its own — the plan, spelled as a model:
+
+| | |
+| --- | --- |
+| **Id** | `modelhitch/auto` |
+| **Means** | The same request as omitting `model`: the default lane leads and the plan's rotation stays behind it |
+| **Works on** | `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, and Gemini's `/v1beta/models/modelhitch/auto:generateContent` |
+| **With a `--provider` pin** | The pin still applies — the pin leads, the client's own route follows, the plan sits behind both |
+| **Advertised** | The first row of `GET /v1/models`, and `GET /v1/models/modelhitch/auto` |
+
+```json
+{
+  "id": "modelhitch/auto",
+  "object": "model",
+  "created": 0,
+  "owned_by": "modelhitch",
+  "name": "ModelHitch Auto · whole rotation · 3 lanes",
+  "modelhitch": {
+    "kind": "auto",
+    "lanes": ["the plan entries, in the order they are tried"]
+  }
+}
+```
+
+The id is fixed rather than configurable, because it is the one thing a client's saved config can
+rely on: a plan that changed under it, or a client copied to another bridge, still means the same
+request. It is published whenever there is a provider to route with — with no policy and no
+auto-mode the lane list under it is empty and the id means "the bridge default".
+
 ### Lanes in the model picker
 
 A client that treats the bridge as a custom endpoint builds its picker from `GET /v1/models` alone.
@@ -400,7 +432,8 @@ Notes:
   lane the picker published as `mock-model`).
 - `tier` is `trusted`/`fallback` for a policy plan and `primary`/`fallback` for auto-mode. A lane
   marked `terminal` (`onLimit: "stop"`) says so in its label.
-- With no policy and no auto-mode, `GET /v1/models` lists providers only — unchanged.
+- With no policy and no auto-mode, `GET /v1/models` lists the providers plus the auto id, whose
+  `modelhitch.lanes` is empty — no lane entries.
 
 Claude Code is the exception: it filters discovered ids to those containing `claude` or `anthropic`,
 so pin its lanes with `ANTHROPIC_DEFAULT_*_MODEL` as described below.
@@ -758,6 +791,18 @@ Shared flags for `chat` and `work`:
 ```bash
 modelhitch workspace
 ```
+
+The page is a local client for three things: sessions (chat against the bridge), one-shot work
+orders, and cloud agents. What it does with them:
+
+| | |
+| --- | --- |
+| **Targets** | Both pickers list the plan's lanes by name. A filter narrows the list without ever changing the current choice — a filtered-out selection stays pinned as `(current)`, and `rotation` is the same request as the auto id |
+| **Sessions** | A session is created when it has something to say, and named after its first prompt (a title you set is never overwritten). Rows carry the target, relative time, and message count |
+| **Sending** | Send is disabled while the box is empty, waits in place with the target it is calling, and a failed send keeps your prompt in the box |
+| **Freshness** | Sessions, work orders, and cloud agents each have a `refresh`. While a work order or cloud agent is still running, the page polls every 4s and stops once nothing is pending |
+| **Narrow screens** | Below 900px the three rails stack (sessions, then chat, then work orders and cloud agents) and the page scrolls as one document |
+| **Cloud agents off** | An unconfigured Cursor Cloud Agent lane reads as an explanation, not an error |
 
 **Cloud** lists and manages Cursor Cloud agents via the bridge:
 

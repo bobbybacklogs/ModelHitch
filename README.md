@@ -245,6 +245,19 @@ npx modelhitch settings
 | **Image lane** | Off by default — enable in settings or with `--image-lane` |
 | **Runtime** | Bridge needs Node 22.5+ (SQLite); library supports Node 18+ |
 
+### One id for the whole rotation
+
+A client that treats the bridge as a custom endpoint still has to name a model, and every name it
+could save is one lane. `modelhitch/auto` is the bridge's own: send it and the request routes
+exactly as one that omits `model` does, with the rotation behind it.
+
+| | |
+| --- | --- |
+| **Ask for it** | `"model": "modelhitch/auto"` on any wire — or `modelhitch/auto` in a Gemini path |
+| **What it means** | The plan: the default lane leads, then the trusted/fallback (or auto-mode) lanes behind it. A `--provider` pin still applies |
+| **Where it is listed** | First in `GET /v1/models` as `ModelHitch Auto · whole rotation · N lanes`, carrying the lanes it expands to in `modelhitch.lanes` |
+| **Lane ids still mean lanes** | Picking a lane leads with the rest of the plan behind it. The auto id is the only id that stands for more than the one lane it names |
+
 ### Pin one provider
 
 ```bash

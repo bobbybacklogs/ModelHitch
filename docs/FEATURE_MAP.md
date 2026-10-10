@@ -2,7 +2,7 @@
 
 Truthful inventory of the **core TypeScript package** (`package.json` `"name": "modelhitch"`, CLI bin `modelhitch`). README and `docs/guide.md` are hints. Grades come from source and the default verify gate, not marketing copy.
 
-Generated against package version **2.5.0**. Re-grade after material API or test changes.
+Generated against package version **2.6.0**. Re-grade after material API or test changes.
 
 ## Grades
 
@@ -151,10 +151,14 @@ Live hosted inference and local-runtime inference are **not** in default verify.
 | Gemini `POST /v1beta/models/{model}:generateContent` (+ stream) | **Proven (verify)** | `tests/gemini-bridge.test.ts` |
 | Route `providerId/modelId`; bare ids → default provider | **Proven (verify)** | `tests/server.test.ts` |
 | The routing plan published as models: `GET /v1/models` leads with the trusted lanes, then the fallback lanes (or auto-mode's primary + rotation), named and flagged with tier/index/terminal metadata | **Proven (verify)** | `tests/lane-catalog.test.ts` (projection, order, dedupe, drift guard against `resolvePolicyLanes`), `tests/lane-models.test.ts` (in-process server: order, lane id addressable, lane routable, bare default-provider id, shadowing guard, no lane entries without a plan) |
+| The auto id `modelhitch/auto` stands for the whole plan on every wire: it routes exactly as a request that omits `model` (a `--provider` pin still applies), is published first in `GET /v1/models` carrying the lanes it expands to, and is addressed by `GET /v1/models/modelhitch/auto` | **Proven (verify)** | `tests/auto-model.test.ts` (unit + in-process server: catalog order/metadata, chat streaming and non-stream failover past a dead primary, Responses/Messages/Gemini wires, identical route to an unnamed request, pin interaction). Live bridge on 127.0.0.1: 200 `modelhitch/auto` → `deepseek-v4-pro` |
 | `GET /v1/usage`, `GET /usage` dashboard HTML, `POST /v1/usage/reset` | **Proven (verify)** | `tests/auto-mode.test.ts`, `tests/usage.test.ts` |
 | `GET/PUT /v1/config` (masked secrets; no masked write-back) | **Proven (verify)** | `tests/settings.test.ts` |
 | `GET /v1/lane-health`, `GET /v1/catalog` | **Proven (verify)** | `tests/settings.test.ts` |
 | `GET /v1/opencode-state` (local OpenCode snapshot; 501 without a reader) | **Proven (verify)** | `tests/settings.test.ts`; reader itself in `tests/opencode-byok.test.ts` |
+| `GET /workspace` page (sessions, chat composer, work orders, cloud agents) | **Proven (verify)** for the routes + served HTML, and **verified by hand in a browser** for the rendered UI (desktop 1440×900 and mobile 390×844: no sideways overflow, rails stack, send/pending/filter flows) | `tests/workspace-http.test.ts` (routes), `tests/workspace-page.test.ts` (ids, inline-script parse guard, narrow-viewport rule). No automated browser/DOM test |
+| Session auto-title from the first prompt (placeholder titles only, 60 chars) | **Proven (verify)** | `tests/workspace-http.test.ts` (untitled session named by first prompt, later turns do not rename, a chosen title survives, long prompt trimmed) |
+| Workspace page target catalog: the plan lanes are pickable by name, with a filter that never changes the current choice, and the auto id is listed once (as `rotation`) | **Proven (verify)** for the served script | `tests/workspace-page.test.ts`, `tests/auto-model.test.ts`. Filter/pinning behaviour **verified by hand in a browser** |
 | `/healthz` reports `pinnedProviderId` while a pin is active | **Proven (verify)** | `tests/provider-pin.test.ts` |
 | `opencodeByok` block in `/v1/config` (connection editor, rotation/pin controls, import button) | **Proven (verify)** for the document + served HTML; **Unverified** for the rendered UI | `tests/settings.test.ts` (`validateConfig`, page HTML ids, inline-script parse guard). No browser/DOM test |
 | `customLanes` block in `/v1/config` (lane editor: endpoint, schema, typed model slots, on-limit, capabilities, per-lane key) | **Proven (verify)** for the document + served HTML; **Unverified** for the rendered UI | `tests/settings.test.ts` (`validateConfig`, page HTML ids, inline-script parse guard). No browser/DOM test |
