@@ -66,6 +66,24 @@ export interface CloudAgentConfig {
   sessionReuse?: 'per-request' | 'per-bridge-session' | 'sticky-until-idle';
 }
 
+/**
+ * Local agent lane: agent-shaped work in a working tree on this machine.
+ *
+ * Separate from `CloudAgentConfig` because almost nothing carries over — there
+ * are no repos to clone (the tree is already here), no vendor model ids, and no
+ * PR behavior. Sharing the block would mean a field that means two things.
+ */
+export interface LocalAgentLaneConfig {
+  /** Master switch. Off = no local-agent provider and no routes. */
+  enabled: boolean;
+  /** Working tree the agent operates in. Defaults to the bridge's cwd. */
+  workspaceDir?: string;
+  /** `provider/model` for the underlying tool loop; default is the config's. */
+  model?: string;
+  /** Turn ceiling per run, passed through to the harness loop. */
+  maxTurns?: number;
+}
+
 export interface ImageGenerationConfig {
   /** Enable the dedicated image generation lane. Disabled by default. */
   enabled: boolean;
@@ -263,6 +281,16 @@ export interface ModelHitchConfig {
   imageGeneration?: ImageGenerationConfig;
   /** Cursor Cloud Agent lane (explicit cursor-cloud/… routes only). */
   cloudAgent?: CloudAgentConfig;
+  /**
+   * Local agent lane — a cloud-agent-shaped lane that runs in a working tree
+   * on this machine. Disabled by default, like the remote lane.
+   *
+   * This is NOT a cloud agent in the remote sense: a running session only makes
+   * progress while the bridge process is alive, and only completed sessions are
+   * durable. It exists so the bridge's agent surface has an honest local option
+   * rather than pretending a sandbox is required.
+   */
+  localAgent?: LocalAgentLaneConfig;
   /** OpenCode Console BYOK connections (one provider lane each). */
   opencodeByok?: OpenCodeByokConfig;
   /** Custom BYOK lanes — endpoints we don't ship, with hand-typed model slots. */
@@ -440,6 +468,24 @@ export function validateConfig(config: unknown): ConfigValidation {
         c.sessionReuse !== 'sticky-until-idle'
       ) {
         errors.push('cloudAgent.sessionReuse must be per-request, per-bridge-session, or sticky-until-idle.');
+      }
+    }
+  }
+
+  if (cfg.localAgent !== undefined) {
+    const l = cfg.localAgent;
+    if (l === null || typeof l !== 'object') {
+      errors.push('localAgent must be an object.');
+    } else {
+      if (typeof l.enabled !== 'boolean') errors.push('localAgent.enabled must be a boolean.');
+      if (l.workspaceDir !== undefined && typeof l.workspaceDir !== 'string') {
+        errors.push('localAgent.workspaceDir must be a string when set.');
+      }
+      if (l.model !== undefined && (typeof l.model !== 'string' || l.model.trim() === '')) {
+        errors.push('localAgent.model must be a non-empty string when set.');
+      }
+      if (l.maxTurns !== undefined && (typeof l.maxTurns !== 'number' || !Number.isFinite(l.maxTurns))) {
+        errors.push('localAgent.maxTurns must be a finite number when set.');
       }
     }
   }

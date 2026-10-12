@@ -6,6 +6,7 @@ import type { ChatParams, ChatResult, ModelMessage, ProviderCredentials, StreamC
 import type { CloudAgentConfig, CloudAgentRepoConfig } from '../config.js';
 import type { Provider, ModelInfo } from './types.js';
 import { CursorCloudSessionStore } from './cursor-cloud-session.js';
+import type { CloudAgentSessionStore } from './cloud-agent-session-store.js';
 
 export const CURSOR_CLOUD_API_BASE = 'https://api.cursor.com/v1';
 export const CURSOR_CLOUD_PROVIDER_ID = 'cursor-cloud';
@@ -13,6 +14,12 @@ export const CURSOR_CLOUD_PROVIDER_ID = 'cursor-cloud';
 export interface CursorCloudProviderOptions {
   config: CloudAgentConfig;
   sessionStore: CursorCloudSessionStore;
+  /**
+   * Durable conversation -> agent map, so a restarted bridge adopts the agent
+   * an earlier process created instead of forking a new one. Optional: without
+   * it, reuse works only for the lifetime of this process.
+   */
+  durableSessionStore?: CloudAgentSessionStore;
   fetchImpl?: typeof fetch;
   baseUrl?: string;
 }
@@ -244,8 +251,24 @@ export function createCursorCloudProvider(options: CursorCloudProviderOptions): 
   const baseUrl = (options.baseUrl ?? CURSOR_CLOUD_API_BASE).replace(/\/$/, '');
   const config = options.config;
   const sessionStore = options.sessionStore;
+  const durableStore = options.durableSessionStore;
   let cachedRepositories: CloudAgentRepoConfig[] | null = null;
   let repositoriesFetchedAt = 0;
+
+  /**
+   * Record a conversation's agent in memory and, when configured, on disk.
+   * The durable write is what survives a bridge restart.
+   */
+  function remember(sessionId: string, agentId: string, status?: string): void {
+    sessionStore.set(sessionId, agentId);
+    durableStore?.set(CURSOR_CLOUD_PROVIDER_ID, sessionId, agentId, status);
+  }
+
+  /** Drop a conversation's mapping from both stores (stale agent recovery). */
+  function forget(sessionId: string): void {
+    sessionStore.delete(sessionId);
+    durableStore?.delete(CURSOR_CLOUD_PROVIDER_ID, sessionId);
+  }
 
   async function cursorFetch(path: string, init: RequestInit, apiKey: string): Promise<Response> {
     const res = await fetchImpl(`${baseUrl}${path}`, {
@@ -333,15 +356,37 @@ export function createCursorCloudProvider(options: CursorCloudProviderOptions): 
     const { text, images } = extractLatestUserPrompt(params.messages);
     const promptImages = toPromptImages(images);
     const reuse = config.sessionReuse ?? 'per-bridge-session';
-    let agentId = reuse === 'per-request' ? undefined : sessionStore.get(sessionId);
+    const perRequest = reuse === 'per-request';
+    // In-memory first (fast path), then the durable map. The durable read is
+    // what lets a RESTARTED bridge continue the agent an earlier process made
+    // instead of forking a new one — the vendor cannot answer this question
+    // because it does not know what the bridge called the conversation.
+    let agentId = perRequest
+      ? undefined
+      : (sessionStore.get(sessionId) ?? durableStore?.get(CURSOR_CLOUD_PROVIDER_ID, sessionId));
     let runId: string;
     if (!agentId) {
       const created = await createAgent(apiKey, text, model, promptImages);
       agentId = created.agentId;
       runId = created.runId;
-      if (reuse !== 'per-request') sessionStore.set(sessionId, agentId);
+      if (!perRequest) remember(sessionId, agentId);
     } else {
-      runId = await createRun(apiKey, agentId, text, promptImages);
+      try {
+        runId = await createRun(apiKey, agentId, text, promptImages);
+      } catch (err) {
+        // A recorded agent can be gone (deleted, or a different account's id).
+        // Drop the stale mapping and retry once as a fresh agent rather than
+        // failing the turn permanently.
+        if (err instanceof ModelHitchError && err.status === 404 && !perRequest) {
+          forget(sessionId);
+          const created = await createAgent(apiKey, text, model, promptImages);
+          agentId = created.agentId;
+          runId = created.runId;
+          remember(sessionId, agentId);
+        } else {
+          throw err;
+        }
+      }
     }
     return { agentId, runId, sessionId };
   }

@@ -76,13 +76,18 @@ import {
 } from './lane-catalog.js';
 import { resolveOutboundSessionId } from '../core/session.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
-import type { CloudAgentConfig, ImageGenerationConfig } from '../config.js';
-import {
-  CURSOR_CLOUD_PROVIDER_ID,
-  cancelCursorCloudAgent,
-  getCursorCloudAgent,
-  listCursorCloudAgents,
-} from '../providers/cursor-cloud.js';
+import type { CloudAgentConfig, ImageGenerationConfig, LocalAgentLaneConfig } from '../config.js';
+import { CURSOR_CLOUD_PROVIDER_ID } from '../providers/cursor-cloud.js';
+import type {
+  CloudAgentBackend,
+  CloudAgentRunDriver,
+  CloudAgentRunHandle,
+  CloudAgentStartInput,
+} from '../providers/cloud-agent-backend.js';
+import { drivesOwnRuns } from '../providers/cloud-agent-backend.js';
+import type { CloudAgentSessionStore } from '../providers/cloud-agent-session-store.js';
+import { createCursorCloudBackend } from '../providers/cursor-cloud-backend.js';
+import { createLocalAgentBackend } from '../providers/local-agent-backend.js';
 import { safeJsonParse } from '../core/json.js';
 import { modelhitchHome } from '../config-file.js';
 import { WorkspaceStore } from '../workspace/store.js';
@@ -109,6 +114,21 @@ export interface ModelHitchServerOptions {
   imageGeneration?: ImageGenerationConfig;
   /** Cursor Cloud Agent lane config, disabled by default. */
   cloudAgent?: CloudAgentConfig;
+  /**
+   * Local agent lane config, disabled by default.
+   *
+   * A cloud-agent-shaped lane that runs in a working tree on this machine. It
+   * answers the same `/v1/cloud-agents` routes as the remote lane, so the UI
+   * does not need a second code path.
+   */
+  localAgent?: LocalAgentLaneConfig;
+  /**
+   * Durable conversation -> cloud-agent map, shared by every agent backend.
+   *
+   * Without it, both lanes keep mappings in memory only, so a bridge restart
+   * forks a new agent instead of continuing the existing one.
+   */
+  cloudAgentSessionStore?: CloudAgentSessionStore;
   /** Image upstream fetch implementation. Primarily useful for deterministic tests. */
   imageFetch?: typeof fetch;
   /** Per-provider API key overrides, e.g. `{ 'vercel-ai-gateway': '…' }`. */
@@ -316,6 +336,12 @@ export class OpenAICompatibleServer {
   private ownsUsageTracker = false;
   private imageGeneration: ImageGenerationConfig | undefined;
   private cloudAgent: CloudAgentConfig | undefined;
+  private localAgent: LocalAgentLaneConfig | undefined;
+  /**
+   * Cached agent backends. A driver keeps live sessions in memory, so this must
+   * be stable across requests and dropped whenever lane settings change.
+   */
+  private agentBackendsCache: CloudAgentBackend[] | undefined;
   private policy: Policy | undefined;
   private cooldown: LaneCooldown | undefined;
   private source: ProviderSource;
@@ -329,6 +355,7 @@ export class OpenAICompatibleServer {
     this.providers = options.providers ?? defaultProviders;
     this.imageGeneration = options.imageGeneration;
     this.cloudAgent = options.cloudAgent;
+    this.localAgent = options.localAgent;
     this.catalogSource = options.catalogSource;
     this.source = this.catalogSource ?? createRegistrySource(this.providers);
     this.policy = options.policy;
@@ -371,6 +398,8 @@ export class OpenAICompatibleServer {
     defaultModel?: string;
     imageGeneration?: ImageGenerationConfig;
     cloudAgent?: CloudAgentConfig;
+    localAgent?: LocalAgentLaneConfig;
+    cloudAgentSessionStore?: CloudAgentSessionStore;
     keystore?: KeyStore;
     staticModels?: Record<string, string[]>;
     pinnedProviderId?: string;
@@ -412,6 +441,13 @@ export class OpenAICompatibleServer {
       this.cloudAgent = partial.cloudAgent;
       this.options.cloudAgent = partial.cloudAgent;
     }
+    if (partial.localAgent !== undefined) {
+      this.localAgent = partial.localAgent;
+      this.options.localAgent = partial.localAgent;
+    }
+    // Any lane change invalidates the cached backends: the enabled set and the
+    // lane config both feed into what gets built.
+    this.agentBackendsCache = undefined;
     if (partial.keystore !== undefined) this.options.keystore = partial.keystore;
     if (partial.staticModels !== undefined) this.options.staticModels = partial.staticModels;
     if (partial.pinnedProviderId !== undefined) this.options.pinnedProviderId = partial.pinnedProviderId || undefined;
@@ -897,7 +933,24 @@ export class OpenAICompatibleServer {
       if (await this.handleChatGptPlan(method, path, req, res)) return;
     }
 
-    const cloudAgentCancelMatch = path.match(/^\/v1\/cloud-agents\/([^/]+)\/cancel$/);    if (method === 'POST' && cloudAgentCancelMatch) {
+    // Start a run on a backend that drives its own runs (the local lane).
+    // The remote lane has no equivalent: its runs are driven through the
+    // normal chat/responses wires, so this route is a 400 there rather than a
+    // silent no-op.
+    const cloudAgentRunMatch = path.match(/^\/v1\/cloud-agents\/run$/);
+    if (method === 'POST' && cloudAgentRunMatch) {
+      this.log(`${method} ${path} ->`);
+      try {
+        const handle = await this.handleCloudAgentRun(req);
+        this.sendJson(res, 202, handle);
+      } catch (err) {
+        this.sendCloudAgentManageError(res, err);
+      }
+      return;
+    }
+
+    const cloudAgentCancelMatch = path.match(/^\/v1\/cloud-agents\/([^/]+)\/cancel$/);
+    if (method === 'POST' && cloudAgentCancelMatch) {
       this.log(`${method} ${path} ->`);
       try {
         const agent = await this.handleCloudAgentCancel(decodeURIComponent(cloudAgentCancelMatch[1] ?? ''));
@@ -1846,38 +1899,182 @@ export class OpenAICompatibleServer {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  private resolveCloudAgentApiKey(): string {
-    if (!this.cloudAgent?.enabled) {
-      throw new ModelHitchError(
-        'bad-request',
-        'Cursor Cloud Agent lane is disabled. Enable cloudAgent in ~/.modelhitch/config.json or via /settings.',
-        { status: 403, providerId: CURSOR_CLOUD_PROVIDER_ID },
-      );
+  /**
+   * The cloud-agent backend the management routes talk to.
+   *
+   * Today this is always Cursor; the point of routing through the interface is
+   * that the routes, the workspace rail, and the cancel button no longer know
+   * that. A second backend is a change here, not in every handler.
+   */
+  private cloudAgentBackend(): CloudAgentBackend {
+    const key = this.options.apiKeys?.[CURSOR_CLOUD_PROVIDER_ID];
+    const opts: Parameters<typeof createCursorCloudBackend>[0] = {
+      config: this.cloudAgent ?? { enabled: false },
+    };
+    if (key) opts.apiKey = key;
+    if (this.options.imageFetch) opts.fetchImpl = this.options.imageFetch;
+    return createCursorCloudBackend(opts);
+  }
+
+  /**
+   * Every cloud-agent-shaped backend the bridge can serve, in `list()` order.
+   *
+   * Both entries answer the same interface, so the routes below fan out and
+   * merge instead of branching on vendor. A disabled backend is omitted rather
+   * than included-and-failing, so `GET /v1/cloud-agents` describes what the
+   * bridge will actually do.
+   *
+   * Cached, and that is load-bearing: a driver backend holds its live sessions
+   * in memory, so rebuilding it per request would make a run invisible to the
+   * very next `get`/`cancel`. The cache is dropped on reconfigure, where the
+   * lane settings may have changed.
+   */
+  private cloudAgentBackends(): CloudAgentBackend[] {
+    if (this.agentBackendsCache) return this.agentBackendsCache;
+    const backends: CloudAgentBackend[] = [];
+    const cursor = this.cloudAgentBackend();
+    if (cursor.readiness().ready) backends.push(cursor);
+
+    const local = createLocalAgentBackend({
+      enabled: this.localAgent?.enabled === true,
+      ...(this.localAgent?.workspaceDir !== undefined ? { workspaceDir: this.localAgent.workspaceDir } : {}),
+      ...(this.localAgent?.model !== undefined ? { model: this.localAgent.model } : {}),
+      ...(this.localAgent?.maxTurns !== undefined ? { maxTurns: this.localAgent.maxTurns } : {}),
+      ...(this.options.cloudAgentSessionStore
+        ? { sessionStore: this.options.cloudAgentSessionStore }
+        : {}),
+    });
+    if (local.readiness().ready) backends.push(local);
+    this.agentBackendsCache = backends;
+    return backends;
+  }
+
+  /**
+   * Route a session id to the backend that owns it.
+   *
+   * Ids are opaque, so the owner is discovered by asking: the local lane knows
+   * its own ids, and the remote lane 404s for anything else. That keeps the
+   * routes free of id-shape guessing (a `local-` prefix check would break the
+   * moment either side changes its id format).
+   */
+  private async cloudAgentBackendFor(id: string): Promise<CloudAgentBackend> {
+    const backends = this.cloudAgentBackends();
+    if (backends.length === 0) {
+      // No backend is ready: surface a real readiness error rather than a 404,
+      // so the UI can say "disabled" instead of "not found".
+      const readiness = this.cloudAgentBackend().readiness();
+      if (!readiness.ready) throw readiness.error;
+      throw new ModelHitchError('model-not-found', `Cloud agent "${id}" was not found.`, { status: 404 });
     }
-    const key = this.options.apiKeys?.[CURSOR_CLOUD_PROVIDER_ID] ?? process.env.CURSOR_API_KEY;
-    if (!key) {
-      throw new ModelHitchError(
-        'missing-api-key',
-        'Cursor Cloud Agent lane requires CURSOR_API_KEY or keys.cursor-cloud in ~/.modelhitch/config.json.',
-        { status: 401, providerId: CURSOR_CLOUD_PROVIDER_ID },
-      );
+    for (const backend of backends) {
+      try {
+        await backend.get(id);
+        return backend;
+      } catch {
+        continue;
+      }
     }
-    return key;
+    throw new ModelHitchError('model-not-found', `Cloud agent "${id}" was not found.`, {
+      status: 404,
+      providerId: CURSOR_CLOUD_PROVIDER_ID,
+    });
   }
 
   private async handleCloudAgentList() {
-    const apiKey = this.resolveCloudAgentApiKey();
-    return listCursorCloudAgents(apiKey, { fetchImpl: this.options.imageFetch });
+    const backends = this.cloudAgentBackends();
+    if (backends.length === 0) {
+      // Nothing enabled is a 403 with the reason, not an empty list: an empty
+      // list reads as "you have no agents", which is a different statement.
+      const readiness = this.cloudAgentBackend().readiness();
+      if (!readiness.ready) throw readiness.error;
+      return [];
+    }
+    const results = await Promise.all(backends.map((backend) => backend.list()));
+    return results.flat();
   }
 
   private async handleCloudAgentGet(id: string) {
-    const apiKey = this.resolveCloudAgentApiKey();
-    return getCursorCloudAgent(apiKey, id, { fetchImpl: this.options.imageFetch });
+    const backend = await this.cloudAgentBackendFor(id);
+    return backend.get(id);
   }
 
   private async handleCloudAgentCancel(id: string) {
-    const apiKey = this.resolveCloudAgentApiKey();
-    return cancelCursorCloudAgent(apiKey, id, { fetchImpl: this.options.imageFetch });
+    const backend = await this.cloudAgentBackendFor(id);
+    return backend.cancel(id);
+  }
+
+  /**
+   * Start a run on a driver backend.
+   *
+   * Only `execution: 'backend'` lanes can be started here. The remote lane's
+   * runs are driven through the ordinary chat wires, so asking this route for a
+   * Cursor run is a 400 that says which route to use, not a silent no-op.
+   */
+  private async handleCloudAgentRun(req: IncomingMessage) {
+    const body = (await this.readBody(req)) as { prompt?: unknown; sessionId?: unknown; model?: unknown } | null;
+    const prompt = typeof body?.prompt === 'string' ? body.prompt.trim() : '';
+    if (!prompt) {
+      throw new ModelHitchError('bad-request', 'A cloud-agent run needs a non-empty "prompt".', {
+        status: 400,
+      });
+    }
+
+    const drivers = this.cloudAgentBackends().filter(drivesOwnRuns);
+    if (drivers.length === 0) {
+      // Distinguish "you have no driver lane" from "your lane is broken".
+      const ready = this.cloudAgentBackends();
+      if (ready.length > 0) {
+        throw new ModelHitchError(
+          'bad-request',
+          'This cloud-agent lane does not start runs over HTTP. Route chat to it instead (the lane id is its provider id).',
+          { status: 400 },
+        );
+      }
+      const readiness = this.cloudAgentBackend().readiness();
+      if (!readiness.ready) throw readiness.error;
+      throw new ModelHitchError('bad-request', 'No cloud-agent lane is enabled that can start a run.', {
+        status: 403,
+      });
+    }
+
+    // One driver today; pick the first that is ready.
+    const driver = drivers[0] as CloudAgentRunDriver;
+    const input: CloudAgentStartInput = {
+      sessionKey: typeof body?.sessionId === 'string' && body.sessionId.trim() !== ''
+        ? body.sessionId.trim()
+        : `run-${Date.now()}`,
+      prompt,
+      model: typeof body?.model === 'string' && body.model.trim() !== '' ? body.model.trim() : driver.id,
+    };
+
+    const handle = await driver.startRun(input);
+    // `startRun` only queues the work — the backend's contract is start-then-
+    // stream so a caller can attach later. Nothing else in the bridge consumes
+    // the stream, so a run left un-driven would sit at RUNNING forever. Drive
+    // it here and let it finish in the background; progress is observable
+    // through GET /v1/cloud-agents/:id.
+    void this.driveCloudAgentRun(driver, handle);
+    return handle;
+  }
+
+  /**
+   * Drain a driver run to completion, in the background.
+   *
+   * Accumulates text for the log only. Failures are swallowed after logging
+   * because there is no HTTP response left to attach them to — the session's
+   * status is the durable signal, and the backend already reports a failed run
+   * as an `error` event.
+   */
+  private async driveCloudAgentRun(driver: CloudAgentRunDriver, handle: CloudAgentRunHandle): Promise<void> {
+    try {
+      for await (const event of driver.streamRun(handle)) {
+        if (event.type === 'error') {
+          this.log(`  !! cloud-agent ${handle.sessionId}: ${event.message}`);
+        }
+      }
+    } catch (err) {
+      this.log(`  !! cloud-agent ${handle.sessionId} run failed: ${(err as Error).message}`);
+    }
   }
 
   private sendCloudAgentManageError(res: ServerResponse, err: unknown): void {

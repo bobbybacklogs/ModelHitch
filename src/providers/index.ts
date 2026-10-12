@@ -36,6 +36,33 @@ export {
   type SseEvent,
 } from './cursor-cloud.js';
 export { CursorCloudSessionStore } from './cursor-cloud-session.js';
+// The fs-backed session store is deliberately absent from this barrel: it is
+// reachable from the browser entry, and the store uses node:fs. Import it from
+// its own module directly, the same way SqliteUsageStorage stays out of the
+// browser graph. The record type is safe here because types are erased.
+export type { CloudAgentSessionRecord } from './cloud-agent-session-store.js';
+export {
+  adoptsSessions,
+  drivesOwnRuns,
+  type CloudAgentBackend,
+  type CloudAgentPromptImage,
+  type CloudAgentRepo,
+  type CloudAgentRunDriver,
+  type CloudAgentRunEvent,
+  type CloudAgentRunHandle,
+  type CloudAgentSession,
+  type CloudAgentSessionAdopter,
+  type CloudAgentStartInput,
+} from './cloud-agent-backend.js';
+export {
+  createCursorCloudBackend,
+  normalizeCursorRunEvent,
+  type CursorCloudBackendOptions,
+} from './cursor-cloud-backend.js';
+// The local agent backend is deliberately absent from this barrel. It
+// value-imports the harness, which would drag node:fs, process spawning, and
+// workspace writes into the browser entry's import graph. Reach it through its
+// own module instead.
 export {
   opencode,
   opencodeGo,

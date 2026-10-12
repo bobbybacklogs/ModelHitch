@@ -361,7 +361,53 @@ complete on `response.completed`. Both are enforced in the adapter, and the plan
 travels with a limit error so the caller can act on it.
 
 [ChatGPT plan lane guide →](./docs/guide.md#sign-in-with-chatgpt) · [Sign in with ChatGPT spec →](https://developers.openai.com/siwc/token-sharing-open-source)
+### Agent lanes
 
+Two lanes do agent-shaped work — a prompt in, a durable session out — behind one set of routes, so
+a client does not need to know which one is serving.
+
+|  | Cursor Cloud Agent | Local agent |
+| --- | --- | --- |
+| **Where it runs** | Cursor's cloud, against a repo it checks out | A working tree on this machine |
+| **Needs** | `CURSOR_API_KEY` | Nothing beyond the bridge's own provider |
+| **Runs while** | The vendor holds it — survives a bridge restart | The bridge process is alive |
+| **Config** | `cloudAgent` | `localAgent` |
+
+Both are **off by default**, and both answer the same routes:
+
+```bash
+# what is running (both lanes merge into one list)
+curl http://127.0.0.1:3939/v1/cloud-agents
+
+# start a run (local lane only; the remote lane's runs go through the chat wires)
+curl -X POST http://127.0.0.1:3939/v1/cloud-agents/run \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Read hello.txt and tell me its contents","sessionId":"conv-1"}'
+
+curl -X POST http://127.0.0.1:3939/v1/cloud-agents/<id>/cancel
+```
+
+**The local lane requires an explicit `workspaceDir`.** There is no fallback to the current
+directory on purpose: a bridge started from a repo root would otherwise hand the agent read/write
+over that entire repository. Without it the lane reports itself not-ready and refuses to run.
+
+```jsonc
+{
+  "localAgent": {
+    "enabled": true,
+    "workspaceDir": "C:\\work\\scratch",  // required — the agent may only work here
+    "maxTurns": 8,
+    "model": "opencode-go/deepseek-v4-flash"  // optional; defaults to the configured lane
+  }
+}
+```
+
+Conversations map to sessions durably (`~/.modelhitch/cloud-agents/`), so a restarted bridge
+continues the existing session rather than forking a new one. Cursor runs are owned by Cursor the
+same way; a local run that was still **in flight** when the bridge died does not survive, because
+there is no supervisor yet — only completed sessions are durable.
+
+[Bridge guide →](./docs/guide.md) · [agent-runtime scaffold →](./agent-runtime/README.md)
 ## Development
 
 ```bash

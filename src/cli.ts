@@ -75,6 +75,7 @@ import { createChatGptPlanProvider } from './providers/chatgpt-plan.js';
 import { readOpenCodeLocalState } from './opencode-state.js';
 import { validateCursorCloudApiKey, CURSOR_CLOUD_PROVIDER_ID } from './providers/cursor-cloud.js';
 import { CursorCloudSessionStore } from './providers/cursor-cloud-session.js';
+import { CloudAgentSessionStore } from './providers/cloud-agent-session-store.js';
 
 /** Provider id → env vars checked (first hit wins) when seeding config.keys. */
 const PROVIDER_KEY_ENV: Record<string, string[]> = {
@@ -95,6 +96,13 @@ const PROVIDER_KEY_ENV: Record<string, string[]> = {
 };
 
 const cloudSessionStore = new CursorCloudSessionStore();
+
+/**
+ * Durable conversation -> cloud-agent map, so a restarted bridge continues the
+ * remote agent instead of forking a new one. Lives beside the config file, like
+ * the workspace store.
+ */
+const cloudAgentSessionStore = new CloudAgentSessionStore(join(modelhitchHome(), 'cloud-agents'));
 
 /**
  * Load KEY=VALUE pairs from a dotenv-style file into process.env without
@@ -739,9 +747,14 @@ async function runBridge(): Promise<void> {
     chatgptPlanTokens: chatgptPlanAuth,
     chatgptPlanAccountModels,
   });
+  // Every bridgeProviders call gets the durable cloud-agent store, so the
+  // restart-safe mapping is never missing at one call site and present at
+  // another (which would make reuse depend on which route built the providers).
+  const cloudAgentContext = () => ({ cloudAgentSessionStore });
   const providers = bridgeProviders(baseProviders, config, cloudSessionStore, {
     openCodeState: byokState,
     ...chatgptPlanContext(),
+    ...cloudAgentContext(),
   });
   await validateCloudAgentKey(config);
 
@@ -821,6 +834,8 @@ async function runBridge(): Promise<void> {
     },
     imageGeneration: config.imageGeneration,
     cloudAgent: config.cloudAgent,
+    localAgent: config.localAgent,
+    cloudAgentSessionStore,
     maxBodyBytes,
     policy: chatgptPlan.policy,
     cooldown,
@@ -879,7 +894,11 @@ async function runBridge(): Promise<void> {
           // slots, or turned on for an account that is already signed in.
           await refreshChatGptPlanAccountModels();
           const applyProviders = (base: Provider[]) =>
-            bridgeProviders(base, config, cloudSessionStore, { openCodeState: state, ...chatgptPlanContext() });
+            bridgeProviders(base, config, cloudSessionStore, {
+              openCodeState: state,
+              ...chatgptPlanContext(),
+              ...cloudAgentContext(),
+            });
           const plan = composePlan(state);
           const routeDefaults = {
             defaultProviderId: pinnedProviderId ?? plan.chatgptPlan.defaultProviderId ?? config.defaultProviderId,
@@ -900,6 +919,8 @@ async function runBridge(): Promise<void> {
               catalogSource: src,
               imageGeneration: config.imageGeneration,
               cloudAgent: config.cloudAgent,
+              localAgent: config.localAgent,
+              cloudAgentSessionStore,
               ...routeDefaults,
             });
           } else if (!wantsCatalog && catalogSource) {
@@ -912,6 +933,8 @@ async function runBridge(): Promise<void> {
               catalogSource: undefined,
               imageGeneration: config.imageGeneration,
               cloudAgent: config.cloudAgent,
+              localAgent: config.localAgent,
+              cloudAgentSessionStore,
               ...routeDefaults,
             });
           } else {
@@ -922,6 +945,8 @@ async function runBridge(): Promise<void> {
               baseUrls: config.catalog?.baseUrls,
               imageGeneration: config.imageGeneration,
               cloudAgent: config.cloudAgent,
+              localAgent: config.localAgent,
+              cloudAgentSessionStore,
               ...routeDefaults,
             });
           }
@@ -950,6 +975,7 @@ async function runBridge(): Promise<void> {
       providers: bridgeProviders(catalogSource ? catalogSource.providers() : baseProviders, config, cloudSessionStore, {
         openCodeState: state,
         ...chatgptPlanContext(),
+        ...cloudAgentContext(),
       }),
       policy: plan.chatgptPlan.policy,
       defaultProviderId: pinnedProviderId ?? plan.chatgptPlan.defaultProviderId ?? config.defaultProviderId,

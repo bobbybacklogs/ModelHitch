@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CONFIG_VERSION, type CloudAgentConfig } from '../src/config.js';
 import { validateConfig } from '../src/config.js';
 import {
@@ -11,6 +14,7 @@ import {
   CURSOR_CLOUD_API_BASE,
 } from '../src/providers/cursor-cloud.js';
 import { CursorCloudSessionStore } from '../src/providers/cursor-cloud-session.js';
+import { CloudAgentSessionStore } from '../src/providers/cloud-agent-session-store.js';
 import { ModelHitchError } from '../src/core/errors.js';
 import type { ChatParams } from '../src/core/types.js';
 
@@ -148,6 +152,113 @@ describe('cursor-cloud provider', () => {
     }
     expect(chunks.filter((c) => c.type === 'text-delta').map((c) => (c as { text: string }).text).join('')).toContain('Working');
     expect(chunks.at(-1)?.type).toBe('finish');
+  });
+
+  describe('durable session reuse across a bridge restart', () => {
+    it('continues the recorded agent with a cold in-memory store', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'mh-cursor-durable-'));
+      try {
+        // Bridge run 1 records the mapping.
+        const first = createCursorCloudProvider({
+          config: baseConfig,
+          sessionStore: new CursorCloudSessionStore(),
+          durableSessionStore: new CloudAgentSessionStore(dir),
+          fetchImpl: mockCursorFetch().fetchImpl,
+        });
+        await first.chat({ ...baseParams, sessionId: 'sess-a' }, { apiKey: 'test-key' });
+
+        // Bridge run 2: new process, empty memory, same disk.
+        const calls: Array<{ method: string; url: string }> = [];
+        const base = mockCursorFetch().fetchImpl;
+        const fetchImpl: typeof fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : input instanceof Request ? input.url : input.href;
+          calls.push({ method: init?.method ?? 'GET', url });
+          return base(input, init);
+        };
+        const restarted = createCursorCloudProvider({
+          config: baseConfig,
+          sessionStore: new CursorCloudSessionStore(),
+          durableSessionStore: new CloudAgentSessionStore(dir),
+          fetchImpl,
+        });
+        await restarted.chat({ ...baseParams, sessionId: 'sess-a' }, { apiKey: 'test-key' });
+
+        const agentCreates = calls.filter((c) => c.method === 'POST' && c.url.endsWith('/agents'));
+        const runCreates = calls.filter((c) => c.method === 'POST' && c.url.includes('/agents/bc-mock-1/runs'));
+        expect(agentCreates).toHaveLength(0);
+        expect(runCreates).toHaveLength(1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('recovers from a stale recorded agent by re-creating one', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'mh-cursor-stale-'));
+      try {
+        const store = new CloudAgentSessionStore(dir);
+        store.set('cursor-cloud', 'sess-stale', 'bc-deleted');
+
+        const calls: Array<{ method: string; url: string }> = [];
+        const fetchImpl: typeof fetch = async (input, init) => {
+          const url = typeof input === 'string' ? input : input instanceof Request ? input.url : input.href;
+          const method = init?.method ?? 'GET';
+          calls.push({ method, url });
+          if (method === 'POST' && url.endsWith('/agents/bc-deleted/runs')) {
+            return new Response(JSON.stringify({ error: { type: 'invalid_request_error', message: 'gone' } }), {
+              status: 404,
+            });
+          }
+          if (method === 'POST' && url.endsWith('/agents')) {
+            return new Response(JSON.stringify({ agent: { id: 'bc-fresh' }, run: { id: 'run-fresh' } }), {
+              status: 200,
+            });
+          }
+          if (url.includes('/stream')) {
+            const payload = `event: result\ndata: ${JSON.stringify({ status: 'FINISHED', text: 'ok' })}\n\n`;
+            return new Response(payload, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+          }
+          return new Response(JSON.stringify({ error: { message: `unmocked ${method} ${url}` } }), { status: 400 });
+        };
+
+        const provider = createCursorCloudProvider({
+          config: baseConfig,
+          sessionStore: new CursorCloudSessionStore(),
+          durableSessionStore: store,
+          fetchImpl,
+        });
+        const result = await provider.chat({ ...baseParams, sessionId: 'sess-stale' }, { apiKey: 'test-key' });
+
+        expect(result.message.content).toBe('ok');
+        // Retried as a new agent, and the stale mapping was replaced.
+        expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/agents'))).toBe(true);
+        expect(store.get('cursor-cloud', 'sess-stale')).toBe('bc-fresh');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('per-request reuse ignores the durable map and always creates an agent', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'mh-cursor-perreq-'));
+      try {
+        const store = new CloudAgentSessionStore(dir);
+        store.set('cursor-cloud', 'sess-p', 'bc-recorded');
+        const { fetchImpl, calls } = mockCursorFetch();
+        const provider = createCursorCloudProvider({
+          config: { ...baseConfig, sessionReuse: 'per-request' },
+          sessionStore: new CursorCloudSessionStore(),
+          durableSessionStore: store,
+          fetchImpl,
+        });
+
+        await provider.chat({ ...baseParams, sessionId: 'sess-p' }, { apiKey: 'test-key' });
+
+        const runCreates = calls.filter((c) => c.method === 'POST' && c.url.includes('/agents/bc-recorded/runs'));
+        expect(runCreates).toHaveLength(0);
+        expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/agents'))).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   it('throws missing-api-key without credentials', async () => {

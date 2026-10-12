@@ -83,6 +83,13 @@ export function defaultConfigTemplate(): ModelHitchConfig {
       workOnCurrentBranch: false,
       sessionReuse: 'per-bridge-session',
     },
+    // Local agent lane: agent-shaped work in a working tree on this machine.
+    // Off by default. Unlike the Cursor lane there is no remote vendor, so a
+    // running session only makes progress while the bridge process is alive;
+    // completed sessions are durable and resumable.
+    localAgent: {
+      enabled: false,
+    },
     // OpenCode Console BYOK (https://opencode.ai/v2/docs/console/byok/): one
     // provider lane per connection. Paste the Console API URL (or the bare
     // `conn_…` id) into `connections` from /settings, or run

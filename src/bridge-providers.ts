@@ -4,6 +4,7 @@ import type { ChatGptPlanTokenSource } from './chatgpt-plan.js';
 import { customLaneProviders } from './custom-lanes.js';
 import { createCursorCloudProvider, CURSOR_CLOUD_PROVIDER_ID } from './providers/cursor-cloud.js';
 import { CursorCloudSessionStore } from './providers/cursor-cloud-session.js';
+import type { CloudAgentSessionStore } from './providers/cloud-agent-session-store.js';
 import { openCodeByokProviders, type OpenCodeLocalState } from './opencode-byok.js';
 import { isCustomLaneProviderId } from './providers/custom-lane.js';
 import { isOpenCodeByokProviderId } from './providers/opencode-byok.js';
@@ -28,6 +29,13 @@ export interface BridgeProviderContext {
   chatgptPlanBaseUrl?: string;
   /** Transport for the ChatGPT plan lane. Unset means the global `fetch`. */
   chatgptPlanFetch?: typeof fetch;
+  /**
+   * Durable conversation -> cloud-agent map, so a restarted bridge continues an
+   * existing remote agent instead of forking a new one. Absent means the lane
+   * keeps its mappings in memory only (correct within one process, lost across
+   * a restart).
+   */
+  cloudAgentSessionStore?: CloudAgentSessionStore;
 }
 
 /**
@@ -83,6 +91,7 @@ export function bridgeProviders(
       createCursorCloudProvider({
         config: config.cloudAgent,
         sessionStore,
+        ...(context.cloudAgentSessionStore ? { durableSessionStore: context.cloudAgentSessionStore } : {}),
       }),
     );
   }
