@@ -739,10 +739,39 @@ export function formatManifestList(manifests: readonly string[]): string {
  * run, and "the toolchain here is unknown" is itself worth knowing before it
  * decides how to build or test.
  */
+/**
+ * The shell a `bash`-tool command actually runs in, and what that implies.
+ *
+ * The tool is named `bash` and is implemented with `child_process.exec`, which
+ * uses the platform's default shell: `cmd.exe` on Windows, `/bin/sh` elsewhere.
+ * Without this line a model reasonably assumes POSIX and emits `ls`, `od`, and
+ * `wc` — which fail on Windows with `'ls' is not recognized` and burn turns
+ * rediscovering the shell. Naming the shell is cheaper than letting it guess.
+ */
+export function shellFacts(platform: NodeJS.Platform = process.platform): {
+  shell: string;
+  note: string;
+} {
+  if (platform === 'win32') {
+    return {
+      // Kept to one line: the workspace section budgets itself to a handful of
+      // lines, and a paragraph here would cost every turn in every run.
+      shell: 'cmd.exe',
+      note: 'no POSIX tools (ls, cat, grep, od, wc) — use dir, type, findstr, or the read/grep/glob tools',
+    };
+  }
+  return {
+    shell: '/bin/sh',
+    note: 'POSIX tools available',
+  };
+}
+
 export function formatWorkspaceSection(facts: WorkspaceFacts): string {
   const heading = '## Workspace';
+  const { shell, note } = shellFacts();
+  const shellLine = `Shell: ${shell} — ${note}`;
   if (facts.languages.length === 0) {
-    return `${heading}\nNothing in this directory identified a language or a build tool; treat the toolchain as unknown.`;
+    return `${heading}\nNothing in this directory identified a language or a build tool; treat the toolchain as unknown.\n${shellLine}`;
   }
   const lines = [
     `Detected: ${formatWorkspaceFacts(facts)}` +
@@ -751,5 +780,6 @@ export function formatWorkspaceSection(facts: WorkspaceFacts): string {
   const manifestList = formatManifestList(facts.manifests);
   if (manifestList !== '') lines.push(`Manifests: ${manifestList}`);
   if (facts.testCommand !== '') lines.push(`Test command: ${facts.testCommand}`);
+  lines.push(shellLine);
   return `${heading}\n${lines.join('\n')}`;
 }

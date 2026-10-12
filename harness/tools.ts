@@ -84,7 +84,10 @@ export const HARNESS_TOOLS: ToolDefinition[] = [
   {
     name: 'bash',
     description:
-      'Run a shell command in the workspace directory. Returns stdout+stderr. Stdin is closed unless `stdin` is given (prevents hangs on prompts).',
+      'Run a shell command in the workspace directory. Returns stdout+stderr. Stdin is closed unless `stdin` is given (prevents hangs on prompts). ' +
+      'The shell is the platform default, NOT necessarily bash: cmd.exe on Windows (/bin/sh elsewhere). ' +
+      'On Windows the POSIX utilities (ls, cat, rm, grep, od, wc, head, tail) do not exist — use dir/type/del/findstr/where, ' +
+      'or prefer the read/grep/glob tools, which are cross-platform.',
     parameters: {
       type: 'object',
       properties: {
@@ -148,9 +151,54 @@ function strArg(args: Record<string, unknown>, key: string): string {
   return v;
 }
 
+/**
+ * The shell `exec` will use, and a hint when a POSIX command was attempted on
+ * Windows.
+ *
+ * The `bash` tool name is aspirational: `exec` uses `cmd.exe` on Windows. A
+ * model that emits `ls -la` gets an opaque "'ls' is not recognized" and spends a
+ * turn rediscovering the shell. Naming the substitution turns that into one
+ * corrected call. Detected from the command rather than the platform alone, so
+ * a Windows user with Git Bash on PATH is never told otherwise.
+ */
+export function shellHint(command: string, message: string, platform: NodeJS.Platform): string {
+  if (platform !== 'win32') return '';
+  if (!/is not recognized|not found/i.test(message)) return '';
+  const first = command.trim().split(/[\s;|&]/)[0] ?? '';
+  const substitutes: Record<string, string> = {
+    ls: 'dir',
+    cat: 'type',
+    rm: 'del',
+    rmdir: 'rmdir',
+    cp: 'copy',
+    mv: 'move',
+    grep: 'findstr',
+    head: '(no direct equivalent; use the read tool with a line count)',
+    tail: '(no direct equivalent; use the read tool with a line count)',
+    wc: '(no direct equivalent; use the read tool)',
+    od: '(no direct equivalent)',
+    which: 'where',
+    touch: '(use the write tool)',
+  };
+  const replacement = substitutes[first];
+  const known = replacement !== undefined;
+  return (
+    `\n[harness] This shell is cmd.exe (Windows): ${known ? `"${first}" is not available — use "${replacement}".` : `"${first}" is not available.`}` +
+    ' Prefer the read/grep/glob tools over shell equivalents.'
+  );
+}
+
 /** Everything `executeHarnessTool` needs beyond the call itself. */
 export interface ToolExecutionOptions {
   workspaceDir?: string;
+  /**
+   * Overrides `process.platform` for the shell-availability hint.
+   *
+   * Injected so the Windows path is testable on any machine: the hint exists
+   * because a POSIX command on Windows fails opaquely, and a test that could
+   * only run on Windows would not guard it.
+   */
+  platform?: NodeJS.Platform;
   /** Cancels the call: a timeout, or Ctrl-C. */
   signal?: AbortSignal;
   /** When set, mutating calls are shown and confirmed before they run. */
@@ -667,6 +715,8 @@ export async function executeHarnessTool(
   opts: ToolExecutionOptions = {},
 ): Promise<ToolResult> {
   const workspaceDir = resolve(opts.workspaceDir ?? process.cwd());
+  // Injectable so the Windows-only shell hint is testable from any platform.
+  const platform = opts.platform ?? process.platform;
   const signal = opts.signal;
   const snapshot = opts.snapshot;
   const readCache = opts.readCache;
@@ -781,8 +831,10 @@ export async function executeHarnessTool(
             },
             (err, stdout, stderr) => {
               const out = `${stdout}${stderr ? `\n[stderr]\n${stderr}` : ''}`.slice(0, 20_000);
-              if (err) finish(`Exit ${err.code ?? '?'}: ${err.message}\n${out}`);
-              else finish(out || '(no output)');
+              if (err) {
+                const hint = shellHint(command, err.message, platform);
+                finish(`Exit ${err.code ?? '?'}: ${err.message}\n${out}${hint}`);
+              } else finish(out || '(no output)');
             },
           );
           // `exec`'s own timeout kills only the direct child, so an interrupt

@@ -256,8 +256,10 @@ describe('formatWorkspaceSection', () => {
     expect(section).toContain('Detected: typescript (npm), 4 source files');
     expect(section).toContain('Manifests: package.json, tsconfig.json');
     expect(section).toContain('Test command: npm test');
-    // A handful of lines, not an inventory.
-    expect(section.split('\n').length).toBeLessThanOrEqual(4);
+    // A handful of lines, not an inventory. The budget is 5 because the shell
+    // line is one of them: a model that does not know it is on cmd.exe emits
+    // `ls` and wastes a turn, which costs more than the line does.
+    expect(section.split('\n').length).toBeLessThanOrEqual(5);
   });
 
   it('still emits a section when the directory is unrecognised', () => {
