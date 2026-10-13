@@ -22,11 +22,18 @@ export type { ModelHitchServerOptions } from './server/server.js';
 // the bridge's routing plan as pickable models (`GET /v1/models` lane entries)
 export {
   AUTO_MODEL_ID,
+  INTENT_MODEL_SEPARATOR,
   autoModelEntry,
   autoModelLabel,
   displayModelName,
+  intentFromModelId,
+  intentModelEntry,
+  intentModelId,
+  intentModelIds,
+  intentModelLabel,
   isAutoModelId,
   isAutoModelMeta,
+  isIntentModelIdShape,
   laneLabel,
   laneRoute,
   planLanes,
@@ -93,6 +100,30 @@ export {
   type CapabilityRequirements,
   type SkippedCapabilityLane,
 } from './core/capabilities.js';
+
+// intent-aware rotation — one named plan per kind of work
+// (docs/intent-rotation.md)
+export {
+  BULK_MAX_CHARS,
+  BULK_MAX_TOKENS,
+  DEFAULT_INTENT,
+  INTENT_NAMES,
+  REASONING_MIN_CHARS,
+  inferenceEnabled,
+  inferIntent,
+  inputCharacters,
+  intentPolicy,
+  intentVocabulary,
+  isIntentName,
+  validateIntentProfiles,
+  validateIntents,
+  validateIntentsShape,
+  type IntentsConfig,
+  type IntentKey,
+  type IntentName,
+  type IntentProfiles,
+  type IntentShape,
+} from './core/intent.js';
 export { parseRetryAfter } from './core/headers.js';
 export {
   OPENAI_COMPAT_GATEWAY_CATALOG_DEFAULT_MAX_TOKENS,

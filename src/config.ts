@@ -3,6 +3,7 @@ import type { MemoryLaneCooldownOptions } from './core/cooldown.js';
 import type { LaneCooldown } from './core/failover.js';
 import type { Policy, ProviderSource } from './core/policy.js';
 import { validatePolicy } from './core/policy.js';
+import { validateIntentProfiles, validateIntentsShape, type IntentsConfig } from './core/intent.js';
 import { CircuitBreaker } from './core/circuit-breaker.js';
 import { MemoryLaneCooldown } from './core/cooldown.js';
 import type { CatalogSourceOptions } from './catalog/source.js';
@@ -273,6 +274,13 @@ export interface ModelHitchConfig {
   defaultModel?: string;
   /** Trusted + fallback lane plan. */
   policy?: Policy;
+  /**
+   * Intent-aware rotation: one plan per kind of work, chosen from the shape of
+   * each request. The plan a request routes through is
+   * `intents.profiles[inferred] ?? policy`, so this block is purely additive —
+   * absent, it routes exactly as before.
+   */
+  intents?: IntentsConfig;
   /** models.dev catalog mode (serializable subset). */
   catalog?: CatalogConfig;
   /** Lane-health engine: circuit breaker or memory cooldown. */
@@ -388,6 +396,22 @@ export function validateConfig(config: unknown): ConfigValidation {
       const b = cfg.policy.backoff;
       if (b.type !== 'fixed' && b.type !== 'exponential') errors.push('policy.backoff.type must be "fixed" or "exponential".');
       if (typeof b.baseMs !== 'number' || b.baseMs < 0) errors.push('policy.backoff.baseMs must be a non-negative number.');
+    }
+  }
+
+  if (cfg.intents !== undefined) {
+    // Shape and names only — provider-aware checks live in
+    // `validateConfigWithSource`, which has a warmed source to check against.
+    errors.push(...validateIntentsShape(cfg.intents));
+    const profiles = cfg.intents?.profiles;
+    if (profiles && typeof profiles === 'object' && !Array.isArray(profiles)) {
+      for (const [name, profile] of Object.entries(profiles)) {
+        if (!profile || !Array.isArray(profile.trusted) || !Array.isArray(profile.fallback)) {
+          errors.push(`intents.profiles.${name} must have trusted[] and fallback[] arrays.`);
+        } else if (profile.trusted.length === 0 && profile.fallback.length === 0) {
+          errors.push(`intents.profiles.${name} must have at least one entry in trusted or fallback.`);
+        }
+      }
     }
   }
 
@@ -783,10 +807,19 @@ export function validateConfigWithSource(
   source?: ProviderSource,
 ): ConfigValidation {
   const base = validateConfig(config);
-  if (source && config.policy) {
+  if (!source) return base;
+  if (config.policy) {
     const policy = validatePolicy(config.policy, source);
     base.errors.push(...policy.errors);
     base.warnings.push(...policy.warnings);
+  }
+  // Intent profiles name lanes too, so they get the same provider-aware pass.
+  // Shape and names are already reported by `validateConfig` above, so each
+  // profile is validated here for its lanes only.
+  if (config.intents) {
+    const intents = validateIntentProfiles(config.intents, source);
+    base.errors.push(...intents.errors);
+    base.warnings.push(...intents.warnings);
   }
   return base;
 }

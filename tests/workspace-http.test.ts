@@ -3,6 +3,7 @@ import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  ModelHitchError,
   createModelHitchServer,
   mockProvider,
   type OpenAICompatibleServer,
@@ -330,5 +331,155 @@ describe('workspace HTTP work orders', () => {
       files = [];
     }
     expect(files).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Intent targets — "run this task on that plan"
+// ---------------------------------------------------------------------------
+
+/** A lane that answers with a marker, so the response says who served it. */
+function answeringProvider(id: string, content: string): Provider {
+  return {
+    id,
+    name: id,
+    defaultModel: `${id}-model`,
+    capabilities: { streaming: true, toolCalling: true, vision: true, embeddings: false },
+    async chat(): Promise<ChatResult> {
+      return { message: { role: 'assistant', content }, finishReason: 'stop' };
+    },
+    async *stream(): AsyncGenerator<StreamChunk> {
+      yield { type: 'text-delta', text: content };
+      yield { type: 'finish', finishReason: 'stop' };
+    },
+  };
+}
+
+/** The default route: always rate-limited, so requests walk into their plan. */
+const intentPrimary: Provider = {
+  id: 'intent-primary',
+  name: 'Intent primary',
+  defaultModel: 'intent-primary-model',
+  capabilities: { streaming: true, toolCalling: true, vision: true, embeddings: false },
+  async chat(): Promise<ChatResult> {
+    throw new ModelHitchError('rate-limited', 'intent-primary is rate limited', { status: 429 });
+  },
+  async *stream(): AsyncGenerator<StreamChunk> {
+    throw new ModelHitchError('rate-limited', 'intent-primary is rate limited', { status: 429 });
+  },
+};
+
+/**
+ * A workspace with a plan to route through.
+ *
+ * The session and work-order targets are the bridge's own UI for choosing a
+ * plan, and the composer goes through the *library* client rather than the
+ * server's router — so this is where "the two paths agree" is actually checked.
+ * The default route always 429s, making the plan the answering lane visible in
+ * the reply text.
+ */
+describe('workspace intent targets', () => {
+  let server: OpenAICompatibleServer;
+  let base: string;
+  let store: WorkspaceStore;
+
+  beforeAll(async () => {
+    store = new WorkspaceStore(mkdtempSync(join(tmpdir(), 'modelhitch-workspace-intent-')));
+    server = createModelHitchServer({
+      providers: [
+        intentPrimary,
+        answeringProvider('default-lane', 'default answer'),
+        answeringProvider('coding-lane', 'coding answer'),
+      ],
+      defaultProviderId: 'intent-primary',
+      defaultModel: 'intent-primary-model',
+      policy: { trusted: [{ providerId: 'default-lane' }], fallback: [] },
+      intents: { profiles: { coding: { trusted: [{ providerId: 'coding-lane' }], fallback: [] } } },
+      workspaceStore: store,
+    });
+    base = (await server.listen(0, '127.0.0.1')).url;
+  });
+
+  afterAll(async () => {
+    await server.close();
+    rmSync(store.directory, { recursive: true, force: true });
+  });
+
+  async function createSession(target: unknown): Promise<ChatSession> {
+    const res = await fetch(`${base}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target }),
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()) as ChatSession;
+  }
+
+  async function send(id: string, prompt: string): Promise<ChatSession> {
+    const res = await fetch(`${base}/v1/sessions/${encodeURIComponent(id)}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()) as ChatSession;
+  }
+
+  /** The assistant's reply in a session, as text. */
+  function reply(session: ChatSession): string {
+    const last = session.messages.at(-1);
+    if (!last) return '';
+    return typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
+  }
+
+  it('round-trips an intent target through a session', async () => {
+    const session = await createSession({ kind: 'intent', name: 'coding' });
+    expect(session.target).toEqual({ kind: 'intent', name: 'coding' });
+
+    const stored = (await (await fetch(`${base}/v1/sessions/${session.id}`)).json()) as ChatSession;
+    expect(stored.target).toEqual({ kind: 'intent', name: 'coding' });
+  });
+
+  it('routes a session through the plan its target pinned', async () => {
+    const session = await createSession({ kind: 'intent', name: 'coding' });
+    expect(reply(await send(session.id, 'hello'))).toBe('coding answer');
+  });
+
+  it('leaves a rotation session on the base plan', async () => {
+    const session = await createSession({ kind: 'rotation' });
+    expect(reply(await send(session.id, 'hello'))).toBe('default answer');
+  });
+
+  it('leaves a pinned lane on the base plan', async () => {
+    const session = await createSession({
+      kind: 'model',
+      providerId: 'intent-primary',
+      modelId: 'intent-primary-model',
+    });
+    // The lane is rate-limited, so the walk falls into the *base* plan — never
+    // into a profile inferred from the prompt.
+    expect(reply(await send(session.id, 'hello'))).toBe('default answer');
+  });
+
+  it('routes a work order through the plan its target pinned', async () => {
+    const res = await fetch(`${base}/v1/work-orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'do the thing', target: { kind: 'intent', name: 'coding' } }),
+    });
+    expect(res.status).toBe(200);
+    const order = (await res.json()) as { status: string; result?: string };
+    expect(order.status).toBe('done');
+    expect(order.result).toBe('coding answer');
+  });
+
+  it('refuses an intent name outside the vocabulary', async () => {
+    const res = await fetch(`${base}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: { kind: 'intent', name: 'refactor' } }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('invalid_target');
   });
 });

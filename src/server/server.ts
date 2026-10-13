@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
-import { ModelHitchError } from '../core/errors.js';
+import { ModelHitchError, type ModelHitchErrorCode } from '../core/errors.js';
 import { estimateCost } from '../core/cost.js';
 import type { KeyStore } from '../core/keystore.js';
 import type { ChatParams, ProviderCredentials, StreamChunk, Usage } from '../core/types.js';
@@ -28,6 +28,16 @@ import {
   type Policy,
   type ProviderSource,
 } from '../core/policy.js';
+import {
+  DEFAULT_INTENT,
+  INTENT_NAMES,
+  inferenceEnabled,
+  inferIntent,
+  intentPolicy,
+  intentVocabulary,
+  type IntentsConfig,
+  type IntentKey,
+} from '../core/intent.js';
 import { CircuitBreaker, type LaneHealth } from '../core/circuit-breaker.js';
 import { MemoryLaneCooldown } from '../core/cooldown.js';
 import { inferRequirements, filterEligibleLanes, CapabilityUnavailableError, type CapabilityRequirements } from '../core/capabilities.js';
@@ -68,9 +78,13 @@ import { normalizeBodyImages } from './local-images.js';
 import {
   autoModelEntry,
   isAutoModelId,
+  isIntentModelIdShape,
+  intentFromModelId,
+  intentModelEntry,
   laneRoute,
   planLanes,
   planModelEntries,
+  type AutoModelEntry,
   type PlanLane,
   type PlanModelEntry,
 } from './lane-catalog.js';
@@ -167,9 +181,20 @@ export interface ModelHitchServerOptions {
    */
   policy?: Policy;
   /**
-   * Lane-health memory used when `policy` is set. Defaults to
-   * `MemoryLaneCooldown` (registry) / `CircuitBreaker` (when `catalogSource`
-   * is provided). The settings UI reads this via `GET /v1/lane-health`.
+   * Intent-aware rotation. Each profile is a full plan — its own lanes, its own
+   * `backoff`/`retryableCodes`/`maxProviders` — that a request routes through
+   * instead of `policy`, chosen from the shape of the request.
+   *
+   * The plan behind every request is `intents.profiles[inferred] ?? policy`, so
+   * an absent block, `infer: false`, an unknown name or an unconfigured profile
+   * all land on `policy` — the routing this bridge already had.
+   */
+  intents?: IntentsConfig;
+  /**
+   * Lane-health memory used when a plan is configured (`policy` or `intents`).
+   * Defaults to `MemoryLaneCooldown` (registry) / `CircuitBreaker` (when
+   * `catalogSource` is provided). The settings UI reads this via
+   * `GET /v1/lane-health`.
    */
   cooldown?: LaneCooldown;
   /** Warmed models.dev catalog source (provider inventory + lane health). */
@@ -343,6 +368,7 @@ export class OpenAICompatibleServer {
    */
   private agentBackendsCache: CloudAgentBackend[] | undefined;
   private policy: Policy | undefined;
+  private intents: IntentsConfig | undefined;
   private cooldown: LaneCooldown | undefined;
   private source: ProviderSource;
   private catalogSource: CatalogSource | undefined;
@@ -359,6 +385,7 @@ export class OpenAICompatibleServer {
     this.catalogSource = options.catalogSource;
     this.source = this.catalogSource ?? createRegistrySource(this.providers);
     this.policy = options.policy;
+    this.intents = options.intents;
     if (options.policy && options.autoMode) {
       throw new ModelHitchError(
         'bad-request',
@@ -366,7 +393,9 @@ export class OpenAICompatibleServer {
         {},
       );
     }
-    if (this.policy) {
+    // A config may carry intent profiles and no base policy at all, so a plan
+    // exists when either is configured — the lanes have to cool either way.
+    if (this.policy || this.hasIntentProfiles()) {
       this.cooldown = options.cooldown ?? (this.catalogSource ? new CircuitBreaker() : new MemoryLaneCooldown());
     }
     if (options.usageTracker) {
@@ -389,6 +418,7 @@ export class OpenAICompatibleServer {
   reconfigure(partial: {
     providers?: Provider[];
     policy?: Policy;
+    intents?: IntentsConfig;
     autoMode?: AutoModeOptions | boolean;
     cooldown?: LaneCooldown;
     catalogSource?: CatalogSource;
@@ -420,6 +450,12 @@ export class OpenAICompatibleServer {
       this.policy = partial.policy;
       this.options.autoMode = partial.policy ? undefined : this.options.autoMode;
     }
+    if ('intents' in partial) {
+      // Keyed on presence, not on `!== undefined`: a settings Apply clears the
+      // block by sending no profiles, and every CLI reconfigure passes the key,
+      // so the config document stays the single source of truth for it.
+      this.intents = partial.intents;
+    }
     if (partial.autoMode !== undefined) {
       if (partial.autoMode && this.policy) {
         throw new ModelHitchError('bad-request', 'Cannot enable autoMode while a policy is active.', {});
@@ -428,7 +464,9 @@ export class OpenAICompatibleServer {
       if (partial.autoMode) this.policy = undefined;
     }
     if (partial.cooldown !== undefined) this.cooldown = partial.cooldown;
-    else if (partial.policy !== undefined) this.cooldown = this.catalogSource ? new CircuitBreaker() : new MemoryLaneCooldown();
+    else if (partial.policy !== undefined || partial.intents !== undefined) {
+      this.cooldown = this.catalogSource ? new CircuitBreaker() : new MemoryLaneCooldown();
+    }
     if (partial.apiKeys !== undefined) this.options.apiKeys = partial.apiKeys;
     if (partial.baseUrls !== undefined) this.options.baseUrls = partial.baseUrls;
     if (partial.defaultProviderId !== undefined) this.options.defaultProviderId = partial.defaultProviderId;
@@ -670,6 +708,32 @@ export class OpenAICompatibleServer {
   }
 
   /**
+   * Split a client's model id into the model to route and the intent it pinned.
+   *
+   * `modelhitch/auto:coding` is a plan rather than a lane, so it resolves to "no
+   * model named" exactly as the plain auto id does — plus the profile the id
+   * itself chose, which then overrides anything inference would have said. An id
+   * shaped like an intent id but naming something outside the vocabulary is
+   * refused by name: it is a typo, and passing it to a provider as if it were a
+   * model would surface as an opaque upstream failure.
+   */
+  private resolveRequestModel(raw: string | undefined): {
+    model: string | undefined;
+    intent: IntentKey | undefined;
+  } {
+    const pinned = intentFromModelId(raw);
+    if (pinned) return { model: undefined, intent: pinned };
+    if (isIntentModelIdShape(raw)) {
+      throw new ModelHitchError(
+        'model-not-found',
+        `Unknown intent in "${String(raw).trim()}". Known intents: ${intentVocabulary()}.`,
+        { status: 404 },
+      );
+    }
+    return { model: this.normalizeModel(raw), intent: undefined };
+  }
+
+  /**
    * The model a pinned provider serves when the request names none: the
    * configured `defaultModel` when it is not namespaced to some *other*
    * provider, otherwise the pinned provider's own default.
@@ -684,10 +748,48 @@ export class OpenAICompatibleServer {
   }
 
   /**
-   * The ordered lane list for a routed request: the primary lane, then the
-   * route a pin displaced (if any), then the policy/auto-mode lanes.
+   * The intent a request routes through.
+   *
+   * A request that names a lane has already made its routing choice, so the plan
+   * behind that lane is the base policy rather than something inferred from the
+   * request's shape — a pinned lane must not have its rotation change under it
+   * because the body happened to carry tools.
+   *
+   * Inference is otherwise advisory, never authoritative: with no `intents`
+   * block, with `infer: false`, or with nothing matched, the answer is the
+   * default intent — which is the base policy, exactly what the request would
+   * have used before intents existed.
    */
-  private async lanesForRoute(route: RoutedRequest, credentials?: ProviderCredentials): Promise<ResolvedLane[]> {
+  private intentFor(params: ChatParams, namedLane: boolean): IntentKey {
+    if (namedLane || !this.intents) return DEFAULT_INTENT;
+    return inferenceEnabled(this.intents) ? inferIntent(params) : DEFAULT_INTENT;
+  }
+
+  /**
+   * The plan a request routes through: its intent's policy, else the base
+   * policy. `undefined` means "no plan at all" — the walk then falls through to
+   * `options.autoMode`, exactly as it does today.
+   */
+  private policyFor(intent: IntentKey): Policy | undefined {
+    return intentPolicy(this.intents, intent) ?? this.policy;
+  }
+
+  /** True when any intent profile is configured. */
+  private hasIntentProfiles(): boolean {
+    return Object.keys(this.intents?.profiles ?? {}).length > 0;
+  }
+
+  /**
+   * The ordered lane list for a routed request: the primary lane, then the
+   * route a pin displaced (if any), then the lanes of the plan the request's
+   * intent selects (else auto-mode's).
+   */
+  private async lanesForRoute(
+    route: RoutedRequest,
+    intent: IntentKey,
+    credentials?: ProviderCredentials,
+  ): Promise<ResolvedLane[]> {
+    const policy = this.policyFor(intent);
     const primary: ResolvedLane = {
       providerId: route.provider.id,
       model: route.model,
@@ -699,7 +801,7 @@ export class OpenAICompatibleServer {
     // primary lane is built here rather than resolved, so it is inherited
     // explicitly: reaching a stop lane directly must stop just as arriving by
     // rotation does.
-    const ownTarget = this.laneTargetsFromSource(primary.providerId, primary.model).find(
+    const ownTarget = this.laneTargetsFromSource(primary.providerId, primary.model, policy).find(
       (target) => target.providerId === primary.providerId && target.model === primary.model,
     );
     if (ownTarget?.terminal) primary.terminal = true;
@@ -715,7 +817,10 @@ export class OpenAICompatibleServer {
         });
       }
     }
-    lanes.push(...(await this.laneTargetsFor(route.provider, route.model)));
+    lanes.push(...(await this.laneTargetsFor(route.provider, route.model, policy)));
+    // Only when inference actually steered the request — a default-intent
+    // request routes exactly as it always did and needs no new noise.
+    if (intent !== DEFAULT_INTENT) this.log(`  intent=${intent} -> ${lanes.length} lanes`);
     return lanes;
   }
 
@@ -1059,6 +1164,7 @@ export class OpenAICompatibleServer {
         defaultModel: this.options.defaultModel,
         autoMode: this.options.autoMode,
         policy: this.options.policy,
+        intents: this.intents,
         keystore: this.options.keystore,
         apiKeys: this.options.apiKeys,
       }, {
@@ -1199,7 +1305,8 @@ export class OpenAICompatibleServer {
     if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'messages' array.", { status: 400 });
     }
-    const requestedModel = this.normalizeModel(body.model);
+    const requested = this.resolveRequestModel(body.model);
+    const requestedModel = requested.model;
     this.assertCloudAgentModel(requestedModel);
     const route = this.routeRequest(requestedModel);
     const { provider, model } = route;
@@ -1209,21 +1316,27 @@ export class OpenAICompatibleServer {
     params.sessionId = resolveOutboundSessionId(req.headers, params.messages);
     if (!this.options.pinnedProviderId && this.options.defaultModel && !requestedModel) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
+    // Resolved once here and threaded through both the streaming and non-stream
+    // paths, so a request's plan cannot differ between the two. An id that
+    // pinned a profile wins over anything the request's shape suggests.
+    const intent = requested.intent ?? this.intentFor(params, Boolean(requestedModel));
 
     if (body.stream === true) {
       this.log(`  -> ${provider.id}/${model} (stream)`);
-      await this.writeStream(res, route, params, credentials);
+      await this.writeStream(res, route, params, credentials, intent);
       return;
     }
 
     this.log(`  -> ${provider.id}/${model}`);
     const startedAt = Date.now();
-    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params);
-    const { value: result, target } = await this.withFailover(targets, (lane) =>
-      lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params);
+    const { value: result, target } = await this.withFailover(
+      targets,
+      (lane) => lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+      intent,
     );
     this.reportUsage(
-      { providerId: target.provider.id, model: target.model, wire: 'chat-completions', streamed: false },
+      { providerId: target.provider.id, model: target.model, wire: 'chat-completions', streamed: false, intent },
       result.usage,
       startedAt,
     );
@@ -1241,6 +1354,7 @@ export class OpenAICompatibleServer {
     route: RoutedRequest,
     params: ChatParams,
     credentials: ProviderCredentials,
+    intent: IntentKey,
   ): Promise<void> {
     const { provider, model } = route;
     const controller = new AbortController();
@@ -1255,17 +1369,22 @@ export class OpenAICompatibleServer {
       if (!res.writableEnded) controller.abort();
     });
 
-    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params, { streaming: true });
-    const usageInfo = { providerId: provider.id, model, wire: 'chat-completions' as const, streamed: true };
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params, { streaming: true });
+    const usageInfo = { providerId: provider.id, model, wire: 'chat-completions' as const, streamed: true, intent };
     const stream = this.trackStream(
       withFailoverStream(
         targets,
         (lane) =>
           lane.provider.stream({ ...params, model: lane.model, signal: controller.signal }, lane.credentials),
-        this.failoverContext(this.streamCodes(), targets, (target) => {
-          usageInfo.providerId = target.providerId;
-          usageInfo.model = target.model;
-        }),
+        this.failoverContext(
+          this.codesFor(intent),
+          targets,
+          (target) => {
+            usageInfo.providerId = target.providerId;
+            usageInfo.model = target.model;
+          },
+          intent,
+        ),
       ),
       usageInfo,
       startedAt,
@@ -1376,7 +1495,8 @@ export class OpenAICompatibleServer {
     if (!body || (!hasInput && !hasInstructions)) {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'input' array or 'instructions'.", { status: 400 });
     }
-    const requestedModel = this.normalizeModel(body.model);
+    const requested = this.resolveRequestModel(body.model);
+    const requestedModel = requested.model;
     this.assertCloudAgentModel(requestedModel);
     const route = this.routeRequest(requestedModel);
     const { provider, model } = route;
@@ -1416,20 +1536,23 @@ export class OpenAICompatibleServer {
     }
     params.previousResponseId = undefined;
 
+    const intent = requested.intent ?? this.intentFor(params, Boolean(requestedModel));
     if (body.stream === true) {
       this.log(`  -> ${provider.id}/${model} (responses stream)`);
-      await this.writeResponsesStream(res, route, params, credentials);
+      await this.writeResponsesStream(res, route, params, credentials, intent);
       return;
     }
 
     this.log(`  -> ${provider.id}/${model} (responses)`);
     const startedAt = Date.now();
-    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params);
-    const { value: result, target } = await this.withFailover(targets, (lane) =>
-      lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params);
+    const { value: result, target } = await this.withFailover(
+      targets,
+      (lane) => lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+      intent,
     );
     this.reportUsage(
-      { providerId: target.provider.id, model: target.model, wire: 'responses', streamed: false },
+      { providerId: target.provider.id, model: target.model, wire: 'responses', streamed: false, intent },
       result.usage,
       startedAt,
     );
@@ -1445,6 +1568,7 @@ export class OpenAICompatibleServer {
     route: RoutedRequest,
     params: ChatParams,
     credentials: ProviderCredentials,
+    intent: IntentKey,
   ): Promise<void> {
     const { provider, model } = route;
     const controller = new AbortController();
@@ -1453,17 +1577,22 @@ export class OpenAICompatibleServer {
       if (!res.writableEnded) controller.abort();
     });
 
-    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params, { streaming: true });
-    const usageInfo = { providerId: provider.id, model, wire: 'responses' as const, streamed: true };
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params, { streaming: true });
+    const usageInfo = { providerId: provider.id, model, wire: 'responses' as const, streamed: true, intent };
     const stream = this.trackStream(
       withFailoverStream(
         targets,
         (lane) =>
           lane.provider.stream({ ...params, model: lane.model, signal: controller.signal }, lane.credentials),
-        this.failoverContext(this.streamCodes(), targets, (target) => {
-          usageInfo.providerId = target.providerId;
-          usageInfo.model = target.model;
-        }),
+        this.failoverContext(
+          this.codesFor(intent),
+          targets,
+          (target) => {
+            usageInfo.providerId = target.providerId;
+            usageInfo.model = target.model;
+          },
+          intent,
+        ),
       ),
       usageInfo,
       Date.now(),
@@ -1523,7 +1652,8 @@ export class OpenAICompatibleServer {
     if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'messages' array.", { status: 400 });
     }
-    const requestedModel = this.normalizeModel(body.model);
+    const requested = this.resolveRequestModel(body.model);
+    const requestedModel = requested.model;
     this.assertCloudAgentModel(requestedModel);
     const route = this.routeRequest(requestedModel);
     const { provider, model } = route;
@@ -1534,20 +1664,23 @@ export class OpenAICompatibleServer {
     if (!this.options.pinnedProviderId && this.options.defaultModel && !requestedModel) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
 
+    const intent = requested.intent ?? this.intentFor(params, Boolean(requestedModel));
     if (body.stream === true) {
       this.log(`  -> ${provider.id}/${model} (anthropic stream)`);
-      await this.writeAnthropicStream(res, route, params, credentials, body);
+      await this.writeAnthropicStream(res, route, params, credentials, body, intent);
       return;
     }
 
     this.log(`  -> ${provider.id}/${model} (anthropic)`);
     const startedAt = Date.now();
-    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params);
-    const { value: result, target } = await this.withFailover(targets, (lane) =>
-      lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params);
+    const { value: result, target } = await this.withFailover(
+      targets,
+      (lane) => lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+      intent,
     );
     this.reportUsage(
-      { providerId: target.provider.id, model: target.model, wire: 'messages', streamed: false },
+      { providerId: target.provider.id, model: target.model, wire: 'messages', streamed: false, intent },
       result.usage,
       startedAt,
     );
@@ -1561,6 +1694,7 @@ export class OpenAICompatibleServer {
     params: ChatParams,
     credentials: ProviderCredentials,
     body: AnthropicRequest,
+    intent: IntentKey,
   ): Promise<void> {
     const { provider, model } = route;
     const controller = new AbortController();
@@ -1569,17 +1703,22 @@ export class OpenAICompatibleServer {
       if (!res.writableEnded) controller.abort();
     });
 
-    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params, { streaming: true });
-    const usageInfo = { providerId: provider.id, model, wire: 'messages' as const, streamed: true };
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params, { streaming: true });
+    const usageInfo = { providerId: provider.id, model, wire: 'messages' as const, streamed: true, intent };
     const stream = this.trackStream(
       withFailoverStream(
         targets,
         (lane) =>
           lane.provider.stream({ ...params, model: lane.model, signal: controller.signal }, lane.credentials),
-        this.failoverContext(this.streamCodes(), targets, (target) => {
-          usageInfo.providerId = target.providerId;
-          usageInfo.model = target.model;
-        }),
+        this.failoverContext(
+          this.codesFor(intent),
+          targets,
+          (target) => {
+            usageInfo.providerId = target.providerId;
+            usageInfo.model = target.model;
+          },
+          intent,
+        ),
       ),
       usageInfo,
       Date.now(),
@@ -1655,7 +1794,8 @@ export class OpenAICompatibleServer {
     // The model lives in the URL path for the Google wire; body.model (if any)
     // is a fallback for clients that send it anyway. The auto id works from
     // either place: `/v1beta/models/modelhitch/auto:generateContent`.
-    const requestedModel = this.normalizeModel(modelFromPath || body.model);
+    const requested = this.resolveRequestModel(modelFromPath || body.model);
+    const requestedModel = requested.model;
     this.assertCloudAgentModel(requestedModel);
     const route = this.routeRequest(requestedModel);
     const { provider, model } = route;
@@ -1666,20 +1806,23 @@ export class OpenAICompatibleServer {
     if (!this.options.pinnedProviderId && this.options.defaultModel && !requestedModel) params.model = this.options.defaultModel;
     params = this.prepareParamsForProvider(provider, params);
 
+    const intent = requested.intent ?? this.intentFor(params, Boolean(requestedModel));
     if (stream) {
       this.log(`  -> ${provider.id}/${model} (gemini stream)`);
-      await this.writeGeminiStream(res, route, params, credentials, body);
+      await this.writeGeminiStream(res, route, params, credentials, body, intent);
       return;
     }
 
     this.log(`  -> ${provider.id}/${model} (gemini)`);
     const startedAt = Date.now();
-    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params);
-    const { value: result, target } = await this.withFailover(targets, (lane) =>
-      lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params);
+    const { value: result, target } = await this.withFailover(
+      targets,
+      (lane) => lane.provider.chat({ ...params, model: lane.model }, lane.credentials),
+      intent,
     );
     this.reportUsage(
-      { providerId: target.provider.id, model: target.model, wire: 'gemini', streamed: false },
+      { providerId: target.provider.id, model: target.model, wire: 'gemini', streamed: false, intent },
       result.usage,
       startedAt,
     );
@@ -1693,6 +1836,7 @@ export class OpenAICompatibleServer {
     params: ChatParams,
     credentials: ProviderCredentials,
     body: GeminiRequest,
+    intent: IntentKey,
   ): Promise<void> {
     const { provider, model } = route;
     const controller = new AbortController();
@@ -1701,17 +1845,22 @@ export class OpenAICompatibleServer {
       if (!res.writableEnded) controller.abort();
     });
 
-    const targets = this.requireCapableTargets(await this.lanesForRoute(route, credentials), params, { streaming: true });
-    const usageInfo = { providerId: provider.id, model, wire: 'gemini' as const, streamed: true };
+    const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params, { streaming: true });
+    const usageInfo = { providerId: provider.id, model, wire: 'gemini' as const, streamed: true, intent };
     const stream = this.trackStream(
       withFailoverStream(
         targets,
         (lane) =>
           lane.provider.stream({ ...params, model: lane.model, signal: controller.signal }, lane.credentials),
-        this.failoverContext(this.streamCodes(), targets, (target) => {
-          usageInfo.providerId = target.providerId;
-          usageInfo.model = target.model;
-        }),
+        this.failoverContext(
+          this.codesFor(intent),
+          targets,
+          (target) => {
+            usageInfo.providerId = target.providerId;
+            usageInfo.model = target.model;
+          },
+          intent,
+        ),
       ),
       usageInfo,
       Date.now(),
@@ -1760,35 +1909,49 @@ export class OpenAICompatibleServer {
   // ---------------------------------------------------------------------------
 
   private async modelCatalog(): Promise<OpenAIModelEntry[]> {
-    // The auto id leads, then the plan: a picker renders the list in order, and
-    // the lanes are the answer to "which of these hundreds of ids should I
-    // choose". Plain entries whose id the plan already published are dropped,
-    // so a lane is described once — by its plan entry, which is the one
-    // carrying a name and a tier.
+    // Leads with the rows that mean "a plan, not a lane": the plain auto id,
+    // then one per configured intent profile. Then the plan's own lanes, because
+    // a picker renders the list in order and the lanes are the answer to "which
+    // of these hundreds of ids should I choose". Plain entries whose id the plan
+    // already published are dropped, so a lane is described once — by its plan
+    // entry, which is the one carrying a name and a tier.
     const lanes = this.planModels();
-    const plan: OpenAIModelEntry[] = lanes.map((lane) => ({
-      id: lane.id,
-      object: 'model',
-      created: 0,
-      owned_by: lane.providerId,
-      name: lane.name,
-      modelhitch: lane,
-    }));
+    const plan: OpenAIModelEntry[] = [];
 
-    // The one row that means "let the bridge decide". It is published whenever
-    // there is a bridge to decide with, plan or not: a client that demands a
-    // model name can save it, and it keeps meaning the same request when the
-    // plan behind it changes — or when the same client is pointed at another
-    // bridge.
+    // Published whenever there is a bridge to decide with, plan or not: a client
+    // that demands a model name can save one, and it keeps meaning the same
+    // request when the plan behind it changes — or when the same client is
+    // pointed at another bridge.
     if (this.providers.length > 0) {
       const auto = autoModelEntry(lanes);
-      plan.unshift({
+      plan.push({
         id: auto.id,
         object: 'model',
         created: 0,
         owned_by: 'modelhitch',
         name: auto.name,
         modelhitch: auto.modelhitch,
+      });
+      for (const entry of this.intentModelEntries()) {
+        plan.push({
+          id: entry.id,
+          object: 'model',
+          created: 0,
+          owned_by: 'modelhitch',
+          name: entry.name,
+          modelhitch: entry.modelhitch,
+        });
+      }
+    }
+
+    for (const lane of lanes) {
+      plan.push({
+        id: lane.id,
+        object: 'model',
+        created: 0,
+        owned_by: lane.providerId,
+        name: lane.name,
+        modelhitch: lane,
       });
     }
 
@@ -1844,6 +2007,38 @@ export class OpenAICompatibleServer {
       providerName: (id) => this.providerFor(id)?.name,
       routeFor: (lane) => this.publishedRoute(lane),
     }).filter((lane) => Boolean(this.providerFor(lane.providerId)));
+  }
+
+  /**
+   * One `modelhitch/auto:<intent>` row per configured profile.
+   *
+   * Each row is a plan rather than a lane, so it is built exactly like the plain
+   * auto id: the id a client saves, plus the lanes it expands to in
+   * `modelhitch`. A profile that resolves to no reachable lane publishes
+   * nothing — offering an id that routes nowhere is worse than a shorter list,
+   * and an unconfigured profile is not an error, it just has no plan of its own.
+   */
+  private intentModelEntries(): AutoModelEntry[] {
+    const profiles = this.intents?.profiles;
+    if (!profiles) return [];
+    const out: AutoModelEntry[] = [];
+    for (const intent of INTENT_NAMES) {
+      const profile = profiles[intent];
+      if (!profile) continue;
+      const lanes = planModelEntries(
+        planLanes({
+          policy: profile,
+          defaultModelFor: (providerId) => this.source.defaultModel(providerId),
+        }),
+        {
+          providerName: (id) => this.providerFor(id)?.name,
+          routeFor: (lane) => this.publishedRoute(lane),
+        },
+      ).filter((lane) => Boolean(this.providerFor(lane.providerId)));
+      if (lanes.length === 0) continue;
+      out.push(intentModelEntry(intent, lanes));
+    }
+    return out;
   }
 
   /**
@@ -2117,9 +2312,13 @@ export class OpenAICompatibleServer {
   }
 
   /** No failover onto/off cloud-agent lanes unless the primary is already cursor-cloud. */
-  private async laneTargetsFor(provider: Provider, model: string): Promise<ResolvedLane[]> {
+  private async laneTargetsFor(
+    provider: Provider,
+    model: string,
+    policy: Policy | undefined,
+  ): Promise<ResolvedLane[]> {
     if (provider.id === CURSOR_CLOUD_PROVIDER_ID) return [];
-    const lanes = await this.resolveLaneTargets(provider.id, model);
+    const lanes = await this.resolveLaneTargets(provider.id, model, policy);
     return lanes.filter((lane) => lane.providerId !== CURSOR_CLOUD_PROVIDER_ID);
   }
 
@@ -2135,10 +2334,14 @@ export class OpenAICompatibleServer {
     return credentials;
   }
 
-  /** Resolve fallback lanes for a routed primary: policy lanes or auto-mode. */
-  private async resolveLaneTargets(providerId: string, model: string): Promise<ResolvedLane[]> {
+  /** Resolve fallback lanes for a routed primary: the plan's policy lanes or auto-mode. */
+  private async resolveLaneTargets(
+    providerId: string,
+    model: string,
+    policy: Policy | undefined,
+  ): Promise<ResolvedLane[]> {
     const lanes: ResolvedLane[] = [];
-    const fromSource = this.laneTargetsFromSource(providerId, model);
+    const fromSource = this.laneTargetsFromSource(providerId, model, policy);
     for (const target of fromSource) {
       if (target.providerId === providerId && target.model === model) continue; // primary handled by caller
       const provider = this.providerFor(target.providerId);
@@ -2172,8 +2375,12 @@ export class OpenAICompatibleServer {
     return eligible;
   }
 
-  private laneTargetsFromSource(providerId: string, model: string): FailoverTarget[] {
-    if (this.policy) return resolvePolicyLanes(this.policy, { providerId, model }, this.source);
+  private laneTargetsFromSource(
+    providerId: string,
+    model: string,
+    policy: Policy | undefined,
+  ): FailoverTarget[] {
+    if (policy) return resolvePolicyLanes(policy, { providerId, model }, this.source);
     return resolveLanes({ providerId, model }, this.options.autoMode);
   }
 
@@ -2185,12 +2392,12 @@ export class OpenAICompatibleServer {
   private withFailover<T>(
     targets: ResolvedLane[],
     call: (lane: ResolvedLane) => Promise<T>,
+    intent: IntentKey,
   ): Promise<{ value: T; target: ResolvedLane }> {
-    const codes = this.policy ? (this.policy.retryableCodes ?? DEFAULT_RETRYABLE_CODES) : retryableCodesFor(this.options.autoMode);
     return withFailover(
       targets,
       (lane) => call(lane),
-      this.failoverContext(codes, targets, () => undefined),
+      this.failoverContext(this.codesFor(intent), targets, () => undefined, intent),
     );
   }
 
@@ -2199,29 +2406,33 @@ export class OpenAICompatibleServer {
    * per-request usage info to the lane that took over.
    */
   private failoverContext(
-    codes: readonly (import('../core/errors.js').ModelHitchErrorCode)[],
+    codes: readonly ModelHitchErrorCode[],
     targets: ResolvedLane[],
     onLaneChange: (target: FailoverTarget) => void,
+    intent: IntentKey,
   ) {
+    const policy = this.policyFor(intent);
     return {
       codes,
-      maxAttempts: this.policy ? targets.length : maxAttemptsFor(this.options.autoMode, Math.max(targets.length - 1, 0)),
+      maxAttempts: policy ? targets.length : maxAttemptsFor(this.options.autoMode, Math.max(targets.length - 1, 0)),
       onFailover: (event: FailoverEvent) => {
         onLaneChange(event.to);
         this.emitFailover(event);
       },
       cooldown: this.cooldown,
       onSuccess: (target: FailoverTarget) => this.cooldown?.success?.(target),
-      delayMsBeforeFailover: this.policy
-        ? (from: FailoverTarget, err: unknown, attempt: number) => computeBackoffDelay(this.policy?.backoff, err, attempt)
+      delayMsBeforeFailover: policy
+        ? (from: FailoverTarget, err: unknown, attempt: number) => computeBackoffDelay(policy.backoff, err, attempt)
         : undefined,
       onExhausted: this.options.onExhausted,
     };
   }
 
-  private streamCodes(): readonly (import('../core/errors.js').ModelHitchErrorCode)[] {
-    return this.policy
-      ? (this.policy.retryableCodes ?? DEFAULT_RETRYABLE_CODES)
+  /** Retryable codes for a request: its plan's policy, else auto-mode's. */
+  private codesFor(intent: IntentKey): readonly ModelHitchErrorCode[] {
+    const policy = this.policyFor(intent);
+    return policy
+      ? (policy.retryableCodes ?? DEFAULT_RETRYABLE_CODES)
       : retryableCodesFor(this.options.autoMode);
   }
 
@@ -2313,7 +2524,7 @@ export class OpenAICompatibleServer {
 
   /** Report usage for a completed non-stream call. */
   private reportUsage(
-    info: { providerId: string; model: string; wire: string; streamed: boolean },
+    info: { providerId: string; model: string; wire: string; streamed: boolean; intent?: IntentKey },
     usage: Usage | undefined,
     startedAt: number,
   ): void {
@@ -2338,7 +2549,7 @@ export class OpenAICompatibleServer {
    */
   private trackStream(
     stream: AsyncIterable<StreamChunk>,
-    info: { providerId: string; model: string; wire: string; streamed: boolean },
+    info: { providerId: string; model: string; wire: string; streamed: boolean; intent?: IntentKey },
     startedAt: number,
   ): AsyncIterable<StreamChunk> {
     const self = this;

@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AUTO_MODEL_ID,
+  INTENT_NAMES,
+  autoModelEntry,
   createRegistrySource,
   displayModelName,
+  intentFromModelId,
+  intentModelEntry,
+  intentModelId,
+  intentModelIds,
+  intentModelLabel,
+  isAutoModelId,
+  isAutoModelMeta,
+  isIntentModelIdShape,
   laneLabel,
   laneRoute,
   planLanes,
@@ -188,5 +199,78 @@ describe('labels', () => {
     expect(laneLabel({ providerId: 'beta', model: 'b-model', tier: 'fallback', laneIndex: 2 })).toBe(
       'B Model · Beta · fallback lane 2',
     );
+  });
+});
+
+describe('pinned intent ids', () => {
+  it('builds one id per intent, in vocabulary order', () => {
+    expect(intentModelIds()).toEqual([
+      'modelhitch/auto:coding',
+      'modelhitch/auto:reasoning',
+      'modelhitch/auto:vision',
+      'modelhitch/auto:bulk',
+    ]);
+    expect(INTENT_NAMES.map(intentModelId)).toEqual(intentModelIds());
+  });
+
+  it('round-trips every intent through its id', () => {
+    for (const intent of INTENT_NAMES) {
+      expect(intentFromModelId(intentModelId(intent))).toBe(intent);
+    }
+  });
+
+  it('tolerates whitespace and case, the way the plain auto id does', () => {
+    expect(intentFromModelId('  ModelHitch/Auto:Coding  ')).toBe('coding');
+  });
+
+  it('keeps the two forms distinct', () => {
+    // The plain id means "whichever plan the request selects"; a pinned id means
+    // one plan. Neither may be read as the other.
+    expect(intentFromModelId(AUTO_MODEL_ID)).toBeUndefined();
+    expect(isAutoModelId(AUTO_MODEL_ID)).toBe(true);
+    expect(isAutoModelId(intentModelId('coding'))).toBe(false);
+    expect(isIntentModelIdShape(intentModelId('coding'))).toBe(true);
+  });
+
+  it('recognizes the shape of an unknown name without accepting it', () => {
+    // Shape and vocabulary are separate questions: the server refuses a name it
+    // cannot route, but it has to be able to tell that id apart from a real
+    // model id first.
+    expect(isIntentModelIdShape('modelhitch/auto:refactor')).toBe(true);
+    expect(intentFromModelId('modelhitch/auto:refactor')).toBeUndefined();
+    expect(isIntentModelIdShape('modelhitch/auto')).toBe(false);
+    expect(isIntentModelIdShape('modelhitch/auto:')).toBe(false);
+    expect(isIntentModelIdShape('openai/gpt-5.4')).toBe(false);
+    expect(isIntentModelIdShape(undefined)).toBe(false);
+    expect(intentFromModelId(undefined)).toBeUndefined();
+  });
+
+  it('labels a pinned intent with its name and scope', () => {
+    expect(intentModelLabel('coding', 3)).toBe('ModelHitch Auto · coding · 3 lanes');
+    expect(intentModelLabel('bulk', 1)).toBe('ModelHitch Auto · bulk · 1 lane');
+    expect(intentModelLabel('vision', 0)).toBe('ModelHitch Auto · vision · the bridge default');
+  });
+
+  it('publishes a plan, not a lane: the id plus the lanes it expands to', () => {
+    const lanes = planModelEntries(planLanes({ policy, defaultModelFor }));
+    const entry = intentModelEntry('coding', lanes);
+
+    expect(entry.id).toBe('modelhitch/auto:coding');
+    expect(entry.modelhitch.intent).toBe('coding');
+    expect(entry.modelhitch.lanes.map((lane) => lane.id)).toEqual([
+      'alpha/a-model',
+      'beta/b-model',
+      'alpha/a-cheap',
+      'alpha/a-cheaper',
+    ]);
+
+    // The plain auto id carries no intent: it stands for whichever plan the
+    // request's own shape selects.
+    expect(autoModelEntry(lanes).modelhitch.intent).toBeUndefined();
+  });
+
+  it('reads as an auto entry, so a picker filters both forms the same way', () => {
+    const lanes = planModelEntries(planLanes({ policy, defaultModelFor }));
+    expect(isAutoModelMeta(intentModelEntry('coding', lanes).modelhitch)).toBe(true);
   });
 });

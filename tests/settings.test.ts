@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   CONFIG_VERSION,
   CircuitBreaker,
+  INTENT_NAMES,
   MemoryLaneCooldown,
   createModelHitchServer,
   createRegistrySource,
@@ -225,6 +226,28 @@ describe('settings bridge endpoints', () => {
     // own spending is only visible on the usage page.
     expect(html).toContain('Continue with ChatGPT');
     expect(html).toContain('https://chatgpt.com/settings/usage');
+  });
+
+  it('has an intent editor with one lane list per profile and tier', () => {
+    const html = settingsPageHtml();
+    expect(html).toContain('id="intentsInfer"');
+    expect(html).toContain('id="intent-profiles"');
+    // The profile blocks are built in the page, one per vocabulary entry, so the
+    // served script has to contain the id pattern for both tiers — a profile
+    // missing either list could never be configured.
+    for (const tier of ['trusted', 'fallback']) {
+      expect(html).toContain(`id="intent-' + intent + '-${tier}"`);
+    }
+    expect(html).toContain('intentProfileHtml');
+    expect(html).toContain('intents: collectIntents()');
+  });
+
+  it('keeps the editor vocabulary in step with the bridge', () => {
+    // The bridge infers exactly these names from a request's shape, so a page
+    // offering a different set would let someone configure a profile that can
+    // never be selected. Drift guard, mirroring the catalog one.
+    const declaration = settingsPageHtml().match(/var INTENT_NAMES = \[[^\]]*\];/)?.[0] ?? '';
+    expect(declaration).toContain(INTENT_NAMES.join("', '"));
   });
 
   it("serves an inline script that actually parses (template escape-rot guard)", () => {

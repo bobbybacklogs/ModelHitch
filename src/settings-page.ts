@@ -83,6 +83,8 @@ export function settingsPageHtml(): string {
   .lane-list .lane { display: grid; grid-template-columns: 1fr 2fr auto; gap: 10px; align-items: start; padding: 8px 0; border-bottom: 1px solid var(--line); }
   .lane-list .lane:last-child { border-bottom: 0; }
   .lane-list .lane > select.lane-provider, .lane-list .lane > button.lane-remove { margin-top: 1px; }
+  .intent-profile { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+  .intent-profile:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
   .lane-list .lbl { font-family: var(--mono); font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
 
   .lane-models { min-width: 0; }
@@ -487,10 +489,10 @@ export function settingsPageHtml(): string {
     <div class="panel lane-list">
       <div class="lbl">trusted</div>
       <div id="trusted-lanes"></div>
-      <button class="btn add-lane" data-into="trusted">+ trusted lane</button>
+      <button class="btn add-lane" data-into="trusted-lanes">+ trusted lane</button>
       <div class="lbl" style="margin-top:14px">fallback</div>
       <div id="fallback-lanes"></div>
-      <button class="btn add-lane" data-into="fallback">+ fallback lane</button>
+      <button class="btn add-lane" data-into="fallback-lanes">+ fallback lane</button>
       <div class="row" style="margin-top:12px; border-bottom:0">
         <div class="num-row"><label>max providers</label><input id="maxProviders" type="number" min="1" placeholder="none" /></div>
         <div class="num-row"><label>backoff</label><select id="backoffType"><option value="none">instant (default)</option><option value="fixed">fixed</option><option value="exponential">exponential</option></select></div>
@@ -501,6 +503,17 @@ export function settingsPageHtml(): string {
         <div class="num-row"><label>default provider</label><select id="defaultProviderId"></select></div>
         <div class="num-row"><label>default model</label><input id="defaultModel" type="text" placeholder="(provider default)" /></div>
       </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Intents</h2><span class="hint">one plan per kind of work — a request routes through the profile its shape selects</span></div>
+    <div class="panel">
+      <div class="row">
+        <div class="num-row"><label>infer from the request</label><select id="intentsInfer"><option value="true">on (default)</option><option value="false">off — always the policy above</option></select></div>
+      </div>
+      <div id="intent-profiles"></div>
+      <div class="no-models-hint">A profile with no lanes is not a plan, so it stays absent and falls back to the policy above. <b>coding</b> needs a tool loop already in flight; <b>bulk</b> needs a one-shot, short request with an explicit small output cap — anything less specific stays on the policy.</div>
     </div>
   </section>
 
@@ -1755,19 +1768,23 @@ function renderPolicy() {
   el('defaultModel').value = cfg.defaultModel || '';
 }
 
-function collectPolicy() {
-  var trusted = [];
-  var fallback = [];
-  document.querySelectorAll('#trusted-lanes .lane, #fallback-lanes .lane').forEach(function (row) {
-    var isTrusted = row.parentNode.id === 'trusted-lanes';
+/** Read the lane rows out of one lane-list container. */
+function readLanes(container) {
+  var out = [];
+  if (!container) return out;
+  container.querySelectorAll('.lane').forEach(function (row) {
     var providerId = row.querySelector('.lane-provider').value.trim();
-    var models = Array.prototype.map.call(row.querySelectorAll('.lane-models .chips .chip'), function (c) { return c.dataset.model; });
     if (!providerId) return;
+    var models = Array.prototype.map.call(row.querySelectorAll('.lane-models .chips .chip'), function (c) { return c.dataset.model; });
     var entry = { providerId: providerId };
     if (models.length) entry.models = models;
-    (isTrusted ? trusted : fallback).push(entry);
+    out.push(entry);
   });
-  var policy = { trusted: trusted, fallback: fallback };
+  return out;
+}
+
+function collectPolicy() {
+  var policy = { trusted: readLanes(el('trusted-lanes')), fallback: readLanes(el('fallback-lanes')) };
   var maxP = el('maxProviders').value;
   if (maxP && Number(maxP) >= 1) policy.maxProviders = Number(maxP);
   var boType = el('backoffType').value;
@@ -1777,6 +1794,64 @@ function collectPolicy() {
     if (cap && Number(cap) > 0) policy.backoff.maxMs = Number(cap);
   }
   return policy;
+}
+
+// ---- intents -------------------------------------------------------------
+
+/* Fixed vocabulary, mirrored from src/core/intent.ts: the bridge infers these
+   names from a request's shape, so the editor has to offer exactly them. */
+var INTENT_NAMES = ['coding', 'reasoning', 'vision', 'bulk'];
+
+function intentProfileHtml(intent) {
+  return '<div class="intent-profile" data-intent="' + intent + '">' +
+    '<div class="lbl">' + intent + '</div>' +
+    '<div class="lane-list">' +
+      '<div class="lbl">trusted</div>' +
+      '<div id="intent-' + intent + '-trusted"></div>' +
+      '<button class="btn add-lane" data-into="intent-' + intent + '-trusted">+ trusted lane</button>' +
+      '<div class="lbl" style="margin-top:14px">fallback</div>' +
+      '<div id="intent-' + intent + '-fallback"></div>' +
+      '<button class="btn add-lane" data-into="intent-' + intent + '-fallback">+ fallback lane</button>' +
+    '</div>' +
+  '</div>';
+}
+
+function renderIntents() {
+  var intents = (state.config && state.config.intents) || {};
+  var profiles = intents.profiles || {};
+  el('intentsInfer').value = intents.infer === false ? 'false' : 'true';
+  el('intent-profiles').innerHTML = INTENT_NAMES.map(intentProfileHtml).join('');
+  INTENT_NAMES.forEach(function (intent) {
+    var trusted = el('intent-' + intent + '-trusted');
+    var fallback = el('intent-' + intent + '-fallback');
+    var profile = profiles[intent];
+    if (!profile) {
+      trusted.innerHTML = '<div class="empty">not configured — falls back to the policy above</div>';
+      return;
+    }
+    if (!profile.trusted || !profile.trusted.length) trusted.innerHTML = '<div class="empty">no trusted lanes</div>';
+    if (!profile.fallback || !profile.fallback.length) fallback.innerHTML = '<div class="empty">no fallback lanes</div>';
+    (profile.trusted || []).forEach(function (l) { trusted.appendChild(laneRow(l, 'trusted')); });
+    (profile.fallback || []).forEach(function (l) { fallback.appendChild(laneRow(l, 'fallback')); });
+  });
+}
+
+function collectIntents() {
+  var profiles = {};
+  INTENT_NAMES.forEach(function (intent) {
+    var trusted = readLanes(el('intent-' + intent + '-trusted'));
+    var fallback = readLanes(el('intent-' + intent + '-fallback'));
+    // A profile with no lanes names no plan, so it stays absent — which is what
+    // makes it fall back to the policy above rather than routing nowhere.
+    if (!trusted.length && !fallback.length) return;
+    profiles[intent] = { trusted: trusted, fallback: fallback };
+  });
+  var out = {};
+  if (el('intentsInfer').value === 'false') out.infer = false;
+  if (Object.keys(profiles).length) out.profiles = profiles;
+  // Nothing configured and inference left on: omit the block entirely, so the
+  // saved document looks the same as one that never had it.
+  return Object.keys(out).length ? out : undefined;
 }
 
 // ---- reliability ---------------------------------------------------------
@@ -1830,6 +1905,7 @@ function assemble() {
     defaultModel: el('defaultModel').value.trim() || undefined,
     defaultWorkspaceTarget: el('workspaceTarget').value || 'rotation',
     policy: collectPolicy(),
+    intents: collectIntents(),
     catalog: catalogChoice ? { providers: catalogChoice, baseUrls: (cfg.catalog && cfg.catalog.baseUrls) || undefined, ttlMs: (cfg.catalog && cfg.catalog.ttlMs) || undefined } : undefined,
     cooldown: collectReliability(),
     imageGeneration: collectImageGeneration(),
@@ -1849,7 +1925,7 @@ async function loadAll() {
     state.builtin = cat.builtin || [];
     var models = await api('/v1/models');
     state.models = models.data || [];
-    renderImageGeneration(); renderCloudAgent(); renderWorkspaceTarget(); renderProviders(); renderOpenCode(); renderOpenCodeByok(); renderCustomLanes(); renderChatGptPlan(); renderCatalog(); renderPolicy(); renderReliability();
+    renderImageGeneration(); renderCloudAgent(); renderWorkspaceTarget(); renderProviders(); renderOpenCode(); renderOpenCodeByok(); renderCustomLanes(); renderChatGptPlan(); renderCatalog(); renderPolicy(); renderIntents(); renderReliability();
     refreshHealth();
     refreshChatGptPlan();
   } catch (err) {
@@ -1914,10 +1990,14 @@ document.addEventListener('click', function (ev) {
     return;
   }
   if (t.classList && t.classList.contains('add-lane')) {
-    var group = t.dataset.into;
-    var box = el(group + '-lanes');
-    box.querySelector('.empty') && box.removeChild(box.querySelector('.empty'));
-    box.appendChild(laneRow({}, group));
+    // The button names its container by id, so a profile's lane list needs no
+    // extra wiring: data-into="intent-coding-trusted" IS the element id.
+    var target = t.dataset.into;
+    var box = el(target);
+    if (!box) return;
+    var placeholder = box.querySelector('.empty');
+    if (placeholder) box.removeChild(placeholder);
+    box.appendChild(laneRow({}, target));
     return;
   }
   if (t.classList && t.classList.contains('chip-x')) {

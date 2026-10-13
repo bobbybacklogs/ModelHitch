@@ -498,32 +498,49 @@ describe('ModelHitch policy wiring', () => {
   });
 
   it('backoff maxMs is a hard cap that wins over Retry-After (bounded politeness)', () => {
-    const mh = new ModelHitch({
-      providers,
-      policy: { trusted: [{ providerId: 'alpha' }], fallback: [], backoff: { type: 'fixed', baseMs: 100, maxMs: 500 } },
-    });
+    // The policy is a parameter rather than instance state: a plan is per-call
+    // once intents exist, so the walk is handed the one the call resolved to.
+    const capped: Policy = {
+      trusted: [{ providerId: 'alpha' }],
+      fallback: [],
+      backoff: { type: 'fixed', baseMs: 100, maxMs: 500 },
+    };
+    const mh = new ModelHitch({ providers, policy: capped });
     const delay = (mh as unknown as {
-      delayBeforeFailover(from: FailoverTarget, err: unknown, attempt: number): number | undefined;
+      delayBeforeFailover(
+        policy: Policy | undefined,
+        from: FailoverTarget,
+        err: unknown,
+        attempt: number,
+      ): number | undefined;
     }).delayBeforeFailover.bind(mh);
     // Retry-After says 3s, but the user's cap says at most 500ms — cap wins.
     expect(
-      delay(lane('alpha', 'a-model'), new ModelHitchError('rate-limited', '429', { status: 429, retryAfterMs: 3_000 }), 1),
+      delay(capped, lane('alpha', 'a-model'), new ModelHitchError('rate-limited', '429', { status: 429, retryAfterMs: 3_000 }), 1),
     ).toBe(500);
+
     // Without a cap, Retry-After raises the wait above the base.
-    const mh2 = new ModelHitch({
-      providers,
-      policy: { trusted: [{ providerId: 'alpha' }], fallback: [], backoff: { type: 'exponential', baseMs: 100 } },
-    });
+    const uncapped: Policy = {
+      trusted: [{ providerId: 'alpha' }],
+      fallback: [],
+      backoff: { type: 'exponential', baseMs: 100 },
+    };
+    const mh2 = new ModelHitch({ providers, policy: uncapped });
     const delay2 = (mh2 as unknown as {
-      delayBeforeFailover(from: FailoverTarget, err: unknown, attempt: number): number | undefined;
+      delayBeforeFailover(
+        policy: Policy | undefined,
+        from: FailoverTarget,
+        err: unknown,
+        attempt: number,
+      ): number | undefined;
     }).delayBeforeFailover.bind(mh2);
     expect(
-      delay2(lane('alpha', 'a-model'), new ModelHitchError('rate-limited', '429', { status: 429, retryAfterMs: 3_000 }), 1),
+      delay2(uncapped, lane('alpha', 'a-model'), new ModelHitchError('rate-limited', '429', { status: 429, retryAfterMs: 3_000 }), 1),
     ).toBe(3_000);
     // Exponential growth applies per attempt when no Retry-After:
     // 100 * 2^(3-1) = 400.
     expect(
-      delay2(lane('alpha', 'a-model'), new ModelHitchError('provider-error', '502', { status: 502 }), 3),
+      delay2(uncapped, lane('alpha', 'a-model'), new ModelHitchError('provider-error', '502', { status: 502 }), 3),
     ).toBe(400);
   });
 });

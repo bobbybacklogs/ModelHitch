@@ -74,6 +74,91 @@ describe('GET /workspace', () => {
   });
 });
 
+/**
+ * Pull a function out of the page's inline script, so these tests run the page's
+ * own logic rather than a copy of it. Braces are counted so an object literal
+ * inside the body does not truncate the source.
+ */
+function extractPageFunction(script: string, name: string): string {
+  const start = script.indexOf(`function ${name}(`);
+  if (start < 0) throw new Error(`page function ${name} not found`);
+  let depth = 0;
+  let end = script.indexOf('{', start);
+  for (let i = end; i < script.length; i += 1) {
+    if (script[i] === '{') depth += 1;
+    else if (script[i] === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        end = i;
+        break;
+      }
+    }
+  }
+  return script.slice(start, end + 1);
+}
+
+type PageFn = (...args: unknown[]) => unknown;
+
+/**
+ * Run one of the page's own functions in a scope with a fake `state` and the id
+ * prefix. `deps` are other page functions the target closes over.
+ */
+function pageFunction(
+  name: string,
+  options: { deps?: readonly string[]; state?: unknown } = {},
+): PageFn {
+  const html = workspacePageHtml();
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? '';
+  const prefix = script.match(/var INTENT_ID_PREFIX = '[^']*';/)?.[0] ?? '';
+  const names = [name, ...(options.deps ?? [])];
+  const declarations = names.map((dep) => extractPageFunction(script, dep)).join('\n');
+  const factory = new Function(
+    `${prefix}\nvar state = ${JSON.stringify(options.state ?? {})};\n${declarations}\nreturn ${name};`,
+  );
+  return factory() as PageFn;
+}
+
+describe('workspace target picker', () => {
+  it('parses a pinned intent id back into an intent target', () => {
+    const parseTargetValue = pageFunction('parseTargetValue');
+    expect(parseTargetValue('modelhitch/auto:coding')).toEqual({ kind: 'intent', name: 'coding' });
+    expect(parseTargetValue('rotation')).toEqual({ kind: 'rotation' });
+    expect(parseTargetValue('')).toEqual({ kind: 'rotation' });
+    expect(parseTargetValue('lane-two/two-model')).toEqual({
+      kind: 'model',
+      providerId: 'lane-two',
+      modelId: 'two-model',
+    });
+  });
+
+  it('labels an intent target so the rail and session rows read sensibly', () => {
+    const targetLabel = pageFunction('targetLabel');
+    expect(targetLabel({ kind: 'intent', name: 'coding' })).toBe('intent: coding');
+    expect(targetLabel({ kind: 'rotation' })).toBe('rotation');
+    expect(targetLabel({ kind: 'model', providerId: 'lane-two', modelId: 'two-model' })).toBe(
+      'lane-two/two-model',
+    );
+  });
+
+  it('offers a pinned intent row while collapsing the plain auto id into rotation', () => {
+    const buildTargetOptions = pageFunction('buildTargetOptions', {
+      deps: ['targetOptionValue'],
+      state: {
+        models: [
+          { id: 'modelhitch/auto', name: 'ModelHitch Auto · whole rotation · 1 lane', modelhitch: { kind: 'auto', lanes: [] } },
+          { id: 'modelhitch/auto:coding', name: 'ModelHitch Auto · coding · 2 lanes', modelhitch: { kind: 'auto', intent: 'coding', lanes: [] } },
+          { id: 'lane-two/two-model', name: 'Two Model · Lane Two · trusted lane 1' },
+        ],
+      },
+    });
+
+    expect(buildTargetOptions()).toEqual([
+      { value: 'modelhitch/auto:coding', label: 'ModelHitch Auto · coding · 2 lanes' },
+      { value: 'lane-two/two-model', label: 'Two Model · Lane Two · trusted lane 1' },
+    ]);
+  });
+});
+
 describe('GET /settings workspace link', () => {
   it('links to the workspace page from settings', async () => {
     const res = await fetch(`${base}/settings`);

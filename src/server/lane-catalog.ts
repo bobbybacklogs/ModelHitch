@@ -1,5 +1,6 @@
 import { resolveLanes, type AutoModeOptions, type FailoverTarget } from '../core/failover.js';
 import type { Policy, TrustListEntry } from '../core/policy.js';
+import { INTENT_NAMES, isIntentName, type IntentName } from '../core/intent.js';
 
 /**
  * The bridge's routing plan, published as selectable models.
@@ -54,6 +55,57 @@ export const AUTO_MODEL_ID = 'modelhitch/auto';
 /** True when a client asked for the plan rather than for one lane. */
 export function isAutoModelId(modelInput: unknown): boolean {
   return typeof modelInput === 'string' && modelInput.trim().toLowerCase() === AUTO_MODEL_ID;
+}
+
+/** Separates the auto id from the intent it pins: `modelhitch/auto:coding`. */
+export const INTENT_MODEL_SEPARATOR = ':';
+
+const INTENT_MODEL_PREFIX = `${AUTO_MODEL_ID}${INTENT_MODEL_SEPARATOR}`;
+
+/**
+ * The auto id pinned to one intent: `modelhitch/auto:coding`.
+ *
+ * The plain auto id means "whichever plan the request's shape selects", which
+ * is the right default and the wrong thing to hand a client that has a lane
+ * choice to make. The pinned form is how a *picker* offers that choice: every
+ * configured profile gets a row, the row's id names the profile, and sending it
+ * back routes to exactly that plan with nothing inferred.
+ *
+ * The name is fixed rather than configurable for the same reason the auto id is:
+ * a client's saved config has to keep meaning the same request after the bridge
+ * behind it changes.
+ */
+export function intentModelId(intent: IntentName): string {
+  return `${INTENT_MODEL_PREFIX}${intent}`;
+}
+
+/** The intent an id pins, when it pins one from the vocabulary. */
+export function intentFromModelId(modelInput: unknown): IntentName | undefined {
+  const name = intentModelSuffix(modelInput);
+  return name !== undefined && isIntentName(name) ? name : undefined;
+}
+
+/**
+ * True for anything shaped like an intent id, known name or not — so an unknown
+ * one can be refused by name (with the vocabulary) instead of being passed to a
+ * provider as if it were a model.
+ */
+export function isIntentModelIdShape(modelInput: unknown): boolean {
+  return intentModelSuffix(modelInput) !== undefined;
+}
+
+/** The text after `modelhitch/auto:`, or undefined when the id is not shaped that way. */
+function intentModelSuffix(modelInput: unknown): string | undefined {
+  if (typeof modelInput !== 'string') return undefined;
+  const trimmed = modelInput.trim().toLowerCase();
+  if (!trimmed.startsWith(INTENT_MODEL_PREFIX)) return undefined;
+  const suffix = trimmed.slice(INTENT_MODEL_PREFIX.length);
+  return suffix.length > 0 ? suffix : undefined;
+}
+
+/** Every intent id the bridge can publish, in vocabulary order. */
+export function intentModelIds(): string[] {
+  return INTENT_NAMES.map(intentModelId);
 }
 
 /** Where a lane sits in the plan. */
@@ -212,6 +264,11 @@ export function laneRoute(lane: FailoverTarget): string {
  */
 export interface AutoModelMeta {
   kind: 'auto';
+  /**
+   * The intent this id pins, when it pins one. Absent on the plain auto id,
+   * which stands for "whichever plan the request selects".
+   */
+  intent?: IntentName;
   /** Every lane the id will try, in order — the plan rows themselves. */
   lanes: PlanModelEntry[];
 }
@@ -236,6 +293,26 @@ export function autoModelEntry(lanes: readonly PlanModelEntry[]): AutoModelEntry
     id: AUTO_MODEL_ID,
     name: autoModelLabel(lanes.length),
     modelhitch: { kind: 'auto', lanes: [...lanes] },
+  };
+}
+
+/** Picker label for a pinned intent: "ModelHitch Auto · coding · 3 lanes". */
+export function intentModelLabel(intent: IntentName, laneCount: number): string {
+  const scope = laneCount > 0 ? `${laneCount} lane${laneCount === 1 ? '' : 's'}` : 'the bridge default';
+  return `ModelHitch Auto · ${intent} · ${scope}`;
+}
+
+/**
+ * Build a pinned-intent catalog entry from the lanes its profile resolves to.
+ *
+ * Same contract as `autoModelEntry`: a plan, not a lane, published under the id
+ * a client saves, with the lanes it expands to in `modelhitch`.
+ */
+export function intentModelEntry(intent: IntentName, lanes: readonly PlanModelEntry[]): AutoModelEntry {
+  return {
+    id: intentModelId(intent),
+    name: intentModelLabel(intent, lanes.length),
+    modelhitch: { kind: 'auto', intent, lanes: [...lanes] },
   };
 }
 

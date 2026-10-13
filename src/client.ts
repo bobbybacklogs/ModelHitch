@@ -16,6 +16,15 @@ import {
   type Policy,
   type ProviderSource,
 } from './core/policy.js';
+import {
+  DEFAULT_INTENT,
+  inferenceEnabled,
+  inferIntent,
+  intentPolicy,
+  validateIntents,
+  type IntentsConfig,
+  type IntentKey,
+} from './core/intent.js';
 import { createCatalogSource, type CatalogSource, type CatalogSourceOptions } from './catalog/source.js';
 import { CircuitBreaker, type LaneHealth } from './core/circuit-breaker.js';
 import { ModelHitchError, type ModelHitchErrorCode } from './core/errors.js';
@@ -68,6 +77,13 @@ export interface ModelHitchOptions {
    */
   policy?: Policy;
   /**
+   * Intent-aware rotation: one plan per kind of work, chosen from the shape of
+   * each call. The plan a call routes through is
+   * `intents.profiles[intent] ?? policy`, so this block is purely additive —
+   * absent, every call routes exactly as it did before.
+   */
+  intents?: IntentsConfig;
+  /**
    * models.dev catalog mode (Milestone 2). Consumes mdev-sdk: the catalog
    * supplies the full model inventory, costs, and env var names; ModelHitch's
    * registry stays the curated executable layer, and catalog-only providers
@@ -100,6 +116,19 @@ export type ChatInput = Omit<ChatParams, 'model'> & {
   /** Explicit credentials for this call (overrides the keystore). */
   apiKey?: string;
   baseUrl?: string;
+  /**
+   * The plan to route this call through.
+   *
+   * - a profile name (`'coding'`) routes through that plan, whatever the call
+   *   looks like;
+   * - `'default'` routes through the base policy and infers nothing — the right
+   *   answer when the caller has already named a lane, since a pinned lane's
+   *   rotation must not change under it because the body happened to carry
+   *   tools;
+   * - omitted means "the client decides": infer an intent from the call's shape
+   *   when `intents.infer` is on, else the base plan.
+   */
+  intent?: IntentKey;
 };
 
 function isCatalogSource(source: ProviderSource): source is CatalogSource {
@@ -142,6 +171,7 @@ export class ModelHitch {
   readonly defaultModel?: string;
   readonly autoMode?: AutoModeOptions | boolean;
   readonly policy?: Policy;
+  readonly intents?: IntentsConfig;
   readonly onFailover?: (event: FailoverEvent) => void;
   readonly onExhausted?: (info: ExhaustionInfo) => void;
   /** Lane cooldown state shared across calls (policy mode). */
@@ -182,14 +212,25 @@ export class ModelHitch {
       );
     }
     this.policy = options.policy;
+    this.intents = options.intents;
     if (this.policy) {
       const { errors } = validatePolicy(this.policy, this.source);
       if (errors.length) {
         throw new ModelHitchError('bad-request', `Invalid policy:\n- ${improvePolicyErrors(errors, this.source).join('\n- ')}`, {});
       }
-      // Catalog mode defaults to the circuit breaker (dynamic lane counts make
-      // walking known-dead endpoints expensive); registry mode keeps the
-      // simpler Retry-After-aware cooldown. Explicit options always win.
+    }
+    if (this.intents) {
+      const { errors } = validateIntents(this.intents, this.source);
+      if (errors.length) {
+        throw new ModelHitchError('bad-request', `Invalid intents:\n- ${improvePolicyErrors(errors, this.source).join('\n- ')}`, {});
+      }
+    }
+    // Catalog mode defaults to the circuit breaker (dynamic lane counts make
+    // walking known-dead endpoints expensive); registry mode keeps the
+    // simpler Retry-After-aware cooldown. Explicit options always win. A config
+    // may carry intent profiles and no base policy at all, so a plan exists
+    // when either is configured — the lanes have to cool either way.
+    if (this.policy || this.hasIntentProfiles()) {
       this.cooldown =
         options.cooldown ?? (isCatalogSource(this.source) ? new CircuitBreaker() : new MemoryLaneCooldown());
     }
@@ -272,14 +313,48 @@ export class ModelHitch {
   }
 
   private buildParams(input: ChatInput, provider: Provider): ChatParams {
-    const { provider: _p, apiKey: _k, baseUrl: _b, model, ...rest } = input;
+    const { provider: _p, apiKey: _k, baseUrl: _b, intent: _i, model, ...rest } = input;
     return { ...rest, model: this.resolveModel(provider, input) };
   }
 
-  /** Ordered lane list: the primary first, then policy/auto-mode fallbacks. */
-  private failoverTargets(providerId: string, model: string): FailoverTarget[] {
+  /** True when any intent profile is configured. */
+  private hasIntentProfiles(): boolean {
+    return Object.keys(this.intents?.profiles ?? {}).length > 0;
+  }
+
+  /**
+   * The intent a call routes through.
+   *
+   * An explicit `intent` on the input always wins — including `'default'`,
+   * which is how a caller that has already named a lane says "do not guess".
+   * Otherwise inference is advisory, never authoritative: with no `intents`
+   * block, with `infer: false`, or with nothing matched, the answer is the
+   * default intent, which is the base policy — exactly what the call would have
+   * used before intents existed.
+   */
+  private intentFor(params: ChatParams, explicit: IntentKey | undefined): IntentKey {
+    if (explicit) return explicit;
+    if (!this.intents) return DEFAULT_INTENT;
+    return inferenceEnabled(this.intents) ? inferIntent(params) : DEFAULT_INTENT;
+  }
+
+  /**
+   * The plan a call routes through: its intent's policy, else the base policy.
+   * `undefined` means "no plan" — the walk then falls through to `autoMode`,
+   * exactly as it did before.
+   */
+  private policyFor(intent: IntentKey): Policy | undefined {
+    return intentPolicy(this.intents, intent) ?? this.policy;
+  }
+
+  /** Ordered lane list: the primary first, then the plan's lanes or auto-mode. */
+  private failoverTargets(
+    providerId: string,
+    model: string,
+    policy: Policy | undefined,
+  ): FailoverTarget[] {
     const primary: FailoverTarget = { providerId, model };
-    if (this.policy) return resolvePolicyLanes(this.policy, primary, this.source);
+    if (policy) return resolvePolicyLanes(policy, primary, this.source);
     return [primary, ...resolveLanes(primary, this.autoMode)];
   }
 
@@ -305,11 +380,16 @@ export class ModelHitch {
    * into backoff means "wait a little, then move on", never "sit out the full
    * rate-limit window".
    */
-  private delayBeforeFailover(_from: FailoverTarget, err: unknown, attempt: number): number | undefined {
-    return computeBackoffDelay(this.policy?.backoff, err, attempt);
+  private delayBeforeFailover(
+    policy: Policy | undefined,
+    _from: FailoverTarget,
+    err: unknown,
+    attempt: number,
+  ): number | undefined {
+    return computeBackoffDelay(policy?.backoff, err, attempt);
   }
 
-  private failoverContext(opts: AutoModeOptions | boolean | undefined, targets: FailoverTarget[]): {
+  private failoverContext(opts: AutoModeOptions | boolean | undefined, targets: FailoverTarget[], policy: Policy | undefined): {
     codes: readonly ModelHitchErrorCode[];
     maxAttempts: number;
     onFailover: (event: FailoverEvent) => void;
@@ -319,15 +399,13 @@ export class ModelHitch {
     onExhausted?: (info: ExhaustionInfo) => void;
   } {
     return {
-      codes: this.policy
-        ? (this.policy.retryableCodes ?? DEFAULT_RETRYABLE_CODES)
-        : retryableCodesFor(opts),
-      maxAttempts: this.policy ? targets.length : maxAttemptsFor(opts, targets.length - 1),
+      codes: policy ? (policy.retryableCodes ?? DEFAULT_RETRYABLE_CODES) : retryableCodesFor(opts),
+      maxAttempts: policy ? targets.length : maxAttemptsFor(opts, targets.length - 1),
       onFailover: (event) => this.emitFailover(event),
       cooldown: this.cooldown,
       onSuccess: (target) => this.cooldown?.success?.(target),
-      delayMsBeforeFailover: this.policy
-        ? (from, err, attempt) => this.delayBeforeFailover(from, err, attempt)
+      delayMsBeforeFailover: policy
+        ? (from, err, attempt) => this.delayBeforeFailover(policy, from, err, attempt)
         : undefined,
       onExhausted: this.onExhausted,
     };
@@ -352,8 +430,9 @@ export class ModelHitch {
     const primaryModel = this.resolveModel(provider, input);
     const params = this.buildParams(input, provider);
     const credentials = credentialsOverride ?? (await this.resolveCredentials(provider, input));
+    const policy = this.policyFor(this.intentFor(params, input.intent));
     const requirements = inferRequirements(params);
-    const targets = this.capableTargets(this.failoverTargets(provider.id, primaryModel), requirements);
+    const targets = this.capableTargets(this.failoverTargets(provider.id, primaryModel, policy), requirements);
     if (targets.length <= 1 && targets[0]?.providerId === provider.id && targets[0]?.model === primaryModel) {
       return provider.chat(params, credentials);
     }
@@ -369,7 +448,7 @@ export class ModelHitch {
         const laneCreds = await this.laneCredentials(target.providerId);
         return laneProvider.chat({ ...params, model: target.model }, laneCreds);
       },
-      this.failoverContext(opts, targets),
+      this.failoverContext(opts, targets, policy),
     );
     return value;
   }
@@ -384,8 +463,9 @@ export class ModelHitch {
     const primaryModel = this.resolveModel(provider, input);
     const params = this.buildParams(input, provider);
     const credentials = credentialsOverride ?? (await this.resolveCredentials(provider, input));
+    const policy = this.policyFor(this.intentFor(params, input.intent));
     const requirements = inferRequirements(params, { streaming: true });
-    const targets = this.capableTargets(this.failoverTargets(provider.id, primaryModel), requirements);
+    const targets = this.capableTargets(this.failoverTargets(provider.id, primaryModel, policy), requirements);
     if (targets.length <= 1 && targets[0]?.providerId === provider.id && targets[0]?.model === primaryModel) {
       return provider.stream(params, credentials);
     }
@@ -413,7 +493,7 @@ export class ModelHitch {
           laneCreds.get(target.providerId) ?? {},
         );
       },
-      this.failoverContext(opts, targets),
+      this.failoverContext(opts, targets, policy),
     );
   }
 

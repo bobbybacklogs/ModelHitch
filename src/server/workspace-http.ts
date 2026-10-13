@@ -4,6 +4,7 @@ import { ModelHitch } from '../client.js';
 import type { KeyStore } from '../core/keystore.js';
 import type { ChatResult } from '../core/types.js';
 import type { AutoModeOptions } from '../core/failover.js';
+import { DEFAULT_INTENT, isIntentName, type IntentsConfig } from '../core/intent.js';
 import type { Policy } from '../core/policy.js';
 import type { Provider } from '../providers/types.js';
 import { WorkspaceStore } from '../workspace/store.js';
@@ -18,6 +19,7 @@ export interface WorkspaceHttpContext {
   defaultModel?: string;
   autoMode?: AutoModeOptions | boolean;
   policy?: Policy;
+  intents?: IntentsConfig;
   keystore?: KeyStore;
   apiKeys?: Record<string, string>;
 }
@@ -47,6 +49,7 @@ function parseTarget(value: unknown, fallback: RunTarget = { kind: 'rotation' })
   if (typeof value !== 'object') return null;
   const target = value as Record<string, unknown>;
   if (target.kind === 'rotation') return { kind: 'rotation' };
+  if (target.kind === 'intent' && isIntentName(target.name)) return { kind: 'intent', name: target.name };
   if (
     target.kind === 'model' &&
     typeof target.providerId === 'string' &&
@@ -64,8 +67,23 @@ function createHitch(ctx: WorkspaceHttpContext): ModelHitch {
     defaultModel: ctx.defaultModel,
     autoMode: ctx.policy ? undefined : ctx.autoMode,
     policy: ctx.policy,
+    intents: ctx.intents,
     keystore: ctx.keystore,
   });
+}
+
+/**
+ * The route a non-pinned target leads with. An intent is a plan rather than a
+ * lane, so it leads with the same default route the rotation does and differs
+ * only in the plan behind it.
+ */
+function defaultRoute(ctx: WorkspaceHttpContext): { provider: string; model: string } {
+  const provider = ctx.defaultProviderId ?? ctx.providers[0]?.id;
+  const model = ctx.defaultModel ?? ctx.providers.find((p) => p.id === provider)?.defaultModel;
+  if (!provider || !model) {
+    throw new Error('No default provider or model configured for the rotation target.');
+  }
+  return { provider, model };
 }
 
 function chatInputForTarget(
@@ -74,17 +92,17 @@ function chatInputForTarget(
   messages: ChatSession['messages'],
   signal?: AbortSignal,
 ) {
-  if (target.kind === 'rotation') {
-    const provider = ctx.defaultProviderId ?? ctx.providers[0]?.id;
-    const model = ctx.defaultModel ?? ctx.providers.find((p) => p.id === provider)?.defaultModel;
-    if (!provider || !model) {
-      throw new Error('No default provider or model configured for rotation target.');
-    }
+  if (target.kind === 'rotation' || target.kind === 'intent') {
+    const { provider, model } = defaultRoute(ctx);
     return {
       provider,
       model,
       messages,
       signal,
+      // Omitted for `rotation`, which is how the target says "you decide": the
+      // client infers an intent from the request's shape, else uses the base
+      // plan.
+      ...(target.kind === 'intent' ? { intent: target.name } : {}),
       ...(ctx.apiKeys?.[provider] ? { apiKey: ctx.apiKeys[provider] } : {}),
     };
   }
@@ -93,6 +111,9 @@ function chatInputForTarget(
     model: target.modelId,
     messages,
     signal,
+    // A named lane has already made its routing choice, so it stays on the base
+    // plan instead of letting the messages' shape change the rotation behind it.
+    intent: DEFAULT_INTENT,
     ...(ctx.apiKeys?.[target.providerId] ? { apiKey: ctx.apiKeys[target.providerId] } : {}),
   };
 }

@@ -838,6 +838,7 @@ async function runBridge(): Promise<void> {
     cloudAgentSessionStore,
     maxBodyBytes,
     policy: chatgptPlan.policy,
+    intents: config.intents,
     cooldown,
     catalogSource,
     keystore,
@@ -878,7 +879,9 @@ async function runBridge(): Promise<void> {
         // Apply immediately — hot reload. Optional fields absent from the
         // incoming document must be cleared first: Object.assign alone would
         // keep stale values (e.g. a catalog block the UI just unchecked).
-        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'defaultWorkspaceTarget', 'cooldown', 'imageGeneration', 'cloudAgent', 'opencodeByok', 'customLanes', 'chatgptPlan'] as const) {
+        // A key belongs in this list once the settings page can turn it off —
+        // `intents` joined it with the intent editor.
+        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'defaultWorkspaceTarget', 'cooldown', 'imageGeneration', 'cloudAgent', 'opencodeByok', 'customLanes', 'chatgptPlan', 'intents'] as const) {
           delete (config as unknown as Record<string, unknown>)[k];
         }
         Object.assign(config, asConfig);
@@ -906,6 +909,7 @@ async function runBridge(): Promise<void> {
             pinnedProviderId,
             openCodeState: () => openCodeStateLazy(),
             policy: plan.chatgptPlan.policy,
+            intents: config.intents,
             apiKeys: { ...config.keys, ...openCodeByokApiKeys(config, { state }), ...customLaneApiKeys(config) },
           };
           if (wantsCatalog && !catalogSource) {
@@ -978,6 +982,7 @@ async function runBridge(): Promise<void> {
         ...cloudAgentContext(),
       }),
       policy: plan.chatgptPlan.policy,
+      intents: config.intents,
       defaultProviderId: pinnedProviderId ?? plan.chatgptPlan.defaultProviderId ?? config.defaultProviderId,
       defaultModel: pinnedProviderId ? config.defaultModel : plan.chatgptPlan.defaultModel ?? config.defaultModel,
     });

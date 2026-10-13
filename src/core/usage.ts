@@ -1,4 +1,5 @@
 import type { FailoverEvent } from './failover.js';
+import { DEFAULT_INTENT, type IntentKey } from './intent.js';
 import type { UsageStorage } from './usage-storage.js';
 
 /**
@@ -27,6 +28,12 @@ export interface UsageEvent {
   costUsd: number;
   /** Wall time from request start to completion, ms. */
   latencyMs: number;
+  /**
+   * The plan the request routed through — the profile its shape (or its id)
+   * selected, or `default` for the base policy. Absent on events recorded before
+   * intents existed, and by callers that construct their own.
+   */
+  intent?: IntentKey;
   /** ISO timestamp. */
   at: string;
 }
@@ -48,6 +55,8 @@ export interface UsageSlice {
   /** Keyed by `providerId/model`. */
   perModel: Record<string, UsageTotals>;
   perWire: Record<string, UsageTotals>;
+  /** Keyed by intent name; `default` is the base policy. */
+  perIntent: Record<string, UsageTotals>;
 }
 
 export interface UsageSnapshot {
@@ -60,6 +69,8 @@ export interface UsageSnapshot {
   /** Keyed by `providerId/model`. */
   perModel: Record<string, UsageTotals>;
   perWire: Record<string, UsageTotals>;
+  /** Keyed by intent name; `default` is the base policy. */
+  perIntent: Record<string, UsageTotals>;
   /** Most recent events, newest first. */
   recent: UsageEvent[];
   failovers: { total: number; recent: FailoverEvent[] };
@@ -163,6 +174,9 @@ export class UsageTracker {
       perProvider: this.group(events, (e) => e.providerId),
       perModel: this.group(events, (e) => `${e.providerId}/${e.model}`),
       perWire: this.group(events, (e) => e.wire),
+      // An event with no intent routed on the base plan, which is what `default`
+      // names — so the breakdown is total rather than having a silent bucket.
+      perIntent: this.group(events, (e) => e.intent ?? DEFAULT_INTENT),
     };
   }
 
@@ -180,6 +194,7 @@ export class UsageTracker {
       perProvider: all.perProvider,
       perModel: all.perModel,
       perWire: all.perWire,
+      perIntent: all.perIntent,
       recent: this.events.slice(-50).reverse(),
       failovers: {
         total: this.failoverEvents.length,
@@ -425,6 +440,16 @@ function renderDetail() {
       }).join("")
     : "";
 
+  var intentRows = rows(slice.perIntent);
+  var intentsHtml = intentRows.length
+    ? intentRows.map(function (pair) {
+        var v = pair[1];
+        return "<tr><td class=\"mono\">" + esc(pair[0]) + "</td><td>" + fmtI(v.requests) +
+          "</td><td>" + fmtI(v.totalTokens) + "</td><td>" + fmtMoney(v.costUsd) +
+          "</td><td>" + fmtMs(avgMs(v)) + "</td></tr>";
+      }).join("")
+    : '<tr><td colspan="5" class="empty-state">No requests in this range</td></tr>';
+
   var zenTotals = (slice.perProvider && slice.perProvider["opencode"]) ? slice.perProvider["opencode"] : { requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, latencyMs: 0 };
   var goTotals = (slice.perProvider && slice.perProvider["opencode-go"]) ? slice.perProvider["opencode-go"] : { requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, latencyMs: 0 };
   var openCodeModels = modelRows.filter(function (pair) {
@@ -474,6 +499,10 @@ function renderDetail() {
       '<table><thead><tr><th>OpenCode Model</th><th>Lane</th><th>Requests</th><th>Tokens</th><th>Est. cost</th><th>Avg</th></tr></thead><tbody>' +
         openCodeModelsHtml + '</tbody></table>' +
     '</div>' +
+    '<div class="panel"><h2>Plans</h2>' +
+      '<p class="lede" style="margin-top:0">Which plan each request routed through. <span class="mono">default</span> is the base policy — the plan a request falls to when no profile matches.</p>' +
+      '<table><thead><tr><th>Intent</th><th>Requests</th><th>Tokens</th><th>Est. cost</th><th>Avg</th></tr></thead><tbody>' +
+      intentsHtml + '</tbody></table></div>' +
     '<div class="panel"><h2>Providers</h2><table><thead><tr><th>Provider</th><th>Requests</th><th>Tokens in / out</th><th>Est. cost</th><th>Avg</th></tr></thead><tbody>' +
       body + "</tbody></table></div>" +
     '<div class="panel"><h2>Models</h2><table><thead><tr><th>Model</th><th>Requests</th><th>Tokens</th><th>Est. cost</th><th>Avg</th></tr></thead><tbody>' +
@@ -489,8 +518,10 @@ function renderRecent() {
     return;
   }
   box.innerHTML = list.map(function (e) {
+    var plan = e.intent && e.intent !== DEFAULT_INTENT ? ' · <span class="pill">' + esc(e.intent) + "</span>" : "";
     return '<div class="event"><div class="title">' + esc(e.providerId) + "/" + esc(e.model) + "</div>" +
       '<div class="meta">' + esc(timeAgo(e.at)) + " · " + esc(e.wire) + (e.streamed ? " · stream" : "") +
+      plan +
       " · " + fmtI(e.totalTokens) + " tok · " + fmtMoney(e.costUsd) + " · " + fmtMs(e.latencyMs) + "</div></div>";
   }).join("");
 }

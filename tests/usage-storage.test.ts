@@ -1,5 +1,6 @@
 import { describe, expect, it, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -41,6 +42,44 @@ function event(overrides: Partial<UsageEvent> = {}): UsageEvent {
 }
 
 describe('SqliteUsageStorage', () => {
+  it('persists the plan each request routed through', () => {
+    const file = tempFile();
+    const t1 = new UsageTracker(new SqliteUsageStorage(file));
+    t1.record(event({ intent: 'coding' }));
+    t1.record(event());
+    t1.close();
+
+    const t2 = new UsageTracker(new SqliteUsageStorage(file));
+    const s = t2.snapshot();
+    expect(s.perIntent['coding']!.requests).toBe(1);
+    expect(s.perIntent['default']!.requests).toBe(1);
+    t2.close();
+  });
+
+  it('adds the intent column to a database written before intents existed', () => {
+    const file = tempFile();
+    const first = new SqliteUsageStorage(file);
+    first.close();
+
+    // `CREATE TABLE IF NOT EXISTS` leaves an older database exactly like this —
+    // the current schema minus the new column — so the storage has to migrate
+    // it in place or every INSERT would fail on the missing column.
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
+      DatabaseSync: new (path: string) => { exec(sql: string): void; close(): void };
+    };
+    const legacy = new DatabaseSync(file);
+    legacy.exec('ALTER TABLE usage_events DROP COLUMN intent');
+    legacy.close();
+
+    const tracker = new UsageTracker(new SqliteUsageStorage(file));
+    tracker.record(event({ intent: 'coding' }));
+    tracker.close();
+
+    const reread = new UsageTracker(new SqliteUsageStorage(file));
+    expect(reread.snapshot().perIntent['coding']!.requests).toBe(1);
+    reread.close();
+  });
+
   it('persists events and failovers across tracker instances', () => {
     const file = tempFile();
     const t1 = new UsageTracker(new SqliteUsageStorage(file));

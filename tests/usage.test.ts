@@ -46,6 +46,22 @@ describe('UsageTracker', () => {
     expect(s.perWire['responses']!.requests).toBe(1);
   });
 
+  it('groups by the plan each request routed through', () => {
+    const t = new UsageTracker();
+    t.record(event({ intent: 'coding' }));
+    t.record(event({ intent: 'coding' }));
+    t.record(event({ intent: 'bulk' }));
+    // No intent recorded means the request routed on the base policy, which is
+    // what `default` names — the breakdown has no silent bucket.
+    t.record(event());
+    const s = t.snapshot();
+    expect(s.perIntent['coding']!.requests).toBe(2);
+    expect(s.perIntent['bulk']!.requests).toBe(1);
+    expect(s.perIntent['default']!.requests).toBe(1);
+    expect(s.periods['24h']!.perIntent['coding']!.requests).toBe(2);
+    expect(s.periods['30d']!.totals.requests).toBe(4);
+  });
+
   it('splits observed periods without a dollar cap', () => {
     const t = new UsageTracker();
     t.record(event({ costUsd: 6, providerId: 'openai', model: 'gpt-5.4' }));

@@ -68,6 +68,8 @@ interface UsageRow {
   totalTokens: number;
   costUsd: number;
   latencyMs: number;
+  /** Added after the first release — null on rows written before it. */
+  intent: string | null;
 }
 
 interface FailoverRow {
@@ -114,7 +116,8 @@ export class SqliteUsageStorage implements UsageStorage {
       outputTokens INTEGER NOT NULL DEFAULT 0,
       totalTokens INTEGER NOT NULL DEFAULT 0,
       costUsd REAL NOT NULL DEFAULT 0,
-      latencyMs REAL NOT NULL DEFAULT 0
+      latencyMs REAL NOT NULL DEFAULT 0,
+      intent TEXT
     )`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS failover_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,9 +133,19 @@ export class SqliteUsageStorage implements UsageStorage {
     )`);
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_usage_at ON usage_events(at)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_failover_at ON failover_events(at)');
+    // `intent` arrived after the first release, and the table above is created
+    // with IF NOT EXISTS — so an existing database keeps its old shape and the
+    // INSERT below would fail on the missing column. Add it in place when it is
+    // missing; SQLite has no ADD COLUMN IF NOT EXISTS.
+    const columns = this.db.prepare('PRAGMA table_info(usage_events)').all() as unknown as Array<{
+      name?: string;
+    }>;
+    if (!columns.some((column) => column.name === 'intent')) {
+      this.db.exec('ALTER TABLE usage_events ADD COLUMN intent TEXT');
+    }
     this.insertEvent = this.db.prepare(
-      `INSERT INTO usage_events (at, providerId, model, wire, streamed, inputTokens, outputTokens, totalTokens, costUsd, latencyMs)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO usage_events (at, providerId, model, wire, streamed, inputTokens, outputTokens, totalTokens, costUsd, latencyMs, intent)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.insertFailover = this.db.prepare(
       `INSERT INTO failover_events (at, fromProviderId, fromModel, toProviderId, toModel, code, message, status, attempt)
@@ -152,6 +165,7 @@ export class SqliteUsageStorage implements UsageStorage {
       totalTokens: r.totalTokens,
       costUsd: r.costUsd,
       latencyMs: r.latencyMs,
+      ...(r.intent ? { intent: r.intent as UsageEvent['intent'] } : {}),
       at: r.at,
     }));
     const frows = this.db
@@ -184,6 +198,7 @@ export class SqliteUsageStorage implements UsageStorage {
       event.totalTokens ?? 0,
       event.costUsd ?? 0,
       event.latencyMs ?? 0,
+      event.intent ?? null,
     );
   }
 

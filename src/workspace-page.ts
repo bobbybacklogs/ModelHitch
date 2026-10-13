@@ -249,11 +249,18 @@ function showErrors(errs) {
 
 function targetLabel(t) {
   if (!t || t.kind === 'rotation') return 'rotation';
+  if (t.kind === 'intent') return 'intent: ' + t.name;
   return t.providerId + '/' + t.modelId;
 }
 
+/* The id prefix the bridge publishes a pinned intent plan under. */
+var INTENT_ID_PREFIX = 'modelhitch/auto:';
+
 function parseTargetValue(value) {
   if (!value || value === 'rotation') return { kind: 'rotation' };
+  if (value.indexOf(INTENT_ID_PREFIX) === 0) {
+    return { kind: 'intent', name: value.slice(INTENT_ID_PREFIX.length) };
+  }
   var slash = value.indexOf('/');
   if (slash <= 0) return { kind: 'rotation' };
   return { kind: 'model', providerId: value.slice(0, slash), modelId: value.slice(slash + 1) };
@@ -272,10 +279,15 @@ function targetOptionValue(model) {
 function buildTargetOptions() {
   var out = [];
   (state.models || []).forEach(function (m) {
-    // The catalog's auto id means "the plan", which is exactly what the
-    // rotation option already is — offering it again would just be the same
-    // choice under a name this composer cannot route.
-    if (m && m.modelhitch && m.modelhitch.kind === 'auto') return;
+    // The catalog's auto entries mean "the plan". The plain one is what the
+    // rotation option already is, so offering it again would just be the same
+    // choice under a name this composer cannot route — but a pinned intent row
+    // IS a real choice, and its id is exactly what the bridge routes back.
+    if (m && m.modelhitch && m.modelhitch.kind === 'auto') {
+      if (!m.modelhitch.intent) return;
+      out.push({ value: String(m.id), label: (m.name ? String(m.name) : '') || String(m.id) });
+      return;
+    }
     var value = targetOptionValue(m);
     if (!value) return;
     var name = m && m.name ? String(m.name) : '';
