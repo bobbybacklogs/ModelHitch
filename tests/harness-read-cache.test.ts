@@ -321,6 +321,10 @@ describe('concurrent reads', () => {
 });
 
 describe('the entry cap', () => {
+  // The default 5s is tight for this one: it writes and reads 258 files
+  // synchronously (2 x MAX_READ_CACHE_ENTRIES + 2 fs ops), and the full suite
+  // runs it alongside files that spawn `npm run build`. The assertions below are
+  // unchanged — only the time budget is, and running the file alone takes ~1s.
   it('holds a bounded number of entries, dropping the oldest', async () => {
     const cache = createReadCache();
     const dir = join(SANDBOX, 'many');
@@ -342,7 +346,7 @@ describe('the entry cap', () => {
     const newest = files[files.length - 1] as string;
     expect(await readEach(oldest)).toContain('body 0');
     expect(await readEach(newest)).toContain('unchanged');
-  });
+  }, 30_000);
 });
 
 /** One turn of a scripted stream: the tool calls a test wants the model to make. */
