@@ -11,6 +11,10 @@ export default defineConfig({
   ],
   test: {
     environment: 'node',
+    // Build `dist/` once for the whole run. Several files drive the built CLI
+    // end to end; when each built it itself, the builds raced on `dist/`.
+    // See tests/global-setup.ts.
+    globalSetup: ['./tests/global-setup.ts'],
     // Platform SDK packages have their own vitest configs (they alias Electron,
     // Expo, and React Native peers to stubs). Run them with `npm test` inside
     // each package directory.

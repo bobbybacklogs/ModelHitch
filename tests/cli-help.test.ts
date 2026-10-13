@@ -1,7 +1,7 @@
-import { execSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 const repoRoot = join(import.meta.dirname, '..');
 const builtCli = join(repoRoot, 'dist/cli.js');
@@ -11,20 +11,18 @@ function runCli(argv: string[]): { status: number | null; stdout: string; stderr
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
-beforeAll(() => {
-  execSync('npm run build', { cwd: repoRoot, stdio: 'pipe' });
-}, 30_000);
-
+/**
+ * The build happens once in `tests/global-setup.ts`, not here: a per-file build
+ * raced the other CLI test files on the same `dist/` directory.
+ *
+ * The artifact is asserted rather than skipped for a second reason. `skipIf` is
+ * evaluated at collection time, which was before this file's own `beforeAll`
+ * build, so a missing artifact skipped every test here instead of failing the
+ * build that should have produced it — and a stray backtick inside the help
+ * template literal (which broke only the DTS build, while ESM still reported
+ * success and emitted nothing) went green because of it.
+ */
 describe('CLI help output', () => {
-  /**
-   * Asserted rather than skipped.
-   *
-   * These tests must exercise the BUILT cli: if the artifact is missing the
-   * build is broken, and a broken build has to fail here. A `skipIf` would make
-   * it green instead — and it would key off the artifact state at collection
-   * time, which is before `beforeAll` builds, so a fresh clone would skip every
-   * test in this file even though the build then succeeds.
-   */
   it('has a built CLI to test', () => {
     expect(existsSync(builtCli)).toBe(true);
   });

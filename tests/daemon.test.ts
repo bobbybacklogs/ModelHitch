@@ -95,10 +95,6 @@ describe('background bridge spawn', () => {
     MODELHITCH_HOST: '127.0.0.1',
   };
 
-  beforeAll(() => {
-    execSync('npm run build', { cwd: repoRoot, stdio: 'pipe' });
-  }, 30_000);
-
   afterAll(async () => {
     process.env.MODELHITCH_HOME = bgHome;
     process.env.MODELHITCH_PORT = String(port);
@@ -107,10 +103,12 @@ describe('background bridge spawn', () => {
   });
 
   /**
-   * Asserted rather than skipped, for the same reason as `cli-help.test.ts`:
-   * `skipIf` is evaluated at collection time, before `beforeAll` runs the build,
-   * so a missing artifact silently skipped this test instead of failing the
-   * build that was supposed to produce it.
+   * The build happens once in `tests/global-setup.ts`, not here: a per-file
+   * build raced `cli-help.test.ts` on the same `dist/` directory.
+   *
+   * Asserted rather than skipped, because `skipIf` is evaluated at collection
+   * time — before any build — so a missing artifact silently skipped this test
+   * instead of failing the build that was supposed to produce it.
    */
   it('has a built CLI to drive', () => {
     expect(existsSync(builtCli)).toBe(true);
