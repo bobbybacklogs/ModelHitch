@@ -16,7 +16,20 @@ beforeAll(() => {
 }, 30_000);
 
 describe('CLI help output', () => {
-  it.skipIf(!existsSync(builtCli))('documents implemented commands and flags', () => {
+  /**
+   * Asserted rather than skipped.
+   *
+   * These tests must exercise the BUILT cli: if the artifact is missing the
+   * build is broken, and a broken build has to fail here. A `skipIf` would make
+   * it green instead — and it would key off the artifact state at collection
+   * time, which is before `beforeAll` builds, so a fresh clone would skip every
+   * test in this file even though the build then succeeds.
+   */
+  it('has a built CLI to test', () => {
+    expect(existsSync(builtCli)).toBe(true);
+  });
+
+  it('documents implemented commands and flags', () => {
     const { status, stdout } = runCli(['--help']);
     expect(status).toBe(0);
     for (const token of [
@@ -30,6 +43,13 @@ describe('CLI help output', () => {
       '--image-size',
       '--cloud-agent-lane',
       '--cloud-agent',
+      '--local-agent',
+      '--local-agent-workspace',
+      '--local-agent-model',
+      '--local-agent-max-turns',
+      'modelhitch cloud run',
+      'modelhitch cloud list',
+      'Agent lane flags',
       '--provider <id>',
       '--opencode-byok-connection',
       '--opencode-byok-mode',
@@ -59,14 +79,14 @@ describe('CLI help output', () => {
     }
   });
 
-  it.skipIf(!existsSync(builtCli))('prints the package version', () => {
+  it('prints the package version', () => {
     const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as { version: string };
     const { status, stdout } = runCli(['--version']);
     expect(status).toBe(0);
     expect(stdout.trim()).toBe(pkg.version);
   });
 
-  it.skipIf(!existsSync(builtCli))('reports unknown commands and reprints help', () => {
+  it('reports unknown commands and reprints help', () => {
     const { status, stdout } = runCli(['not-a-command']);
     expect(status).toBe(1);
     expect(stdout).toContain('Unknown command: not-a-command');

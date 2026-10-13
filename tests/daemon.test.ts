@@ -106,7 +106,17 @@ describe('background bridge spawn', () => {
     rmSync(bgHome, { recursive: true, force: true });
   });
 
-  it.skipIf(!existsSync(builtCli))(
+  /**
+   * Asserted rather than skipped, for the same reason as `cli-help.test.ts`:
+   * `skipIf` is evaluated at collection time, before `beforeAll` runs the build,
+   * so a missing artifact silently skipped this test instead of failing the
+   * build that was supposed to produce it.
+   */
+  it('has a built CLI to drive', () => {
+    expect(existsSync(builtCli)).toBe(true);
+  });
+
+  it(
     'stays up when launched via the built CLI',
     async () => {
       const result = spawnSync(process.execPath, [builtCli, 'bridge', '--background'], {

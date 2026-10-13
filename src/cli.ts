@@ -370,9 +370,10 @@ Usage:
 
   modelhitch chat                                send a prompt through a bridge chat session
   modelhitch work                                run a one-shot work order on the bridge
-  modelhitch cloud list                          list Cursor Cloud agents via the bridge
-  modelhitch cloud get <id>                      show one cloud agent id and status
-  modelhitch cloud cancel <id>                   cancel a cloud agent (exit 0 when cancelled)
+  modelhitch cloud list                          list agent sessions (every enabled agent lane)
+  modelhitch cloud get <id>                      show one agent session's id and status
+  modelhitch cloud run <prompt>                  start a run on a lane that drives its own (the local lane)
+  modelhitch cloud cancel <id>                   cancel an agent session (exit 0 when cancelled)
 
 Chat and work flags:
   --rotation                                     use the bridge default provider/model (rotation target)
@@ -391,11 +392,31 @@ Bridge flags (with \`bridge\` and \`bridge --background\`):
   --image-model <id>             image model (openai default gpt-image-2; gemini default gemini-3.1-flash-image)
   --image-quality low|medium|high  image quality (default medium)
   --image-size <WxH>             image size (default 1024x1024)
-  --cloud-agent-lane             enable Cursor Cloud Agent lane (alias: --cloud-agent)
-  --no-cloud-agent-lane          disable cloud agent lane (alias: --no-cloud-agent)
+
+Agent lane flags (two lanes, one set of routes — both off by default):
+  Cursor Cloud Agent runs in Cursor's cloud against a repo it checks out.
+  --cloud-agent-lane             enable the Cursor lane (alias: --cloud-agent)
+  --no-cloud-agent-lane          disable the Cursor lane (alias: --no-cloud-agent)
   --cloud-agent-repo <url>       cloudAgent.repos[0].url
   --cloud-agent-ref <ref>        cloudAgent.repos[0].startingRef
   --cloud-agent-model <id>       cloudAgent.defaultModel (default composer-2.5)
+  Needs CURSOR_API_KEY (or keys.cursor-cloud). Route it explicitly as
+  cursor-cloud/<model>; its runs go through the ordinary chat wires.
+
+  The local agent runs in a working tree on THIS machine, needs no vendor, and
+  drives its own runs over POST /v1/cloud-agents/run.
+  --local-agent                  enable the local lane (alias: --no-local-agent)
+  --local-agent-workspace <dir>  the directory the agent may work in — REQUIRED
+  --local-agent-model <id>       provider/model for the tool loop (default: the
+                                 bridge's configured lane)
+  --local-agent-max-turns <n>    turn ceiling per run
+  There is no fallback to the current directory: without a workspace the lane
+  reports itself not-ready and refuses to run, so a bridge started in a repo
+  root cannot silently hand the agent that whole repository.
+
+  Both lanes answer the same routes, and the cloud list command merges them:
+  GET  /v1/cloud-agents · GET|cancel /v1/cloud-agents/:id[/cancel]
+  POST /v1/cloud-agents/run (local lane only — start + drive a run)
 
 OpenCode Console BYOK flags (https://opencode.ai/v2/docs/console/byok/):
   --opencode-byok                enable BYOK connections (alias: --no-opencode-byok)
@@ -462,8 +483,10 @@ Files and environment:
   MODELHITCH_DEBUG=1        log forwarded request bodies (may expose secrets)
   Provider keys resolve from config keys.* and env vars (e.g. OPENAI_API_KEY, CURSOR_API_KEY).
   Image lane is off by default; enable via bridge flags or /settings.
-  Cloud Agent lane is off by default; route explicitly as cursor-cloud/<model> after enabling.
-  CURSOR_API_KEY (or keys.cursor-cloud) enables the cloud lane; service-account keys via env only.
+  Agent lanes are off by default. The Cursor lane needs CURSOR_API_KEY (or
+  keys.cursor-cloud) and is routed explicitly as cursor-cloud/<model>. The local
+  lane needs no key but does need --local-agent-workspace. Service-account keys
+  resolve via env only.
 `);
 }
 
@@ -499,6 +522,10 @@ async function runBridge(): Promise<void> {
   const cloudRepo = flagValue('--cloud-agent-repo') ?? undefined;
   const cloudRef = flagValue('--cloud-agent-ref') ?? undefined;
   const cloudModel = flagValue('--cloud-agent-model') ?? undefined;
+  const localAgentFlag = argsHasFlag(['--local-agent']) ? true : argsHasFlag(['--no-local-agent']) ? false : undefined;
+  const localAgentWorkspace = flagValue('--local-agent-workspace') ?? undefined;
+  const localAgentModel = flagValue('--local-agent-model') ?? undefined;
+  const localAgentMaxTurnsRaw = flagValue('--local-agent-max-turns') ?? undefined;
   // --provider: runtime-only pin, never written back to the config file.
   const pinnedProviderId = flagValue('--provider');
   const byokFlag = argsHasFlag(['--opencode-byok', '--opencode-byok-lane']) ? true : argsHasFlag(['--no-opencode-byok', '--no-opencode-byok-lane']) ? false : undefined;
@@ -562,6 +589,48 @@ async function runBridge(): Promise<void> {
       workOnCurrentBranch: config.cloudAgent?.workOnCurrentBranch ?? false,
       sessionReuse: config.cloudAgent?.sessionReuse ?? 'per-bridge-session',
     };
+  }
+  if (
+    localAgentFlag !== undefined ||
+    localAgentWorkspace !== undefined ||
+    localAgentModel !== undefined ||
+    localAgentMaxTurnsRaw !== undefined
+  ) {
+    const parsedTurns =
+      localAgentMaxTurnsRaw !== undefined ? Number(localAgentMaxTurnsRaw) : undefined;
+    if (
+      localAgentMaxTurnsRaw !== undefined &&
+      (parsedTurns === undefined || !Number.isFinite(parsedTurns) || parsedTurns <= 0)
+    ) {
+      console.error(`--local-agent-max-turns must be a positive number (got "${localAgentMaxTurnsRaw}").`);
+      process.exitCode = 1;
+      return;
+    }
+    const enabled = localAgentFlag ?? config.localAgent?.enabled ?? false;
+    const workspaceDir = localAgentWorkspace ?? config.localAgent?.workspaceDir;
+    config.localAgent = {
+      enabled,
+      ...(workspaceDir !== undefined ? { workspaceDir } : {}),
+      ...(localAgentModel !== undefined
+        ? { model: localAgentModel }
+        : config.localAgent?.model !== undefined
+          ? { model: config.localAgent.model }
+          : {}),
+      ...(parsedTurns !== undefined
+        ? { maxTurns: parsedTurns }
+        : config.localAgent?.maxTurns !== undefined
+          ? { maxTurns: config.localAgent.maxTurns }
+          : {}),
+    };
+    // The lane refuses to run without a workspace (there is no cwd fallback, by
+    // design — see local-agent-backend.ts). Saying so here, at startup, beats
+    // letting every later request fail with the same message.
+    if (enabled && !workspaceDir) {
+      console.warn(
+        'Local agent lane is enabled but --local-agent-workspace is unset: the lane will refuse to run.\n' +
+          'Set --local-agent-workspace <dir> (or localAgent.workspaceDir in the config) to the directory the agent may work in.',
+      );
+    }
   }
   if (byokImport) {
     const discovered = openCodeImportConnections(openCodeStateLazy());
@@ -1316,6 +1385,39 @@ async function runCloudCancel(args: string[]): Promise<void> {
   }
 }
 
+/**
+ * Start a run on a lane that drives its own runs (the local lane).
+ *
+ * Prints the session id and returns immediately: the bridge drives the run in
+ * the background, and `cloud get <id>` is the way to watch it. Streams are
+ * deliberately not consumed here — a CLI that blocked until an agent finished
+ * would be unusable for exactly the long tasks this lane is for.
+ */
+async function runCloudRun(args: string[]): Promise<void> {
+  const prompt = args.filter((a) => !a.startsWith('--'))[0] ?? argValue(args, '--prompt');
+  if (!prompt?.trim()) {
+    console.error('Usage: modelhitch cloud run <prompt> [--session <id>] [--model <id>] [--base-url <url>]');
+    process.exitCode = 1;
+    return;
+  }
+  const baseUrl = (argValue(args, '--base-url') ?? defaultBridgeBaseUrl()).replace(/\/+$/, '');
+  const sessionId = argValue(args, '--session');
+  const model = argValue(args, '--model');
+
+  const res = await cloudBridgeFetch(baseUrl, '/v1/cloud-agents/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      prompt,
+      ...(sessionId !== undefined ? { sessionId } : {}),
+      ...(model !== undefined ? { model } : {}),
+    }),
+  });
+  if (!res.ok) await parseCloudBridgeError(res);
+  const body = (await res.json()) as { sessionId?: string };
+  console.log(body.sessionId ?? '');
+}
+
 async function runCloudCommand(args: string[]): Promise<void> {
   const sub = args[0];
   const subArgs = args.slice(1);
@@ -1326,11 +1428,14 @@ async function runCloudCommand(args: string[]): Promise<void> {
     case 'get':
       await runCloudGet(subArgs);
       break;
+    case 'run':
+      await runCloudRun(subArgs);
+      break;
     case 'cancel':
       await runCloudCancel(subArgs);
       break;
     default:
-      throw new Error('Usage: modelhitch cloud list | get <id> | cancel <id>');
+      throw new Error('Usage: modelhitch cloud list | get <id> | run <prompt> | cancel <id>');
   }
 }
 
