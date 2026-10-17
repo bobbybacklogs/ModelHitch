@@ -1,0 +1,52 @@
+name: Swift SDK
+
+on:
+  push:
+    branches: [main, swift-sdk]
+    paths:
+      - "swift-sdk/**"
+      - ".github/workflows/swift.yml"
+  pull_request:
+    paths:
+      - "swift-sdk/**"
+      - ".github/workflows/swift.yml"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: swift-sdk
+
+jobs:
+  build:
+    name: swift build (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app || true
+      - name: Swift version
+        run: swift --version
+      - name: Build
+        run: swift build -v
+
+  test:
+    name: swift test (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app || true
+      - name: Swift version
+        run: swift --version
+      - name: Test
+        run: swift test
+
+  lint:
+    name: Format check (swift-format)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install swift-format
+        run: brew install swift-format
+      - name: Lint
+        run: swift-format lint --recursive --strict Sources Tests
