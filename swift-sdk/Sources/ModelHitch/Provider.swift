@@ -14,15 +14,17 @@ public protocol Provider: Sendable {
     /// Complete (non-streaming) chat.
     func chat(_ params: ChatParams, credentials: ProviderCredentials) async throws -> ChatResult
     /// Streaming chat, normalized to ``StreamChunk`` events.
-    func stream(_ params: ChatParams, credentials: ProviderCredentials) -> AsyncThrowingStream<StreamChunk, Error>
+    func stream(_ params: ChatParams, credentials: ProviderCredentials) -> AsyncThrowingStream<
+        StreamChunk, Error
+    >
     /// Fetch the provider's available models (e.g. GET /models).
     func listModels(credentials: ProviderCredentials) async throws -> [ModelInfo]
 }
 
-public extension Provider {
+extension Provider {
     /// Default: providers that do not implement discovery report a clear error,
     /// mirroring the TypeScript `provider-error` for unsupported listing.
-    func listModels(credentials: ProviderCredentials) async throws -> [ModelInfo] {
+    public func listModels(credentials: ProviderCredentials) async throws -> [ModelInfo] {
         throw ModelHitchError(
             code: .providerError,
             message: "Provider \"\(id)\" does not support model listing.",

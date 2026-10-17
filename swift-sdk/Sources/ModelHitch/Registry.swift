@@ -12,7 +12,9 @@ public enum DefaultProviders {
         name: "OpenAI",
         baseURL: "https://api.openai.com/v1",
         defaultModel: "gpt-4o-mini",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: true, embeddings: true, maxContextTokens: 128_000),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: true, embeddings: true,
+            maxContextTokens: 128_000),
         apiKeyEnvVar: "OPENAI_API_KEY"
     )
 
@@ -21,7 +23,9 @@ public enum DefaultProviders {
         name: "Groq",
         baseURL: "https://api.groq.com/openai/v1",
         defaultModel: "llama-3.3-70b-versatile",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: false, embeddings: false, maxContextTokens: 128_000),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: false, embeddings: false,
+            maxContextTokens: 128_000),
         apiKeyEnvVar: "GROQ_API_KEY"
     )
 
@@ -30,7 +34,8 @@ public enum DefaultProviders {
         name: "OpenRouter",
         baseURL: "https://openrouter.ai/api/v1",
         defaultModel: "meta-llama/llama-3.1-8b-instruct:free",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: true, embeddings: false),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: true, embeddings: false),
         apiKeyEnvVar: "OPENROUTER_API_KEY"
     )
 
@@ -39,7 +44,8 @@ public enum DefaultProviders {
         name: "Together AI",
         baseURL: "https://api.together.xyz/v1",
         defaultModel: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: true, embeddings: false),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: true, embeddings: false),
         apiKeyEnvVar: "TOGETHER_API_KEY"
     )
 
@@ -48,7 +54,9 @@ public enum DefaultProviders {
         name: "HuggingFace",
         baseURL: "https://router.huggingface.co/v1",
         defaultModel: "Qwen/Qwen2.5-72B-Instruct",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: true, embeddings: false, maxContextTokens: 128_000),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: true, embeddings: false,
+            maxContextTokens: 128_000),
         apiKeyEnvVar: "HF_TOKEN"
     )
 
@@ -57,7 +65,9 @@ public enum DefaultProviders {
         name: "Google Gemini",
         baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
         defaultModel: "gemini-3.7-flash",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: true, embeddings: false, maxContextTokens: 1_000_000),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: true, embeddings: false,
+            maxContextTokens: 1_000_000),
         apiKeyEnvVar: "GEMINI_API_KEY"
     )
 
@@ -66,7 +76,9 @@ public enum DefaultProviders {
         name: "DeepSeek",
         baseURL: "https://api.deepseek.com",
         defaultModel: "deepseek-v4-pro",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: false, embeddings: false, maxContextTokens: 1_000_000),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: false, embeddings: false,
+            maxContextTokens: 1_000_000),
         apiKeyEnvVar: "DEEPSEEK_API_KEY"
     )
 
@@ -75,7 +87,9 @@ public enum DefaultProviders {
         name: "xAI (Grok)",
         baseURL: "https://api.x.ai/v1",
         defaultModel: "grok-4.6",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: true, embeddings: false, maxContextTokens: 500_000),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: true, embeddings: false,
+            maxContextTokens: 500_000),
         apiKeyEnvVar: "XAI_API_KEY"
     )
 
@@ -84,7 +98,9 @@ public enum DefaultProviders {
         name: "Mistral",
         baseURL: "https://api.mistral.ai/v1",
         defaultModel: "mistral-medium-3-5",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: true, embeddings: false, maxContextTokens: 256_000),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: true, embeddings: false,
+            maxContextTokens: 256_000),
         apiKeyEnvVar: "MISTRAL_API_KEY"
     )
 
@@ -93,7 +109,9 @@ public enum DefaultProviders {
         name: "Moonshot (Kimi)",
         baseURL: "https://api.moonshot.ai/v1",
         defaultModel: "kimi-k3",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: true, embeddings: false, maxContextTokens: 1_000_000),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: true, embeddings: false,
+            maxContextTokens: 1_000_000),
         apiKeyEnvVar: "MOONSHOT_API_KEY"
     )
 
@@ -102,7 +120,9 @@ public enum DefaultProviders {
         name: "Z.ai (GLM)",
         baseURL: "https://api.z.ai/api/paas/v4/",
         defaultModel: "glm-5.2",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: false, embeddings: false, maxContextTokens: 1_000_000),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: false, embeddings: false,
+            maxContextTokens: 1_000_000),
         apiKeyEnvVar: "ZAI_API_KEY"
     )
 
@@ -112,7 +132,8 @@ public enum DefaultProviders {
         name: "LM Studio (local)",
         baseURL: "http://localhost:1234/v1",
         defaultModel: "local-model",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: false, embeddings: true),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: false, embeddings: true),
         requiresKey: false
     )
 
@@ -122,7 +143,8 @@ public enum DefaultProviders {
         name: "vLLM (local)",
         baseURL: "http://localhost:8000/v1",
         defaultModel: "local-model",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: false, embeddings: false),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: false, embeddings: false),
         requiresKey: false
     )
 
@@ -132,7 +154,8 @@ public enum DefaultProviders {
         name: "llama.cpp (local)",
         baseURL: "http://localhost:8080/v1",
         defaultModel: "local-model",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: false, embeddings: false),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: false, embeddings: false),
         requiresKey: false
     )
 
@@ -142,7 +165,8 @@ public enum DefaultProviders {
         name: "KoboldCpp (local)",
         baseURL: "http://localhost:5001/v1",
         defaultModel: "local-model",
-        capabilities: Capabilities(streaming: true, toolCalling: true, vision: false, embeddings: false),
+        capabilities: Capabilities(
+            streaming: true, toolCalling: true, vision: false, embeddings: false),
         requiresKey: false
     )
 

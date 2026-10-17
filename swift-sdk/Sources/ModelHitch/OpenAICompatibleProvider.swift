@@ -41,8 +41,11 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
 
     // MARK: - Chat
 
-    public func chat(_ params: ChatParams, credentials: ProviderCredentials) async throws -> ChatResult {
-        let request = try makeRequest(path: "chat/completions", params: params, credentials: credentials, stream: false)
+    public func chat(_ params: ChatParams, credentials: ProviderCredentials) async throws
+        -> ChatResult
+    {
+        let request = try makeRequest(
+            path: "chat/completions", params: params, credentials: credentials, stream: false)
         let (data, response) = try await session.data(for: request)
         try Self.validate(response, providerId: id, body: data)
         return try Self.decodeChatResult(data)
@@ -50,11 +53,15 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
 
     // MARK: - Streaming
 
-    public func stream(_ params: ChatParams, credentials: ProviderCredentials) -> AsyncThrowingStream<StreamChunk, Error> {
+    public func stream(_ params: ChatParams, credentials: ProviderCredentials)
+        -> AsyncThrowingStream<StreamChunk, Error>
+    {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let request = try makeRequest(path: "chat/completions", params: params, credentials: credentials, stream: true)
+                    let request = try makeRequest(
+                        path: "chat/completions", params: params, credentials: credentials,
+                        stream: true)
                     let (bytes, response) = try await session.bytes(for: request)
                     try Self.validate(response, providerId: id, body: nil)
 
@@ -74,7 +81,9 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
                         if responseId == nil { responseId = root["id"]?.stringValue }
                         if usage == nil { usage = Self.decodeUsage(root) }
                         guard let choice = root["choices"]?.arrayValue?.first else { continue }
-                        if let reason = choice["finish_reason"]?.stringValue { finishReason = reason }
+                        if let reason = choice["finish_reason"]?.stringValue {
+                            finishReason = reason
+                        }
                         guard let delta = choice["delta"] else { continue }
 
                         if let reasoning = delta["reasoning_content"]?.stringValue {
@@ -90,10 +99,13 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
                             if let callId, toolCallIds.insert(callId).inserted {
                                 let name = call["function"]?["name"]?.stringValue ?? "unknown"
                                 let signature = call["function"]?["thought_signature"]?.stringValue
-                                continuation.yield(.toolCallStart(id: callId, name: name, thoughtSignature: signature))
+                                continuation.yield(
+                                    .toolCallStart(
+                                        id: callId, name: name, thoughtSignature: signature))
                             }
                             if let arguments = call["function"]?["arguments"]?.stringValue {
-                                continuation.yield(.toolCallArgsDelta(id: key, argsDelta: arguments))
+                                continuation.yield(
+                                    .toolCallArgsDelta(id: key, argsDelta: arguments))
                             }
                         }
                     }
@@ -101,7 +113,8 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
                     for callId in toolCallIds {
                         continuation.yield(.toolCallEnd(id: callId))
                     }
-                    continuation.yield(.finish(finishReason: finishReason, usage: usage, responseId: responseId))
+                    continuation.yield(
+                        .finish(finishReason: finishReason, usage: usage, responseId: responseId))
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -156,9 +169,11 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
         return request
     }
 
-    private func applyAuthorization(_ request: inout URLRequest, credentials: ProviderCredentials) throws {
+    private func applyAuthorization(_ request: inout URLRequest, credentials: ProviderCredentials)
+        throws
+    {
         let key = credentials.apiKey ?? configuredApiKey ?? environmentKey
-        if requiresKey, (key?.isEmpty ?? true) {
+        if requiresKey, key?.isEmpty ?? true {
             throw ModelHitchError(
                 code: .missingAPIKey,
                 message: "Provider \"\(id)\" requires an API key.",
@@ -171,7 +186,9 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
     }
 
     private var environmentKey: String? {
-        guard let apiKeyEnvVar, let value = ProcessInfo.processInfo.environment[apiKeyEnvVar], !value.isEmpty else {
+        guard let apiKeyEnvVar, let value = ProcessInfo.processInfo.environment[apiKeyEnvVar],
+            !value.isEmpty
+        else {
             return nil
         }
         return value
@@ -188,8 +205,12 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
         if let temperature = params.temperature { object["temperature"] = .number(temperature) }
         if let maxTokens = params.maxTokens { object["max_tokens"] = .number(Double(maxTokens)) }
         if let stop = params.stop { object["stop"] = .array(stop.map { .string($0) }) }
-        if let toolChoice = params.toolChoice { object["tool_choice"] = encodeToolChoice(toolChoice) }
-        if let responseFormat = params.responseFormat, let encoded = encodeResponseFormat(responseFormat) {
+        if let toolChoice = params.toolChoice {
+            object["tool_choice"] = encodeToolChoice(toolChoice)
+        }
+        if let responseFormat = params.responseFormat,
+            let encoded = encodeResponseFormat(responseFormat)
+        {
             object["response_format"] = encoded
         }
         if let previousResponseId = params.previousResponseId {
@@ -212,19 +233,22 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
         }
         if let name = message.name { object["name"] = .string(name) }
         if let toolCalls = message.toolCalls, !toolCalls.isEmpty {
-            object["tool_calls"] = .array(toolCalls.map { call in
-                .object([
-                    "id": .string(call.id),
-                    "type": .string("function"),
-                    "function": .object([
-                        "name": .string(call.name),
-                        "arguments": .string(call.arguments.jsonString),
-                    ]),
-                ])
-            })
+            object["tool_calls"] = .array(
+                toolCalls.map { call in
+                    .object([
+                        "id": .string(call.id),
+                        "type": .string("function"),
+                        "function": .object([
+                            "name": .string(call.name),
+                            "arguments": .string(call.arguments.jsonString),
+                        ]),
+                    ])
+                })
         }
         if let toolCallId = message.toolCallId { object["tool_call_id"] = .string(toolCallId) }
-        if let reasoning = message.reasoningContent { object["reasoning_content"] = .string(reasoning) }
+        if let reasoning = message.reasoningContent {
+            object["reasoning_content"] = .string(reasoning)
+        }
         return .object(object)
     }
 
@@ -233,7 +257,9 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
         case .text(let text):
             return .object(["type": .string("text"), "text": .string(text)])
         case .imageURL(let url):
-            return .object(["type": .string("image_url"), "image_url": .object(["url": .string(url)])])
+            return .object([
+                "type": .string("image_url"), "image_url": .object(["url": .string(url)]),
+            ])
         case .imageData(let data, let mimeType):
             return .object([
                 "type": .string("image_url"),
@@ -255,7 +281,9 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
         case .none: return .string("none")
         case .required: return .string("required")
         case .function(let name):
-            return .object(["type": .string("function"), "function": .object(["name": .string(name)])])
+            return .object([
+                "type": .string("function"), "function": .object(["name": .string(name)]),
+            ])
         }
     }
 
@@ -291,11 +319,14 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
 
     static func decodeAssistant(_ value: JSONValue?) -> ModelMessage {
         let content = value?["content"]?.stringValue ?? ""
-        let toolCalls: [ToolCall]? = value?["tool_calls"]?.arrayValue?.enumerated().map { index, call in
+        let toolCalls: [ToolCall]? = value?["tool_calls"]?.arrayValue?.enumerated().map {
+            index, call in
             let callId = call["id"]?.stringValue ?? "call_\(index)"
             let name = call["function"]?["name"]?.stringValue ?? "unknown"
             let argumentsString = call["function"]?["arguments"]?.stringValue ?? "{}"
-            let arguments = (try? JSONDecoder().decode(JSONValue.self, from: Data(argumentsString.utf8))) ?? .object([:])
+            let arguments =
+                (try? JSONDecoder().decode(JSONValue.self, from: Data(argumentsString.utf8)))
+                ?? .object([:])
             return ToolCall(id: callId, name: name, arguments: arguments)
         }
         return ModelMessage.assistant(
@@ -320,7 +351,8 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
         guard let http = response as? HTTPURLResponse else { return }
         guard (200..<300).contains(http.statusCode) else {
             let text = body.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-            throw mapHTTPError(status: http.statusCode, body: text, headers: http, providerId: providerId)
+            throw mapHTTPError(
+                status: http.statusCode, body: text, headers: http, providerId: providerId)
         }
     }
 
@@ -338,7 +370,11 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
         case 400, 422: code = .badRequest
         default: code = .providerError
         }
-        let retryAfterMs = headers?["Retry-After"].flatMap { Int($0) }.map { $0 * 1000 }
+        let retryAfterMs =
+            headers
+            .flatMap { $0.value(forHTTPHeaderField: "Retry-After") }
+            .flatMap { Int($0) }
+            .map { $0 * 1000 }
         let detail = body.isEmpty ? "" : ": \(body)"
         return ModelHitchError(
             code: code,

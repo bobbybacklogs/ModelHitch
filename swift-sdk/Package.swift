@@ -1,4 +1,4 @@
-// swift-tools-version:5.7
+// swift-tools-version:6.0
 import PackageDescription
 
 let package = Package(
@@ -10,9 +10,23 @@ let package = Package(
     products: [
         .library(name: "ModelHitch", targets: ["ModelHitch"]),
     ],
+    dependencies: [
+        // swift-testing is not bundled with bare toolchains (CommandLineTools),
+        // so it is referenced explicitly, pinned to the release matching the
+        // minimum toolchain in CI.
+        .package(
+            url: "https://github.com/swiftlang/swift-testing.git",
+            revision: "937120cbc281cf29727fdfb8734482158508b4fc" // swift-6.3.1-RELEASE
+        ),
+    ],
     targets: [
         .target(name: "ModelHitch"),
-        // Test target is owned by the test pass (Wave 2); it is added once
-        // Tests/ModelHitchTests exists so `swift build` stays green today.
+        .testTarget(
+            name: "ModelHitchTests",
+            dependencies: [
+                "ModelHitch",
+                .product(name: "Testing", package: "swift-testing"),
+            ]
+        ),
     ]
 )

@@ -43,7 +43,10 @@ public struct ToolCall: Sendable, Equatable {
     /// tool call on the next turn (for example Gemini's `thoughtSignature`).
     public var thoughtSignature: String?
 
-    public init(id: String, name: String, arguments: JSONValue = .object([:]), thoughtSignature: String? = nil) {
+    public init(
+        id: String, name: String, arguments: JSONValue = .object([:]),
+        thoughtSignature: String? = nil
+    ) {
         self.id = id
         self.name = name
         self.arguments = arguments

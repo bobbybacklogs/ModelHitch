@@ -42,7 +42,8 @@ public func aggregateStream(
 
     let toolCalls: [ToolCall] = order.compactMap { key in
         guard let call = calls[key] else { return nil }
-        let arguments = (try? JSONDecoder().decode(JSONValue.self, from: Data(call.args.utf8))) ?? .object([:])
+        let arguments =
+            (try? JSONDecoder().decode(JSONValue.self, from: Data(call.args.utf8))) ?? .object([:])
         return ToolCall(id: call.id, name: call.name, arguments: arguments)
     }
 

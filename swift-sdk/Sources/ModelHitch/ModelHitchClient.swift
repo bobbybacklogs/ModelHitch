@@ -79,7 +79,8 @@ public final class ModelHitch: @unchecked Sendable {
     ) async throws -> ChatResult {
         let provider = try resolveProvider(input)
         let params = buildParams(input, provider: provider)
-        let credentials = try await resolveCredentials(provider, input, override: credentialsOverride)
+        let credentials = try await resolveCredentials(
+            provider, input, override: credentialsOverride)
         return try await provider.chat(params, credentials: credentials)
     }
 
@@ -96,7 +97,8 @@ public final class ModelHitch: @unchecked Sendable {
                 do {
                     let provider = try resolveProvider(input)
                     let params = buildParams(input, provider: provider)
-                    let credentials = try await resolveCredentials(provider, input, override: credentialsOverride)
+                    let credentials = try await resolveCredentials(
+                        provider, input, override: credentialsOverride)
                     for try await chunk in provider.stream(params, credentials: credentials) {
                         continuation.yield(chunk)
                     }

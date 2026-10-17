@@ -40,7 +40,8 @@ extension JSONValue: Codable {
             self = .object(value)
             return
         }
-        throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unsupported JSON value")
+        throw DecodingError.dataCorruptedError(
+            in: container, debugDescription: "Unsupported JSON value")
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -62,47 +63,48 @@ extension JSONValue: Codable {
     }
 }
 
-public extension JSONValue {
-    var stringValue: String? {
+extension JSONValue {
+    public var stringValue: String? {
         if case .string(let value) = self { return value }
         return nil
     }
 
-    var intValue: Int? {
+    public var intValue: Int? {
         if case .number(let value) = self { return Int(value) }
         return nil
     }
 
-    var doubleValue: Double? {
+    public var doubleValue: Double? {
         if case .number(let value) = self { return value }
         return nil
     }
 
-    var boolValue: Bool? {
+    public var boolValue: Bool? {
         if case .bool(let value) = self { return value }
         return nil
     }
 
-    var arrayValue: [JSONValue]? {
+    public var arrayValue: [JSONValue]? {
         if case .array(let value) = self { return value }
         return nil
     }
 
-    var objectValue: [String: JSONValue]? {
+    public var objectValue: [String: JSONValue]? {
         if case .object(let value) = self { return value }
         return nil
     }
 
-    subscript(key: String) -> JSONValue? {
+    public subscript(key: String) -> JSONValue? {
         if case .object(let value) = self { return value[key] }
         return nil
     }
 
     /// Compact JSON string, used for OpenAI's string-encoded tool arguments.
-    var jsonString: String {
+    public var jsonString: String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        guard let data = try? encoder.encode(self), let string = String(data: data, encoding: .utf8) else {
+        guard let data = try? encoder.encode(self), let string = String(data: data, encoding: .utf8)
+        else {
             return "null"
         }
         return string

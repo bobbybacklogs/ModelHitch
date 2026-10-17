@@ -3,7 +3,5 @@
   "indentation": {
     "spaces": 4
   },
-  "lineLength": {
-    "lineLengthPercentage": 100
-  }
+  "lineLength": 100
 }
