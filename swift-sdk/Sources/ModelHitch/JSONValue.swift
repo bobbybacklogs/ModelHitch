@@ -70,8 +70,13 @@ extension JSONValue {
     }
 
     public var intValue: Int? {
-        if case .number(let value) = self { return Int(value) }
-        return nil
+        guard case .number(let value) = self else { return nil }
+        // `Int(Double)` traps when the value is outside the integer range, so
+        // guard it first. `Double(Int.max)` rounds up to 2^63, hence `<`.
+        guard value.isFinite, value >= Double(Int.min), value < Double(Int.max) else {
+            return nil
+        }
+        return Int(value)
     }
 
     public var doubleValue: Double? {

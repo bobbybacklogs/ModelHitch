@@ -44,11 +44,15 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
     public func chat(_ params: ChatParams, credentials: ProviderCredentials) async throws
         -> ChatResult
     {
-        let request = try makeRequest(
-            path: "chat/completions", params: params, credentials: credentials, stream: false)
-        let (data, response) = try await session.data(for: request)
-        try Self.validate(response, providerId: id, body: data)
-        return try Self.decodeChatResult(data)
+        do {
+            let request = try makeRequest(
+                path: "chat/completions", params: params, credentials: credentials, stream: false)
+            let (data, response) = try await session.data(for: request)
+            try Self.validate(response, providerId: id, body: data)
+            return try Self.decodeChatResult(data, providerId: id)
+        } catch {
+            throw Self.mapError(error, providerId: id)
+        }
     }
 
     // MARK: - Streaming
@@ -117,7 +121,7 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
                         .finish(finishReason: finishReason, usage: usage, responseId: responseId))
                     continuation.finish()
                 } catch {
-                    continuation.finish(throwing: error)
+                    continuation.finish(throwing: Self.mapError(error, providerId: id))
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
@@ -127,23 +131,28 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
     // MARK: - Model listing
 
     public func listModels(credentials: ProviderCredentials) async throws -> [ModelInfo] {
-        guard let url = Self.endpoint(credentials.baseUrl ?? baseURL, "models") else {
-            throw ModelHitchError(code: .badRequest, message: "Invalid base URL.", providerId: id)
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        try applyAuthorization(&request, credentials: credentials)
+        do {
+            guard let url = Self.endpoint(credentials.baseUrl ?? baseURL, "models") else {
+                throw ModelHitchError(
+                    code: .badRequest, message: "Invalid base URL.", providerId: id)
+            }
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            try applyAuthorization(&request, credentials: credentials)
 
-        let (data, response) = try await session.data(for: request)
-        try Self.validate(response, providerId: id, body: data)
-        let root = try JSONDecoder().decode(JSONValue.self, from: data)
-        return (root["data"]?.arrayValue ?? []).compactMap { item in
-            guard let modelId = item["id"]?.stringValue else { return nil }
-            return ModelInfo(
-                id: modelId,
-                name: item["name"]?.stringValue,
-                contextLength: item["context_length"]?.intValue
-            )
+            let (data, response) = try await session.data(for: request)
+            try Self.validate(response, providerId: id, body: data)
+            let root = try JSONDecoder().decode(JSONValue.self, from: data)
+            return (root["data"]?.arrayValue ?? []).compactMap { item in
+                guard let modelId = item["id"]?.stringValue else { return nil }
+                return ModelInfo(
+                    id: modelId,
+                    name: item["name"]?.stringValue,
+                    contextLength: item["context_length"]?.intValue
+                )
+            }
+        } catch {
+            throw Self.mapError(error, providerId: id)
         }
     }
 
@@ -294,8 +303,10 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
         case .jsonObject:
             return .object(["type": .string("json_object")])
         case .jsonSchema(let name, let strict, let schema):
-            var inner: [String: JSONValue] = ["schema": schema]
-            if let name { inner["name"] = .string(name) }
+            var inner: [String: JSONValue] = [
+                "name": .string(name ?? "response"),
+                "schema": schema,
+            ]
             if let strict { inner["strict"] = .bool(strict) }
             return .object(["type": .string("json_schema"), "json_schema": .object(inner)])
         }
@@ -303,10 +314,17 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
 
     // MARK: - Decoding
 
-    static func decodeChatResult(_ data: Data) throws -> ChatResult {
+    static func decodeChatResult(_ data: Data, providerId: String) throws -> ChatResult {
         let root = try JSONDecoder().decode(JSONValue.self, from: data)
         let choice = root["choices"]?.arrayValue?.first
-        let message = decodeAssistant(choice?["message"])
+        guard let messageValue = choice?["message"], messageValue != .null else {
+            throw ModelHitchError(
+                code: .providerError,
+                message: "Provider \"\(providerId)\" returned no message.",
+                providerId: providerId
+            )
+        }
+        let message = decodeAssistant(messageValue)
         let finishReason = choice?["finish_reason"]?.stringValue ?? "stop"
         return ChatResult(
             message: message,
@@ -373,8 +391,7 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
         let retryAfterMs =
             headers
             .flatMap { $0.value(forHTTPHeaderField: "Retry-After") }
-            .flatMap { Int($0) }
-            .map { $0 * 1000 }
+            .flatMap { Self.parseRetryAfter($0) }
         let detail = body.isEmpty ? "" : ": \(body)"
         return ModelHitchError(
             code: code,
@@ -383,6 +400,66 @@ public final class OpenAICompatibleProvider: Provider, @unchecked Sendable {
             providerId: providerId,
             retryAfterMs: retryAfterMs
         )
+    }
+
+    /// Normalize a thrown transport/decode error into a ``ModelHitchError`` so
+    /// callers see one public error type. `URLError` becomes
+    /// ``ModelHitchErrorCode/networkError``; `DecodingError` becomes
+    /// ``ModelHitchErrorCode/providerError`` (malformed provider response).
+    static func mapError(_ error: Error, providerId: String) -> Error {
+        if error is ModelHitchError { return error }
+        if let urlError = error as? URLError {
+            let message =
+                "Network error contacting provider \"\(providerId)\": "
+                + urlError.localizedDescription
+            return ModelHitchError(code: .networkError, message: message, providerId: providerId)
+        }
+        if error is DecodingError {
+            return ModelHitchError(
+                code: .providerError,
+                message: "Provider \"\(providerId)\" returned a malformed response.",
+                providerId: providerId
+            )
+        }
+        return error
+    }
+
+    /// Parse a `Retry-After` header into milliseconds, mirroring the TypeScript
+    /// `parseRetryAfter`: whole or fractional delta-seconds, or an HTTP-date.
+    /// Returns `nil` for absent, malformed, negative, or already-expired values.
+    static func parseRetryAfter(_ value: String?) -> Int? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        // Delta-seconds (whole or fractional), per RFC 9110.
+        if trimmed.range(of: #"^\d+(\.\d+)?$"#, options: .regularExpression) != nil {
+            guard let seconds = Double(trimmed), seconds >= 0, seconds.isFinite else { return nil }
+            return Int(ceil(seconds * 1000))
+        }
+
+        // HTTP-date (RFC 1123 / 850 / asctime).
+        if let date = Self.parseHTTPDate(trimmed) {
+            let ms = Int((date.timeIntervalSinceNow * 1000).rounded(.up))
+            return ms > 0 ? ms : nil
+        }
+        return nil
+    }
+
+    private static func parseHTTPDate(_ string: String) -> Date? {
+        let formats = [
+            "EEE, dd MMM yyyy HH:mm:ss z",  // RFC 1123
+            "EEEE, dd-MMM-yy HH:mm:ss z",  // RFC 850
+            "EEE MMM d HH:mm:ss yyyy",  // asctime
+        ]
+        for format in formats {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = format
+            if let date = formatter.date(from: string) { return date }
+        }
+        return nil
     }
 
     static func endpoint(_ base: String, _ path: String) -> URL? {
