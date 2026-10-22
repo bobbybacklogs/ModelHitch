@@ -71,6 +71,38 @@ const FAMILY_PRICING: Array<{ prefix: string; pricing: ModelPricing }> = [
 /** Providers that are always local/free regardless of model id. */
 const LOCAL_PROVIDER_IDS = new Set(['ollama', 'lmstudio', 'vllm', 'llamacpp', 'koboldcpp']);
 
+/**
+ * True when a lane costs nothing marginal to serve.
+ *
+ * This is not the same question `estimateCost` answers ("what did this call
+ * cost?" — unknown models cost 0 but might not be free at list price). This
+ * one drives the `modelhitch/free` plan: a lane is only routable under that
+ * plan when serving it can never bill anyone. A lane qualifies when:
+ *
+ * - its provider is flat-rate — `opencode-go` (subscription lane) or a local
+ *   provider (`LOCAL_PROVIDER_IDS`: ollama, lmstudio, ...); or
+ * - the clean model id (a `opencode/` or `opencode-go/` prefix is not part of
+ *   the model family) ends in `-free`, matching the hardcoded free-tier block
+ *   in `MODEL_PRICING`; or
+ * - `MODEL_PRICING` has an exact entry for it priced 0/0.
+ *
+ * Unknown or unpriced models are deliberately NOT free (conservative): a
+ * family-fallback price is a guess on the billing side, and the free-only plan
+ * should narrow rather than widen. Being wrong here spends the user's money;
+ * being conservative only shortens the lane list.
+ */
+export function isFreeLaneModel(model: string, providerId?: string): boolean {
+  if (providerId === 'opencode-go' || (providerId && LOCAL_PROVIDER_IDS.has(providerId))) return true;
+  const cleanModel = model.replace(/^(?:opencode|opencode-go)\//, '');
+  if (cleanModel.endsWith('-free')) return true;
+  const exact = MODEL_PRICING[cleanModel] ?? MODEL_PRICING[model];
+  return (
+    exact !== undefined &&
+    exact.inputPerMillion === 0 &&
+    exact.outputPerMillion === 0
+  );
+}
+
 export interface CostEstimate {
   /** True when a pricing entry was found; false = free or unknown (0 cost). */
   priced: boolean;

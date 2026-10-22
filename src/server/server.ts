@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { ModelHitchError, type ModelHitchErrorCode } from '../core/errors.js';
-import { estimateCost } from '../core/cost.js';
+import { estimateCost, isFreeLaneModel } from '../core/cost.js';
 import type { KeyStore } from '../core/keystore.js';
 import type { ChatParams, ProviderCredentials, StreamChunk, Usage } from '../core/types.js';
 import { defaultProviders } from '../registry.js';
@@ -77,7 +77,9 @@ import { clearConversations, findConversationWithToolCall, rememberConversation 
 import { normalizeBodyImages } from './local-images.js';
 import {
   autoModelEntry,
+  freeModelEntry,
   isAutoModelId,
+  isFreeModelId,
   isIntentModelIdShape,
   intentFromModelId,
   intentModelEntry,
@@ -88,6 +90,7 @@ import {
   type PlanLane,
   type PlanModelEntry,
 } from './lane-catalog.js';
+import { detectRotatedLanes, type RotatedLane } from '../catalog/rotation.js';
 import { resolveOutboundSessionId } from '../core/session.js';
 import type { OpenAIChatRequest, OpenAIModelEntry, OpenAIStreamChunk } from './types.js';
 import type { CloudAgentConfig, ImageGenerationConfig, LocalAgentLaneConfig } from '../config.js';
@@ -327,6 +330,13 @@ interface RoutedRequest {
   provider: Provider;
   model: string;
   displaced?: FailoverTarget;
+  /**
+   * True when the client sent `modelhitch/free` — a plan selector that lets the
+   * routing stand and filters the lane walk to zero-cost lanes in
+   * `lanesForRoute`. Carried on the route rather than re-derived there so the
+   * free decision is made once, where the model id is read.
+   */
+  freeOnly?: boolean;
 }
 
 /**
@@ -680,31 +690,40 @@ export class OpenAICompatibleServer {
    * bare — becomes a fallback lane, so the pin costs one preference, not the
    * whole rotation.
    */
-  private routeRequest(modelInput: string | undefined): RoutedRequest {
+  private routeRequest(modelInput: string | undefined, freeOnlyFromCaller?: boolean): RoutedRequest {
+    // The free id is read off the raw input, before normalization erases it:
+    // it routes as an unqualified request but selects a lane filter, so it has
+    // to survive as data on the route. Most callers pre-resolve the model
+    // first (`resolveRequestModel`) and pass the flag they saw there; the
+    // direct check covers a caller that routes a raw id.
+    const freeOnly = freeOnlyFromCaller === true || isFreeModelId(modelInput);
     const requestedInput = this.normalizeModel(modelInput);
     const natural = routeModel(requestedInput, this.providers, this.options.defaultProviderId);
     const pinned = this.pinnedProvider();
     if (!pinned || pinned.id === natural.provider.id) {
-      return { provider: natural.provider, model: natural.model };
+      return { provider: natural.provider, model: natural.model, ...(freeOnly ? { freeOnly: true } : {}) };
     }
     const requested = requestedInput && requestedInput.trim() ? natural.model : undefined;
     return {
       provider: pinned,
       model: requested ?? this.pinnedDefaultModel(pinned),
       displaced: { providerId: natural.provider.id, model: natural.model },
+      ...(freeOnly ? { freeOnly: true } : {}),
     };
   }
 
   /**
    * The model a request asked for, or `undefined` for the auto id.
    *
-   * `modelhitch/auto` is not a lane, it is the plan — so it is resolved here,
-   * once, into "the request named no model". Every wire then reaches it through
-   * the routing an unqualified request already gets (default lane, provider
-   * pin, the rotation behind it) instead of a second path that could drift.
+   * `modelhitch/auto` and `modelhitch/free` are not lanes, they are plan
+   * selectors — so both are resolved here, once, into "the request named no
+   * model" (the free id's selection travels on the route, see
+   * `routeRequest`). Every wire then reaches them through the routing an
+   * unqualified request already gets (default lane, provider pin, the rotation
+   * behind it) instead of a second path that could drift.
    */
   private normalizeModel(modelInput: string | undefined): string | undefined {
-    return isAutoModelId(modelInput) ? undefined : modelInput;
+    return isAutoModelId(modelInput) || isFreeModelId(modelInput) ? undefined : modelInput;
   }
 
   /**
@@ -720,6 +739,8 @@ export class OpenAICompatibleServer {
   private resolveRequestModel(raw: string | undefined): {
     model: string | undefined;
     intent: IntentKey | undefined;
+    /** True when the raw id was `modelhitch/free` — see `routeRequest`. */
+    freeOnly?: boolean;
   } {
     const pinned = intentFromModelId(raw);
     if (pinned) return { model: undefined, intent: pinned };
@@ -730,7 +751,8 @@ export class OpenAICompatibleServer {
         { status: 404 },
       );
     }
-    return { model: this.normalizeModel(raw), intent: undefined };
+    const freeOnly = isFreeModelId(raw);
+    return { model: this.normalizeModel(raw), intent: undefined, ...(freeOnly ? { freeOnly: true } : {}) };
   }
 
   /**
@@ -818,6 +840,22 @@ export class OpenAICompatibleServer {
       }
     }
     lanes.push(...(await this.laneTargetsFor(route.provider, route.model, policy)));
+    // Free-only walk (`modelhitch/free` or `policy.freeOnly`): the plan stands,
+    // but anything that could bill is dropped — the primary and displaced lanes
+    // included, since an id that promises zero cost cannot pay it back on the
+    // first hop. An empty result is refused rather than silently served from a
+    // billable lane: an empty free plan is a config problem the user has to see.
+    if (route.freeOnly === true || this.policy?.freeOnly === true) {
+      const free = lanes.filter((lane) => isFreeLaneModel(lane.model, lane.providerId));
+      if (free.length === 0) {
+        throw new ModelHitchError(
+          'model-not-found',
+          'The free-only lane has nothing to serve: no free lanes (OpenCode Go, -free tier, or zero-priced models) are configured on this bridge.',
+          { status: 404 },
+        );
+      }
+      return free;
+    }
     // Only when inference actually steered the request — a default-intent
     // request routes exactly as it always did and needs no new noise.
     if (intent !== DEFAULT_INTENT) this.log(`  intent=${intent} -> ${lanes.length} lanes`);
@@ -1007,6 +1045,16 @@ export class OpenAICompatibleServer {
       const cd = this.cooldown;
       if (cd instanceof CircuitBreaker) health.push(...cd.snapshot());
       this.sendJson(res, 200, health);
+      return;
+    }
+
+    // Check configured lanes against each provider's live model list and name
+    // the lanes that rotated (provider no longer serves the model id). The
+    // settings page applies any switch itself via PUT /v1/config — this route
+    // only reports, so it is a GET with no action semantics.
+    if (method === 'GET' && path === '/v1/lane-rotation') {
+      this.log(`${method} ${path} ->`);
+      await this.handleLaneRotation(res);
       return;
     }
 
@@ -1308,7 +1356,7 @@ export class OpenAICompatibleServer {
     const requested = this.resolveRequestModel(body.model);
     const requestedModel = requested.model;
     this.assertCloudAgentModel(requestedModel);
-    const route = this.routeRequest(requestedModel);
+    const route = this.routeRequest(requestedModel, requested.freeOnly);
     const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
@@ -1498,7 +1546,7 @@ export class OpenAICompatibleServer {
     const requested = this.resolveRequestModel(body.model);
     const requestedModel = requested.model;
     this.assertCloudAgentModel(requestedModel);
-    const route = this.routeRequest(requestedModel);
+    const route = this.routeRequest(requestedModel, requested.freeOnly);
     const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
@@ -1655,7 +1703,7 @@ export class OpenAICompatibleServer {
     const requested = this.resolveRequestModel(body.model);
     const requestedModel = requested.model;
     this.assertCloudAgentModel(requestedModel);
-    const route = this.routeRequest(requestedModel);
+    const route = this.routeRequest(requestedModel, requested.freeOnly);
     const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
@@ -1797,7 +1845,7 @@ export class OpenAICompatibleServer {
     const requested = this.resolveRequestModel(modelFromPath || body.model);
     const requestedModel = requested.model;
     this.assertCloudAgentModel(requestedModel);
-    const route = this.routeRequest(requestedModel);
+    const route = this.routeRequest(requestedModel, requested.freeOnly);
     const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
@@ -1944,6 +1992,28 @@ export class OpenAICompatibleServer {
       }
     }
 
+    // The free id joins the plan rows when the plan has at least one zero-cost
+    // lane: the entry advertises exactly the lanes the router would try
+    // (`modelhitch.lanes`), so a picker that renders it can show what the
+    // filter keeps. With no free lane there is no row — and picking the id
+    // anywhere (e.g. a saved config from another bridge) 404s with an
+    // explanation rather than billing. Placed after the intent rows and before
+    // the per-lane rows, so the plan ids stay grouped at the top of the list.
+    if (this.providers.length > 0) {
+      const freeLanes = lanes.filter((lane) => isFreeLaneModel(lane.model, lane.providerId));
+      if (freeLanes.length > 0) {
+        const free = freeModelEntry(freeLanes, lanes.length);
+        plan.push({
+          id: free.id,
+          object: 'model',
+          created: 0,
+          owned_by: 'modelhitch',
+          name: free.name,
+          modelhitch: free.modelhitch,
+        });
+      }
+    }
+
     for (const lane of lanes) {
       plan.push({
         id: lane.id,
@@ -2079,6 +2149,50 @@ export class OpenAICompatibleServer {
     const data = await this.modelCatalog();
     this.log(`  -> ${data.length} models`);
     this.sendJson(res, 200, { object: 'list', data });
+  }
+
+  /**
+   * `GET /v1/lane-rotation`: the configured lanes whose model id is gone from
+   * their provider's live list.
+   *
+   * The configured lane list is the same `planLanes` view the catalog
+   * publishes, minus auto-mode: an auto-mode lineup derives from the provider
+   * catalog rather than a saved config, so there is nothing for the user to
+   * mis-edit, and the plan (a policy) is what rotates under a config file. A
+   * provider is only consulted when it is registered and can list models — an
+   * unregistered lane or one without a lister cannot expose what it serves
+   * today, so it is skipped ("can't know"), and a transport failure is also a
+   * skip: an offline provider looks identical to a rotated one from here, and
+   * flagging it would be a false positive.
+   */
+  private async handleLaneRotation(res: ServerResponse): Promise<void> {
+    const lanes = planLanes({
+      policy: this.policy,
+      defaultModelFor: (providerId) => this.source.defaultModel(providerId),
+    });
+    const modelIdsByProvider = new Map<string, string[]>();
+    for (const providerId of new Set(lanes.map((lane) => lane.providerId))) {
+      const provider = this.providerFor(providerId);
+      if (!provider?.listModels) continue;
+      try {
+        const models = await provider.listModels(await this.resolveCredentials(providerId));
+        modelIdsByProvider.set(providerId, models.map((m) => m.id));
+      } catch {
+        // Transport failure = "unknown", not rotated: this provider's lanes are
+        // reported no differently than one with no lister at all.
+      }
+    }
+    const rotated: RotatedLane[] = detectRotatedLanes(
+      lanes.map((lane) => ({ providerId: lane.providerId, model: lane.model })),
+      modelIdsByProvider,
+    );
+    if (rotated.length > 0) {
+      this.log(
+        `  lane-rotation: ${rotated.length} rotated lane${rotated.length === 1 ? '' : 's'} — ` +
+          rotated.map((r) => `${r.providerId}/${r.model}`).join(', '),
+      );
+    }
+    this.sendJson(res, 200, { rotated, checkedAt: new Date().toISOString() });
   }
 
   private async handleModelById(res: ServerResponse, id: string): Promise<void> {

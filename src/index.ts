@@ -12,6 +12,7 @@ export {
   type ToolLoopEvent,
 } from './agent.js';
 export { defaultProviders } from './registry.js';
+export { isFreeLaneModel } from './core/cost.js';
 export { MemoryKeyStore } from './storage/memory.js';
 export { LocalStorageKeyStore } from './storage/local-storage.js';
 
@@ -33,6 +34,11 @@ export {
   intentModelLabel,
   isAutoModelId,
   isAutoModelMeta,
+  isFreeModelId,
+  isFreeModelMeta,
+  freeModelEntry,
+  freeModelLabel,
+  FREE_MODEL_ID,
   isIntentModelIdShape,
   laneLabel,
   laneRoute,
@@ -47,6 +53,12 @@ export {
   type PlanModelEntry,
   type PlanTier,
 } from './server/lane-catalog.js';
+export {
+  detectRotatedLanes,
+  suggestReplacement,
+  type ConfiguredLane,
+  type RotatedLane,
+} from './catalog/rotation.js';
 
 // auto-mode: rate-limit failover + usage tracking
 export {

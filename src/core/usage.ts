@@ -339,6 +339,7 @@ var RANGES = [
 var range = "all";
 var snap = null;
 var lastPaint = "";
+var DEFAULT_INTENT = ${JSON.stringify(DEFAULT_INTENT)};
 
 function el(id) { return document.getElementById(id); }
 function esc(s) {

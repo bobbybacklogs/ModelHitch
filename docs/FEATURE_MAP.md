@@ -109,7 +109,9 @@ Live hosted inference and local-runtime inference are **not** in default verify.
 | Exhaustion preserves the first error (`ExhaustedError`) | **Proven (verify)** | `tests/exhaustion.test.ts` |
 | Policy trusted/fallback lanes, backoff, validation | **Proven (verify)** | `tests/policy.test.ts`, `tests/settings.test.ts` |
 | Capability filter skips tool-incapable lanes | **Proven (verify)** | `tests/capabilities.test.ts`, `tests/client.test.ts`, `tests/auto-mode.test.ts` |
-| `CircuitBreaker` trip / half-open / snapshot | **Proven (verify)** | `tests/circuit-breaker.test.ts` |
+| `modelhitch/free` plan id + `policy.freeOnly`: the walk (primary included) filters to free lanes (Go flat-rate, `-free` ids, zero-priced entries); none qualifies → 404 `model-not-found`; published in `/v1/models` | **Proven (verify)** | `tests/free-lane.test.ts`, `tests/lane-models.test.ts` |
+| Lane-rotation detection: `detectRotatedLanes` / `suggestReplacement` (same-family token overlap) + `GET /v1/lane-rotation` diffs configured plan lanes against each provider's live `listModels` (transport failure = unknown, not rotated) | **Proven (verify)** on the pure functions | `tests/rotation.test.ts`; the HTTP route is **Code-inspected** (needs a live `/models` upstream) |
+| Usage dashboard inline script carries the plan-name constants it renders (`DEFAULT_INTENT` interpolated from the server constant) | **Proven (verify)** | dashboard built by `usageDashboardHtml()` in `src/core/usage.ts`; browser script no longer references a server-only symbol |
 | `MemoryLaneCooldown` + Retry-After | **Proven (verify)** | Cooldown used from policy/settings tests; `parseRetryAfter` via failover/breaker |
 | Catalog merge: registry wins; auto-build OpenAI-compatible adapters; usability errors | **Proven (verify)** with fixture JSON | `tests/catalog.test.ts` |
 | OpenCode Console BYOK rotation: every enabled connection × model becomes a lane at the front of `trusted`, the configured policy stays behind as the safety net | **Proven (verify)** | `tests/opencode-byok.test.ts` (`applyOpenCodeByokPlan`), `tests/cli-bridge-flags.test.ts` (end-to-end lane) |

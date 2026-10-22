@@ -68,6 +68,11 @@ export interface Policy {
   backoff?: BackoffOptions;
   /** Error codes that trigger failover (HTTP 429 always triggers regardless). */
   retryableCodes?: ModelHitchErrorCode[];
+  /**
+   * When true the whole plan routes through free lanes only (cheap/flat-rate
+   * or explicit zero-priced models). Pairs with the `modelhitch/free` plan id.
+   */
+  freeOnly?: boolean;
 }
 
 /**

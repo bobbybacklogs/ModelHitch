@@ -19,10 +19,11 @@ import { INTENT_NAMES, isIntentName, type IntentName } from '../core/intent.js';
  * - Entries carry the real route (`providerId/modelId`), never an alias. A lane
  *   picked from a picker and a lane reached by rotation are the same request,
  *   so nothing has to translate between the two, and `GET /v1/models/:id`
- *   answers for a lane exactly as it does for any other model. The one
- *   deliberate exception is `AUTO_MODEL_ID` below: it is not an alias for a
- *   lane, it is the plan itself, and the router resolves it the same way on
- *   every wire.
+ *   answers for a lane exactly as it does for any other model. The deliberate
+ *   exceptions are the plan ids: `AUTO_MODEL_ID` and `FREE_MODEL_ID` below.
+ *   Neither is an alias for a lane — each is the plan itself (the free id is a
+ *   filtered view of it) — and the router resolves each the same way on every
+ *   wire.
  * - Ids are always fully qualified, even for the default provider. A bare id
  *   means "the default provider" to the router, which is not what a lane says —
  *   and a bare id can be shadowed by a provider of the same name (the default
@@ -55,6 +56,27 @@ export const AUTO_MODEL_ID = 'modelhitch/auto';
 /** True when a client asked for the plan rather than for one lane. */
 export function isAutoModelId(modelInput: unknown): boolean {
   return typeof modelInput === 'string' && modelInput.trim().toLowerCase() === AUTO_MODEL_ID;
+}
+
+/**
+ * The id that stands for the plan's free lanes only.
+ *
+ * Same idea as the auto id — a plan published as a pickable model, not a lane —
+ * but where the auto id filters nothing, this one filters everything: the walk
+ * keeps only lanes that cost nothing marginal (`isFreeLaneModel` in
+ * `core/cost.ts`). It answers "send my work where it cannot bill anyone", which
+ * a regular lane list cannot express without merging every free provider into
+ * one row.
+ *
+ * Fixed for the same reason the auto id is: a client's saved config keeps
+ * meaning the same request across bridge changes. Empty when the plan has no
+ * free lane at all — the router refuses it rather than silently billing.
+ */
+export const FREE_MODEL_ID = 'modelhitch/free';
+
+/** True when a client asked for the plan's free lanes rather than one lane. */
+export function isFreeModelId(modelInput: unknown): boolean {
+  return typeof modelInput === 'string' && modelInput.trim().toLowerCase() === FREE_MODEL_ID;
 }
 
 /** Separates the auto id from the intent it pins: `modelhitch/auto:coding`. */
@@ -263,7 +285,14 @@ export function laneRoute(lane: FailoverTarget): string {
  * asking which lanes the plan holds.
  */
 export interface AutoModelMeta {
-  kind: 'auto';
+  /**
+   * Which plan product the id stands for. `'auto'` is the whole plan (the
+   * plain auto id and every pinned intent); `'free'` is the plan filtered to
+   * its zero-cost lanes. Both resolve through the same routing on every wire —
+   * the kind only tells a client what the id filters, and keeps
+   * `isAutoModelMeta` narrow so intent rows keep their one meaning.
+   */
+  kind: 'auto' | 'free';
   /**
    * The intent this id pins, when it pins one. Absent on the plain auto id,
    * which stands for "whichever plan the request selects".
@@ -316,9 +345,43 @@ export function intentModelEntry(intent: IntentName, lanes: readonly PlanModelEn
   };
 }
 
+/** Picker label for the free id: "ModelHitch Free · free lanes only · 2 lanes". */
+export function freeModelLabel(freeLaneCount: number): string {
+  if (freeLaneCount <= 0) return 'ModelHitch Free · no free lanes';
+  return `ModelHitch Free · free lanes only · ${freeLaneCount} lane${freeLaneCount === 1 ? '' : 's'}`;
+}
+
+/**
+ * Build the free id's catalog entry from the plan lanes that cost nothing.
+ *
+ * Mirrors `autoModelEntry` but scoped: `freeLanes` receives only the lanes the
+ * caller filtered with `isFreeLaneModel`, so `modelhitch.lanes` is exactly the
+ * set the router will try — the same honesty the auto id gets. `totalLanes`
+ * records the size of the *unfiltered* plan, purely for callers: the label
+ * counts free lanes, and a caller that wants to know whether the plan has any
+ * paid lane left compares the two. An empty list is allowed so a caller can
+ * inspect what the id *would* be; the server only publishes the entry when
+ * that list is non-empty.
+ */
+export function freeModelEntry(
+  freeLanes: readonly PlanModelEntry[],
+  totalLanes: number,
+): AutoModelEntry {
+  return {
+    id: FREE_MODEL_ID,
+    name: freeModelLabel(freeLanes.length),
+    modelhitch: { kind: 'free', lanes: [...freeLanes] },
+  };
+}
+
 /** Narrow a catalog entry's `modelhitch` payload to the auto id's. */
 export function isAutoModelMeta(value: unknown): value is AutoModelMeta {
   return typeof value === 'object' && value !== null && (value as { kind?: unknown }).kind === 'auto';
+}
+
+/** Narrow a catalog entry's `modelhitch` payload to the free id's. */
+export function isFreeModelMeta(value: unknown): value is AutoModelMeta {
+  return typeof value === 'object' && value !== null && (value as { kind?: unknown }).kind === 'free';
 }
 
 /** Everything a label needs, loosened so callers can pass a partial lane. */

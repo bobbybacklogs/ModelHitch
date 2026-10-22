@@ -203,6 +203,16 @@ export function settingsPageHtml(): string {
           </div>
         </div>
       </div>
+      <div id="lane-rotation-warn"></div>
+      <div class="row">
+        <div class="grow">
+          <label>Free-only lane</label>
+          <div class="num-row">
+            <input type="checkbox" id="freeOnlyLane" style="width:auto" />
+            <span class="muted" style="font-size:12px">Pin free-only routing: the plan uses only free models (OpenCode Go flat-rate, <code>-free</code> tier on Zen, zero-priced). <code>modelhitch/free</code> can also be selected directly as a model.</span>
+          </div>
+        </div>
+      </div>
       <div class="row" style="border-bottom:0; margin-top:8px">
         <div class="grow">
           <label>Policy Presets</label>
@@ -229,6 +239,7 @@ export function settingsPageHtml(): string {
             <tr><td class="mono">DeepSeek, GLM, Kimi, MiniMax, free</td><td class="mono">deepseek-v4-pro, glm-5.1, kimi-k2.6, big-pickle</td><td class="mono">POST /v1/chat/completions</td><td>OpenAI Chat (Bearer)</td></tr>
           </tbody>
         </table>
+        <div class="muted" style="font-size:12px; margin-top:6px">Selecting <span class="mono">modelhitch/free</span> as a model routes through the free lanes only — check <b>Free-only lane</b> above to pin it as the default plan.</div>
       </details>
     </div>
   </section>
@@ -1762,6 +1773,8 @@ function renderPolicy() {
   policy.fallback.forEach(function (l) { fallback.appendChild(laneRow(l, 'fallback')); });
 
   el('maxProviders').value = policy.maxProviders || '';
+  var freeOnly = el('freeOnlyLane');
+  if (freeOnly) freeOnly.checked = policy.freeOnly === true;
   var bo = policy.backoff;
   el('backoffType').value = bo ? bo.type : 'none';
   if (bo) { el('backoffBase').value = bo.baseMs; el('backoffMax').value = bo.maxMs || ''; }
@@ -1785,6 +1798,9 @@ function readLanes(container) {
 
 function collectPolicy() {
   var policy = { trusted: readLanes(el('trusted-lanes')), fallback: readLanes(el('fallback-lanes')) };
+  // Always sent as a boolean so unchecking it clears a previously pinned lane —
+  // an omitted key would leave the bridge's last value standing on some viewers.
+  policy.freeOnly = !!(el('freeOnlyLane') && el('freeOnlyLane').checked);
   var maxP = el('maxProviders').value;
   if (maxP && Number(maxP) >= 1) policy.maxProviders = Number(maxP);
   var boType = el('backoffType').value;
@@ -1894,6 +1910,59 @@ function renderHealth(health) {
   });
 }
 
+// ---- OpenCode lane rotation ----------------------------------------------
+
+/* A configured plan lane can rotate out of the provider's live model list
+   (upstream rename/retire). GET /v1/lane-rotation reports those; the endpoint
+   may not exist on an older bridge, in which case nothing is rendered. */
+async function refreshLaneRotation() {
+  var box = el('lane-rotation-warn');
+  if (!box) return;
+  var lanes = [];
+  try {
+    var res = await fetch('/v1/lane-rotation');
+    if (!res.ok) { box.innerHTML = ''; return; }
+    var body = await res.json().catch(function () { return {}; });
+    lanes = body.rotated || [];
+  } catch (err) { box.innerHTML = ''; return; }
+  if (!lanes.length) { box.innerHTML = ''; return; }
+  box.innerHTML = lanes.map(function (lane) {
+    var laneId = (lane.providerId || '') + '/' + (lane.model || '');
+    var btn = lane.suggestion
+      ? ' <button class="btn lane-rotate-switch" type="button" data-provider="' + esc(lane.providerId) + '" data-from="' + esc(lane.model) + '" data-to="' + esc(lane.suggestion) + '">Switch to ' + esc(lane.providerId + '/' + lane.suggestion) + '</button>'
+      : '';
+    return '<div class="warnbox"><span class="mono">' + esc(laneId) + '</span> is no longer in the provider\'s model list.' + btn + '</div>';
+  }).join('');
+}
+
+/* Splice the replacement model id into every policy lane that pinned the
+   rotated one, then PUT the full document back — the server validates and
+   hot-reloads, exactly like Apply does. */
+async function switchRotatedLane(providerId, from, to) {
+  try {
+    var doc = JSON.parse(JSON.stringify(await api('/v1/config')));
+    var policy = doc.policy || (doc.policy = { trusted: [], fallback: [] });
+    [policy.trusted, policy.fallback].forEach(function (group) {
+      (group || []).forEach(function (lane) {
+        if (!lane || !Array.isArray(lane.models)) return;
+        if (providerId && lane.providerId && lane.providerId !== providerId) return;
+        lane.models = lane.models.map(function (m) { return m === from ? to : m; });
+      });
+    });
+    var res = await fetch('/v1/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(doc)
+    });
+    var body = await res.json().catch(function () { return {}; });
+    if (!res.ok) { showErrors(body && body.errors ? body.errors : ['HTTP ' + res.status]); return; }
+    flashSaved();
+    await loadAll();
+  } catch (err) {
+    showErrors(['Could not switch the rotated lane: ' + err.message]);
+  }
+}
+
 // ---- boot / actions ------------------------------------------------------
 
 function assemble() {
@@ -1928,6 +1997,7 @@ async function loadAll() {
     renderImageGeneration(); renderCloudAgent(); renderWorkspaceTarget(); renderProviders(); renderOpenCode(); renderOpenCodeByok(); renderCustomLanes(); renderChatGptPlan(); renderCatalog(); renderPolicy(); renderIntents(); renderReliability();
     refreshHealth();
     refreshChatGptPlan();
+    refreshLaneRotation();
   } catch (err) {
     showErrors(['Failed to load settings: ' + err.message]);
   }
@@ -2090,6 +2160,14 @@ function setupOpenCodeListeners() {
     if (dp) dp.value = 'opencode-go';
     var dm = el('defaultModel');
     if (dm) dm.value = 'deepseek-v4-pro';
+  });
+
+  // Rotation-warning buttons carry provider/from/to in data attributes, so one
+  // delegated listener serves every lane the endpoint ever reports.
+  document.addEventListener('click', function (ev) {
+    var t = ev.target;
+    if (!t.classList || !t.classList.contains('lane-rotate-switch')) return;
+    switchRotatedLane(t.dataset.provider, t.dataset.from, t.dataset.to);
   });
 }
 
