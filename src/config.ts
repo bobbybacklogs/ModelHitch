@@ -12,6 +12,7 @@ import type { CustomLaneSchema } from './providers/custom-lane.js';
 import { CUSTOM_LANE_SCHEMAS, customLaneProviderId } from './providers/custom-lane.js';
 import type { OpenCodeByokSchema } from './providers/opencode-byok.js';
 import { openCodeByokProviderId } from './providers/opencode-byok.js';
+import { normalizeServiceKeys, type ServiceKey } from './core/service-keys.js';
 
 /**
  * Milestone 5 — the serializable settings surface.
@@ -307,6 +308,13 @@ export interface ModelHitchConfig {
   chatgptPlan?: ChatGptPlanConfig;
   /** Per-provider API keys. Persisted locally; masked on read. */
   keys?: Record<string, string>;
+  /**
+   * Service keys minted for customers ("mhk_…"). Only hashes + display
+   * prefixes are stored here — the plaintext material is shown once at
+   * mint/rotate time by `modelhitch key new|rotate` and kept nowhere.
+   * From the first usable key onward, every inference route requires one.
+   */
+  serviceKeys?: ServiceKey[];
   /** Default composer target on /workspace: "rotation" or "provider/model". */
   defaultWorkspaceTarget?: string;
 }
@@ -317,6 +325,9 @@ export interface ConfigValidation {
 }
 
 export const CONFIG_VERSION = 1 as const;
+
+/** Re-exported so config consumers (CLI, settings UI docs) can type key rows. */
+export type { ServiceKey, ServiceKeyPlan } from './core/service-keys.js';
 
 /** Console API schemas accepted by `opencodeByok.connections[].schema`. */
 export const OPENCODE_BYOK_SCHEMAS: readonly OpenCodeByokSchema[] = ['auto', 'chat-completions', 'responses', 'anthropic', 'google'];
@@ -756,6 +767,14 @@ export function validateConfig(config: unknown): ConfigValidation {
         );
       }
     }
+  }
+
+  if (cfg.serviceKeys !== undefined) {
+    // Shape checks only: id/plan/limits/revocation/hash format. The match
+    // against presented key material happens at request time in the gate —
+    // the config file never contains plaintext key material to verify.
+    const { errors: keyErrors } = normalizeServiceKeys(cfg.serviceKeys);
+    errors.push(...keyErrors);
   }
 
   if (cfg.defaultWorkspaceTarget !== undefined) {

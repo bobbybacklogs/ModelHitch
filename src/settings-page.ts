@@ -549,6 +549,17 @@ export function settingsPageHtml(): string {
   </section>
 
   <section>
+    <div class="section-head"><h2>Service keys</h2><span class="hint">minting &amp; rotation are CLI-only</span></div>
+    <div class="panel">
+      <table>
+        <thead><tr><th>id</th><th>plan</th><th>limits (rolling 24h)</th><th>status</th></tr></thead>
+        <tbody id="service-key-rows"><tr><td colspan="4" class="empty">no service keys — unauthenticated</td></tr></tbody>
+      </table>
+      <div class="row" style="border-bottom:0"><span class="muted">Mint on the CLI: <span class="mono">modelhitch key new --plan free --id free-starter --daily-requests 500</span> — the key material prints once; only its hash is stored. From the first key on, every inference route requires one. Roll with <span class="mono">modelhitch key rotate &lt;id&gt;</span> / revoke with <span class="mono">modelhitch key revoke &lt;id&gt;</span>. This panel is read-only — key material never round-trips through the page.</span></div>
+    </div>
+  </section>
+
+  <section>
     <div class="section-head"><h2>Lane health</h2><span class="hint">live circuit state — refreshed every 5s</span></div>
     <div class="panel">
       <table>
@@ -1938,6 +1949,29 @@ async function refreshLaneRotation() {
 /* Splice the replacement model id into every policy lane that pinned the
    rotated one, then PUT the full document back — the server validates and
    hot-reloads, exactly like Apply does. */
+/* Service keys: read-only. The GET doc carries only hashes + prefixes, so
+   rendering it is safe; the panel has NO inputs, so Apply can never round-trip
+   key material and the mandate "minting is CLI-only" holds structurally. */
+function renderServiceKeys() {
+  var keys = (state.config && state.config.serviceKeys) || [];
+  var box = el('service-key-rows');
+  if (!keys.length) {
+    box.innerHTML = '<tr><td colspan="4" class="empty">no service keys — unauthenticated</td></tr>';
+    return;
+  }
+  box.innerHTML = keys.map(function (k) {
+    var limits = [];
+    if (k.dailyRequests !== undefined) limits.push('req≤' + k.dailyRequests + '/day');
+    if (k.dailyTokens !== undefined) limits.push('tok≤' + k.dailyTokens + '/day');
+    if (k.dailyCostUsd !== undefined) limits.push('$≤' + k.dailyCostUsd + '/day');
+    var plan = '<span class="pill ' + (k.plan === 'free' ? 'pill-muted' : '') + '">' + esc(k.plan) + '</span>';
+    var status = k.revoked ? 'REVOKED' : (k.rotatedAt ? 'rotated' : 'active');
+    return '<tr><td class="mono">' + esc(k.id) + '</td><td>' + plan + '</td><td class="mono">' +
+      (limits.length ? limits.join(' ') : 'unlimited') + '</td><td>' +
+      esc(status) + (k.name ? '<div class="meta" style="font-size:11px;color:var(--muted)">' + esc(k.name) + '</div>' : '') + '</td></tr>';
+  }).join('');
+}
+
 async function switchRotatedLane(providerId, from, to) {
   try {
     var doc = JSON.parse(JSON.stringify(await api('/v1/config')));
@@ -1982,7 +2016,12 @@ function assemble() {
     opencodeByok: collectOpenCodeByok(),
     customLanes: collectCustomLanes(),
     chatgptPlan: collectChatGptPlan(),
-    keys: collectKeys()
+    keys: collectKeys(),
+    /* Read-only pass-through: Apply must carry the minted keys along or the
+       daemon clears the block (keyed on presence) and every key dies on the
+       next Apply. The panel has no inputs, so this is exactly the doc as
+       loaded — hashes and prefixes only, no key material to lose. */
+    serviceKeys: cfg.serviceKeys || undefined
   };
 }
 
@@ -1994,7 +2033,7 @@ async function loadAll() {
     state.builtin = cat.builtin || [];
     var models = await api('/v1/models');
     state.models = models.data || [];
-    renderImageGeneration(); renderCloudAgent(); renderWorkspaceTarget(); renderProviders(); renderOpenCode(); renderOpenCodeByok(); renderCustomLanes(); renderChatGptPlan(); renderCatalog(); renderPolicy(); renderIntents(); renderReliability();
+    renderImageGeneration(); renderCloudAgent(); renderWorkspaceTarget(); renderProviders(); renderOpenCode(); renderOpenCodeByok(); renderCustomLanes(); renderChatGptPlan(); renderCatalog(); renderPolicy(); renderIntents(); renderReliability(); renderServiceKeys();
     refreshHealth();
     refreshChatGptPlan();
     refreshLaneRotation();

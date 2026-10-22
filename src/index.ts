@@ -336,6 +336,26 @@ export type {
   UsageTotals,
 } from './core/usage.js';
 
+// Service keys — the bridge's commercial face: shapes + JSON-safe logic here,
+// mint/hash via the Node-only crypto module (kept out of the browser graph).
+export {
+  normalizeServiceKeys,
+  usableServiceKey,
+  keyPrefixOf,
+  SERVICE_KEY_PREFIX,
+  type ServiceKey,
+  type ServiceKeyPlan,
+} from './core/service-keys.js';
+export { generateServiceKey, hashServiceKey, serviceKeyHashesEqual } from './core/service-keys-crypto.js';
+export {
+  ServiceKeyGate,
+  admissionDecision,
+  retryAfterSeconds,
+  ROLLING_WINDOW_MS,
+  type ServiceKeyUsageSource,
+  type ServiceKeyUsageWindow,
+} from './core/key-gate.js';
+
 export {
   // Provider framework
   createOpenAICompatibleProvider,

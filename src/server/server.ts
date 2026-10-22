@@ -107,6 +107,8 @@ import { createCursorCloudBackend } from '../providers/cursor-cloud-backend.js';
 import { createLocalAgentBackend } from '../providers/local-agent-backend.js';
 import { safeJsonParse } from '../core/json.js';
 import { modelhitchHome } from '../config-file.js';
+import { ServiceKeyGate, type ServiceKeyUsageSource } from '../core/key-gate.js';
+import type { ServiceKey } from '../core/service-keys.js';
 import { WorkspaceStore } from '../workspace/store.js';
 import { handleWorkspaceHttp } from './workspace-http.js';
 import type { OpenCodeLocalState } from '../opencode-byok.js';
@@ -240,6 +242,14 @@ export interface ModelHitchServerOptions {
    */
   openCodeState?: () => OpenCodeLocalState;
   /**
+   * Service keys gating inference routes (the commercial face of the bridge).
+   * With zero usable keys configured, nothing is gated — the local bridge keeps
+   * working unauthenticated, exactly as before. From the first key onward,
+   * every inference route requires a valid `mhk_…` key. Prune/rotate freely:
+   * the gate reads only hashes, so config changes hot-reload without restart.
+   */
+  serviceKeys?: ServiceKey[];
+  /**
    * Backs the `/v1/chatgpt-plan*` routes: the account panel and sign-in flow
    * for the Sign in with ChatGPT lane. Unset = 501, which is what a bridge
    * built without ChatGPT plan support reports.
@@ -363,6 +373,13 @@ interface RoutedRequest {
  * Model routing: `providerId/modelId` (e.g. `vercel-ai-gateway/openai/gpt-5.4`); bare
  * model ids go to the default provider.
  */
+/**
+ * Which wire a gated inference route speaks — used only to pick the error
+ * envelope for 401/429 denials (the consumer that speaks the wire is the one
+ * that will render the error, so the message must arrive in its shape).
+ */
+type InferenceWire = 'openai' | 'anthropic' | 'gemini';
+
 export class OpenAICompatibleServer {
   providers: Provider[];
   readonly options: ModelHitchServerOptions;
@@ -379,6 +396,13 @@ export class OpenAICompatibleServer {
   private agentBackendsCache: CloudAgentBackend[] | undefined;
   private policy: Policy | undefined;
   private intents: IntentsConfig | undefined;
+  /**
+   * The service-key gate: rebuilt (not mutated) whenever `serviceKeys`
+   * reconfigures, so authorization state always matches the live config doc.
+   * Stateless by design — admission counts come from the usage tracker, which
+   * is SQLite-backed in the daemon path and survives restarts.
+   */
+  private serviceKeyGate: ServiceKeyGate;
   private cooldown: LaneCooldown | undefined;
   private source: ProviderSource;
   private catalogSource: CatalogSource | undefined;
@@ -418,6 +442,21 @@ export class OpenAICompatibleServer {
     } else {
       this.usageTracker = new UsageTracker();
     }
+    this.serviceKeyGate = this.buildServiceKeyGate(options.serviceKeys);
+  }
+
+  /**
+   * The usage source for the gate: one key's recorded rolling-24h window,
+   * read from this server's tracker — the same store `/v1/usage` and the
+   * dashboard read, so a customer's gate and the owner's dashboard agree
+   * by construction rather than by two counters staying in sync.
+   */
+  private gateUsageSource(): ServiceKeyUsageSource {
+    return (keyId) => this.usageTracker.serviceKeyWindow(keyId, 24);
+  }
+
+  private buildServiceKeyGate(keys: readonly ServiceKey[] | undefined): ServiceKeyGate {
+    return new ServiceKeyGate(keys ?? [], { usage24h: this.gateUsageSource() });
   }
 
   /**
@@ -445,6 +484,7 @@ export class OpenAICompatibleServer {
     pinnedProviderId?: string;
     openCodeState?: () => OpenCodeLocalState;
     chatGptPlan?: ChatGptPlanBridge;
+    serviceKeys?: ServiceKey[];
   }): void {
     if (partial.providers) this.providers = partial.providers;
     if (partial.catalogSource !== undefined) {
@@ -501,6 +541,14 @@ export class OpenAICompatibleServer {
     if (partial.pinnedProviderId !== undefined) this.options.pinnedProviderId = partial.pinnedProviderId || undefined;
     if (partial.openCodeState !== undefined) this.options.openCodeState = partial.openCodeState;
     if (partial.chatGptPlan !== undefined) this.options.chatGptPlan = partial.chatGptPlan;
+    if ('serviceKeys' in partial) {
+      // Keyed on presence like `intents`: a settings Apply that sends no keys
+      // IS a key change (minting lives in the CLI, but the config doc remains
+      // the single source of truth). The gate is swapped by reference, so
+      // in-flight requests finish under the gate they were admitted by.
+      this.options.serviceKeys = partial.serviceKeys;
+      this.serviceKeyGate = this.buildServiceKeyGate(partial.serviceKeys);
+    }
   }
 
   /**
@@ -899,6 +947,79 @@ export class OpenAICompatibleServer {
   // Routing
   // ---------------------------------------------------------------------------
 
+  /**
+   * Authentication + admission gate for the inference routes.
+   *
+   * Runs in `dispatch` BEFORE the handler and before the body is read: neither
+   * the hash comparison nor the dailyRequests gate needs a parsed body, so an
+   * unauthorized or over-limit client pays nothing and learns of it early.
+   * Cheap here on purpose — the raw header decides 95% of denials.
+   *
+   * Terminal count: the dailyRequests slot is reserved the moment a request is
+   * admitted — admission itself is the reservation (the zero-usage event it
+   * records acts as the persistent receipt), which is why "even failed
+   * attempts count" is true without any bookkeeping after the handler.
+   */
+  private incomingServiceKey(
+    req: IncomingMessage,
+    res: ServerResponse,
+    wire: InferenceWire,
+  ): { denied: true } | { denied: false; key?: ServiceKey } {
+    const gate = this.serviceKeyGate;
+    // X-Api-Key is the header Claude Code / Anthropic-native clients send.
+    const header = req.headers.authorization ?? (req.headers['x-api-key'] as string | undefined);
+    const auth = gate.authorize(header);
+    if (!auth.ok) {
+      this.denyInference(res, wire, auth);
+      return { denied: true };
+    }
+    const key = auth.key as ServiceKey | undefined;
+    // Decide BEFORE reserving — reserving first would make the very first
+    // request count itself twice (slot open + caller's own admission).
+    const composite = key ? gate.compositeUsage(key.id) : undefined;
+    const decided = key ? gate.checkAdmission(key, composite) : ({ ok: true } as const);
+    if (!decided.ok) {
+      this.denyInference(res, wire, decided.error);
+      return { denied: true };
+    }
+    // The reservation: one slot per inbound request, popped when this
+    // request's usage event lands (see `reconcileUsage`) — so failed attempts
+    // stay counted until the slot ages out. Exactly once per request.
+    if (key) gate.reserveSlot(key);
+    return { denied: false, key };
+  }
+
+  /**
+   * Send a gate denial in the wire's own error envelope. Management routes —
+   * `/healthz`, `/v1/models`, `/settings`, `/usage`, `/v1/config`, lane health
+   * and rotation, the ChatGPT sign-in flow — are deliberately NOT gated: they
+   * cost nothing to serve, and the owner needs them to diagnose a gate.
+   */
+  private denyInference(
+    res: ServerResponse,
+    wire: InferenceWire,
+    denial: { status: number; message: string; code: ModelHitchErrorCode; retryAfterSeconds?: number },
+  ): void {
+    if (denial.retryAfterSeconds !== undefined) {
+      // Alice's slots reopen when her oldest recorded event ages out of the
+      // rolling window; honor the header convention every HTTP client knows.
+      res.setHeader('Retry-After', String(Math.max(1, Math.ceil(denial.retryAfterSeconds))));
+    }
+    const err = new ModelHitchError(denial.code, denial.message, {
+      status: denial.status,
+      ...(denial.retryAfterSeconds !== undefined ? { retryAfterMs: denial.retryAfterSeconds * 1000 } : {}),
+    });
+    const { status, body } =
+      wire === 'anthropic' ? toAnthropicError(err) : wire === 'gemini' ? toGeminiError(err) : toOpenAIError(err);
+    this.log(`  !! HTTP ${status} denied: ${denial.message}`);
+    this.sendJson(res, status, body);
+  }
+
+  /** The log suffix that names the key a request came in on. */
+  private keyLogSuffix(serviceKey?: ServiceKey): string {
+    return serviceKey ? ` key=${serviceKey.id} (${serviceKey.plan})` : '';
+  }
+
   private async dispatch(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = req.method ?? 'GET';
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -932,19 +1053,25 @@ export class OpenAICompatibleServer {
 
     if (method === 'POST' && path === '/v1/chat/completions') {
       this.log(`${method} ${path} ->`);
-      await this.handleChat(req, res);
+      const admitted = this.incomingServiceKey(req, res, 'openai');
+      if (admitted.denied) return;
+      await this.handleChat(req, res, admitted.key);
       return;
     }
 
     if (method === 'POST' && path === '/v1/images/generations') {
       this.log(`${method} ${path} ->`);
-      await this.handleImageGeneration(req, res);
+      const admitted = this.incomingServiceKey(req, res, 'openai');
+      if (admitted.denied) return;
+      await this.handleImageGeneration(req, res, admitted.key);
       return;
     }
 
     if (method === 'POST' && path === '/v1/responses') {
       this.log(`${method} ${path} ->`);
-      await this.handleResponses(req, res);
+      const admitted = this.incomingServiceKey(req, res, 'openai');
+      if (admitted.denied) return;
+      await this.handleResponses(req, res, admitted.key);
       return;
     }
 
@@ -952,8 +1079,12 @@ export class OpenAICompatibleServer {
     // `/v1/messages?beta=true` — `url.pathname` strips the query for us.
     if (method === 'POST' && path === '/v1/messages') {
       this.log(`${method} ${path} ->`);
+      // Gated here (not inside the handler) so an Anthropic-native 401/429 is
+      // still rendered by the same envelope machinery the try/catch uses.
+      const admitted = this.incomingServiceKey(req, res, 'anthropic');
+      if (admitted.denied) return;
       try {
-        await this.handleAnthropic(req, res);
+        await this.handleAnthropic(req, res, admitted.key);
       } catch (err) {
         // Non-stream Anthropic errors use the Anthropic error envelope.
         if (res.headersSent) throw err;
@@ -1184,8 +1315,10 @@ export class OpenAICompatibleServer {
       const modelFromPath = decodeURIComponent(geminiMatch[1] ?? '');
       const isStream = geminiMatch[2] === 'streamGenerateContent';
       this.log(`${method} ${path} ->`);
+      const admitted = this.incomingServiceKey(req, res, 'gemini');
+      if (admitted.denied) return;
       try {
-        await this.handleGemini(req, res, modelFromPath, isStream);
+        await this.handleGemini(req, res, modelFromPath, isStream, admitted.key);
       } catch (err) {
         // Non-stream Gemini errors use the Google API error envelope.
         if (res.headersSent) throw err;
@@ -1234,7 +1367,8 @@ export class OpenAICompatibleServer {
   // Chat completions
   // ---------------------------------------------------------------------------
 
-  private async handleImageGeneration(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async handleImageGeneration(req: IncomingMessage, res: ServerResponse, serviceKey?: ServiceKey): Promise<void> {
+    const startedAt = Date.now();
     const body = (await this.readBody(req)) as Record<string, unknown> | null;
     const requestBody = (body ?? {}) as Record<string, unknown>;
     if (!this.imageGeneration?.enabled) {
@@ -1242,6 +1376,16 @@ export class OpenAICompatibleServer {
         'bad-request',
         'The image lane is disabled by default. Enable it in /settings or with modelhitch bridge --image-lane.',
         { status: 403 },
+      );
+    }
+    // A free-plan service key must never reach the paid image lane: images
+    // bill per generation with no token-level free counterpart, so "free"
+    // covers the chat wires only — an honest refusal beats a surprise bill.
+    if (serviceKey?.plan === 'free') {
+      throw new ModelHitchError(
+        'capability-unavailable',
+        'Free service keys do not cover the image lane. Upgrade the key plan to generate images.',
+        { status: 402 },
       );
     }
     const prompt = typeof requestBody.prompt === 'string' ? requestBody.prompt.trim() : '';
@@ -1345,18 +1489,40 @@ export class OpenAICompatibleServer {
     if (!imageData.length) {
       throw new ModelHitchError('provider-error', `Image generation via "${providerId}" returned no image payload.`, { status: 502, providerId });
     }
+    // The image lane never reported usage, so before service keys the dashboard
+    // never saw image requests at all. With a key gating admission, an
+    // unrecorded request would make dailyRequests lie — so keyed image
+    // requests record a zero-usage receipt (tokens/cost unknown by design).
+    if (serviceKey) {
+      this.emitUsage({
+        providerId,
+        model,
+        wire: 'image',
+        streamed: false,
+        serviceKeyId: serviceKey.id,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        costUsd: 0,
+        latencyMs: Date.now() - startedAt,
+        at: new Date().toISOString(),
+      });
+    }
     this.sendJson(res, 200, { created: Math.floor(Date.now() / 1000), data: imageData });
   }
 
-  private async handleChat(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async handleChat(req: IncomingMessage, res: ServerResponse, serviceKey?: ServiceKey): Promise<void> {
     const body = (await this.readBody(req)) as OpenAIChatRequest | null;
     if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'messages' array.", { status: 400 });
     }
+    // A `free` service key walks the free-only plan no matter which model the
+    // client pinned — the gate, not the request, owns the routing plan. That
+    // is the same selection `modelhitch/free` makes; the two join on the flag.
     const requested = this.resolveRequestModel(body.model);
     const requestedModel = requested.model;
     this.assertCloudAgentModel(requestedModel);
-    const route = this.routeRequest(requestedModel, requested.freeOnly);
+    const route = this.routeRequest(requestedModel, requested.freeOnly || serviceKey?.plan === 'free');
     const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
@@ -1368,14 +1534,15 @@ export class OpenAICompatibleServer {
     // paths, so a request's plan cannot differ between the two. An id that
     // pinned a profile wins over anything the request's shape suggests.
     const intent = requested.intent ?? this.intentFor(params, Boolean(requestedModel));
+    const keySuffix = this.keyLogSuffix(serviceKey);
 
     if (body.stream === true) {
-      this.log(`  -> ${provider.id}/${model} (stream)`);
-      await this.writeStream(res, route, params, credentials, intent);
+      this.log(`  -> ${provider.id}/${model} (stream)${keySuffix}`);
+      await this.writeStream(res, route, params, credentials, intent, serviceKey);
       return;
     }
 
-    this.log(`  -> ${provider.id}/${model}`);
+    this.log(`  -> ${provider.id}/${model}${keySuffix}`);
     const startedAt = Date.now();
     const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params);
     const { value: result, target } = await this.withFailover(
@@ -1384,7 +1551,7 @@ export class OpenAICompatibleServer {
       intent,
     );
     this.reportUsage(
-      { providerId: target.provider.id, model: target.model, wire: 'chat-completions', streamed: false, intent },
+      { providerId: target.provider.id, model: target.model, wire: 'chat-completions', streamed: false, intent, serviceKeyId: serviceKey?.id },
       result.usage,
       startedAt,
     );
@@ -1403,6 +1570,7 @@ export class OpenAICompatibleServer {
     params: ChatParams,
     credentials: ProviderCredentials,
     intent: IntentKey,
+    serviceKey?: ServiceKey,
   ): Promise<void> {
     const { provider, model } = route;
     const controller = new AbortController();
@@ -1418,7 +1586,7 @@ export class OpenAICompatibleServer {
     });
 
     const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params, { streaming: true });
-    const usageInfo = { providerId: provider.id, model, wire: 'chat-completions' as const, streamed: true, intent };
+    const usageInfo = { providerId: provider.id, model, wire: 'chat-completions' as const, streamed: true, intent, serviceKeyId: serviceKey?.id };
     const stream = this.trackStream(
       withFailoverStream(
         targets,
@@ -1536,17 +1704,18 @@ export class OpenAICompatibleServer {
   // Responses API (Codex CLI wire protocol)
   // ---------------------------------------------------------------------------
 
-  private async handleResponses(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async handleResponses(req: IncomingMessage, res: ServerResponse, serviceKey?: ServiceKey): Promise<void> {
     const body = (await this.readBody(req)) as ResponsesRequest | null;
     const hasInput = Array.isArray(body?.input) && body!.input!.length > 0;
     const hasInstructions = typeof body?.instructions === 'string' && body.instructions.length > 0;
     if (!body || (!hasInput && !hasInstructions)) {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'input' array or 'instructions'.", { status: 400 });
     }
+    // (The free-plan rule mirrors handleChat: the gate owns the plan.)
     const requested = this.resolveRequestModel(body.model);
     const requestedModel = requested.model;
     this.assertCloudAgentModel(requestedModel);
-    const route = this.routeRequest(requestedModel, requested.freeOnly);
+    const route = this.routeRequest(requestedModel, requested.freeOnly || serviceKey?.plan === 'free');
     const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
@@ -1585,13 +1754,14 @@ export class OpenAICompatibleServer {
     params.previousResponseId = undefined;
 
     const intent = requested.intent ?? this.intentFor(params, Boolean(requestedModel));
+    const keySuffix = this.keyLogSuffix(serviceKey);
     if (body.stream === true) {
-      this.log(`  -> ${provider.id}/${model} (responses stream)`);
-      await this.writeResponsesStream(res, route, params, credentials, intent);
+      this.log(`  -> ${provider.id}/${model} (responses stream)${keySuffix}`);
+      await this.writeResponsesStream(res, route, params, credentials, intent, serviceKey);
       return;
     }
 
-    this.log(`  -> ${provider.id}/${model} (responses)`);
+    this.log(`  -> ${provider.id}/${model} (responses)${keySuffix}`);
     const startedAt = Date.now();
     const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params);
     const { value: result, target } = await this.withFailover(
@@ -1600,7 +1770,7 @@ export class OpenAICompatibleServer {
       intent,
     );
     this.reportUsage(
-      { providerId: target.provider.id, model: target.model, wire: 'responses', streamed: false, intent },
+      { providerId: target.provider.id, model: target.model, wire: 'responses', streamed: false, intent, serviceKeyId: serviceKey?.id },
       result.usage,
       startedAt,
     );
@@ -1617,6 +1787,7 @@ export class OpenAICompatibleServer {
     params: ChatParams,
     credentials: ProviderCredentials,
     intent: IntentKey,
+    serviceKey?: ServiceKey,
   ): Promise<void> {
     const { provider, model } = route;
     const controller = new AbortController();
@@ -1626,7 +1797,7 @@ export class OpenAICompatibleServer {
     });
 
     const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params, { streaming: true });
-    const usageInfo = { providerId: provider.id, model, wire: 'responses' as const, streamed: true, intent };
+    const usageInfo = { providerId: provider.id, model, wire: 'responses' as const, streamed: true, intent, serviceKeyId: serviceKey?.id };
     const stream = this.trackStream(
       withFailoverStream(
         targets,
@@ -1695,7 +1866,7 @@ export class OpenAICompatibleServer {
   // Anthropic Messages (Claude Code gateway wire protocol)
   // ---------------------------------------------------------------------------
 
-  private async handleAnthropic(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async handleAnthropic(req: IncomingMessage, res: ServerResponse, serviceKey?: ServiceKey): Promise<void> {
     const body = (await this.readBody(req)) as AnthropicRequest | null;
     if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
       throw new ModelHitchError('bad-request', "The request body must include a non-empty 'messages' array.", { status: 400 });
@@ -1703,7 +1874,7 @@ export class OpenAICompatibleServer {
     const requested = this.resolveRequestModel(body.model);
     const requestedModel = requested.model;
     this.assertCloudAgentModel(requestedModel);
-    const route = this.routeRequest(requestedModel, requested.freeOnly);
+    const route = this.routeRequest(requestedModel, requested.freeOnly || serviceKey?.plan === 'free');
     const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
@@ -1713,13 +1884,14 @@ export class OpenAICompatibleServer {
     params = this.prepareParamsForProvider(provider, params);
 
     const intent = requested.intent ?? this.intentFor(params, Boolean(requestedModel));
+    const keySuffix = this.keyLogSuffix(serviceKey);
     if (body.stream === true) {
-      this.log(`  -> ${provider.id}/${model} (anthropic stream)`);
-      await this.writeAnthropicStream(res, route, params, credentials, body, intent);
+      this.log(`  -> ${provider.id}/${model} (anthropic stream)${keySuffix}`);
+      await this.writeAnthropicStream(res, route, params, credentials, body, intent, serviceKey);
       return;
     }
 
-    this.log(`  -> ${provider.id}/${model} (anthropic)`);
+    this.log(`  -> ${provider.id}/${model} (anthropic)${keySuffix}`);
     const startedAt = Date.now();
     const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params);
     const { value: result, target } = await this.withFailover(
@@ -1728,7 +1900,7 @@ export class OpenAICompatibleServer {
       intent,
     );
     this.reportUsage(
-      { providerId: target.provider.id, model: target.model, wire: 'messages', streamed: false, intent },
+      { providerId: target.provider.id, model: target.model, wire: 'messages', streamed: false, intent, serviceKeyId: serviceKey?.id },
       result.usage,
       startedAt,
     );
@@ -1743,6 +1915,7 @@ export class OpenAICompatibleServer {
     credentials: ProviderCredentials,
     body: AnthropicRequest,
     intent: IntentKey,
+    serviceKey?: ServiceKey,
   ): Promise<void> {
     const { provider, model } = route;
     const controller = new AbortController();
@@ -1752,7 +1925,7 @@ export class OpenAICompatibleServer {
     });
 
     const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params, { streaming: true });
-    const usageInfo = { providerId: provider.id, model, wire: 'messages' as const, streamed: true, intent };
+    const usageInfo = { providerId: provider.id, model, wire: 'messages' as const, streamed: true, intent, serviceKeyId: serviceKey?.id };
     const stream = this.trackStream(
       withFailoverStream(
         targets,
@@ -1834,6 +2007,7 @@ export class OpenAICompatibleServer {
     res: ServerResponse,
     modelFromPath: string,
     stream: boolean,
+    serviceKey?: ServiceKey,
   ): Promise<void> {
     const body = (await this.readBody(req)) as GeminiRequest | null;
     if (!body || !Array.isArray(body.contents) || body.contents.length === 0) {
@@ -1845,7 +2019,7 @@ export class OpenAICompatibleServer {
     const requested = this.resolveRequestModel(modelFromPath || body.model);
     const requestedModel = requested.model;
     this.assertCloudAgentModel(requestedModel);
-    const route = this.routeRequest(requestedModel, requested.freeOnly);
+    const route = this.routeRequest(requestedModel, requested.freeOnly || serviceKey?.plan === 'free');
     const { provider, model } = route;
     this.assertCloudAgentRoute(provider);
     const credentials = await this.resolveCredentials(provider.id);
@@ -1855,13 +2029,14 @@ export class OpenAICompatibleServer {
     params = this.prepareParamsForProvider(provider, params);
 
     const intent = requested.intent ?? this.intentFor(params, Boolean(requestedModel));
+    const keySuffix = this.keyLogSuffix(serviceKey);
     if (stream) {
-      this.log(`  -> ${provider.id}/${model} (gemini stream)`);
-      await this.writeGeminiStream(res, route, params, credentials, body, intent);
+      this.log(`  -> ${provider.id}/${model} (gemini stream)${keySuffix}`);
+      await this.writeGeminiStream(res, route, params, credentials, body, intent, serviceKey);
       return;
     }
 
-    this.log(`  -> ${provider.id}/${model} (gemini)`);
+    this.log(`  -> ${provider.id}/${model} (gemini)${keySuffix}`);
     const startedAt = Date.now();
     const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params);
     const { value: result, target } = await this.withFailover(
@@ -1870,7 +2045,7 @@ export class OpenAICompatibleServer {
       intent,
     );
     this.reportUsage(
-      { providerId: target.provider.id, model: target.model, wire: 'gemini', streamed: false, intent },
+      { providerId: target.provider.id, model: target.model, wire: 'gemini', streamed: false, intent, serviceKeyId: serviceKey?.id },
       result.usage,
       startedAt,
     );
@@ -1885,6 +2060,7 @@ export class OpenAICompatibleServer {
     credentials: ProviderCredentials,
     body: GeminiRequest,
     intent: IntentKey,
+    serviceKey?: ServiceKey,
   ): Promise<void> {
     const { provider, model } = route;
     const controller = new AbortController();
@@ -1894,7 +2070,7 @@ export class OpenAICompatibleServer {
     });
 
     const targets = this.requireCapableTargets(await this.lanesForRoute(route, intent, credentials), params, { streaming: true });
-    const usageInfo = { providerId: provider.id, model, wire: 'gemini' as const, streamed: true, intent };
+    const usageInfo = { providerId: provider.id, model, wire: 'gemini' as const, streamed: true, intent, serviceKeyId: serviceKey?.id };
     const stream = this.trackStream(
       withFailoverStream(
         targets,
@@ -2632,23 +2808,33 @@ export class OpenAICompatibleServer {
   // ---------------------------------------------------------------------------
 
   private emitUsage(event: UsageEvent): void {
+    if (event.serviceKeyId !== undefined) {
+      // A keyed event replaces its open admission reservation's count — see
+      // ServiceKeyGate (the "even failed attempts count" ledger).
+      this.serviceKeyGate.reconcileUsage(event.serviceKeyId);
+    }
     this.options.onUsage?.(event);
     this.usageTracker.record(event);
   }
 
   /** Report usage for a completed non-stream call. */
   private reportUsage(
-    info: { providerId: string; model: string; wire: string; streamed: boolean; intent?: IntentKey },
+    info: { providerId: string; model: string; wire: string; streamed: boolean; intent?: IntentKey; serviceKeyId?: string },
     usage: Usage | undefined,
     startedAt: number,
   ): void {
-    if (!usage) return;
-    const cost = estimateCost(info.model, usage, info.providerId);
+    // Without a service key, a completion with no usage is not sampled (the
+    // dashboard would just show noise it never did before). With a key, the
+    // row IS the point: the dailyRequests gate reserves a slot at admission,
+    // so "even failed attempts count" — a keyed request must leave a receipt
+    // even when the upstream failed or answered without usage.
+    if (!usage && info.serviceKeyId === undefined) return;
+    const cost = usage ? estimateCost(info.model, usage, info.providerId) : { totalCostUsd: 0 };
     this.emitUsage({
       ...info,
-      inputTokens: usage.inputTokens ?? 0,
-      outputTokens: usage.outputTokens ?? 0,
-      totalTokens: usage.totalTokens ?? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0),
+      inputTokens: usage?.inputTokens ?? 0,
+      outputTokens: usage?.outputTokens ?? 0,
+      totalTokens: usage ? (usage.totalTokens ?? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)) : 0,
       costUsd: cost.totalCostUsd,
       latencyMs: Date.now() - startedAt,
       at: new Date().toISOString(),
@@ -2663,7 +2849,7 @@ export class OpenAICompatibleServer {
    */
   private trackStream(
     stream: AsyncIterable<StreamChunk>,
-    info: { providerId: string; model: string; wire: string; streamed: boolean; intent?: IntentKey },
+    info: { providerId: string; model: string; wire: string; streamed: boolean; intent?: IntentKey; serviceKeyId?: string },
     startedAt: number,
   ): AsyncIterable<StreamChunk> {
     const self = this;

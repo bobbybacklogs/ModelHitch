@@ -32,8 +32,12 @@ import {
   isMaskedSecret,
   policyFromConfig,
   serializeConfig,
+  validateConfig,
   validateConfigWithSource,
+  CONFIG_VERSION,
 } from './config.js';
+import { generateServiceKey } from './core/service-keys-crypto.js';
+import type { ServiceKey } from './core/service-keys.js';
 import {
   defaultConfigPath,
   defaultConfigTemplate,
@@ -359,6 +363,18 @@ Usage:
   modelhitch config                              print masked local config (default ~/.modelhitch/config.json)
   modelhitch config init                         create the default config file if missing
   modelhitch config --path <file>                use a specific config file
+
+  Service keys — gate inference routes for customers (from the first key on,
+  every inference route needs one; the local non-keyed flow stays open):
+  modelhitch key new --plan free|product         mint a key; prints the material ONCE
+      [--id <id>] [--name <name>]                only its sha256 hash is stored
+      [--daily-requests N] [--daily-tokens N]    honest rolling-24h limit gates
+      [--daily-cost N]                           (USD) — matching the dashboard's
+                                                 "Last 24 hours" slice
+  modelhitch key list                            id, plan, limits, status
+  modelhitch key rotate <id>                     mint fresh material, same id + limits
+  modelhitch key revoke <id>                     stop the key (live bridge: immediate)
+  All key commands accept --path <file>; a running background bridge hot-reloads.
 
   modelhitch settings                            edit config in OpenTUI (requires Bun; needs a TTY)
   modelhitch settings --web                      open the running bridge /settings page in a browser
@@ -908,6 +924,7 @@ async function runBridge(): Promise<void> {
     maxBodyBytes,
     policy: chatgptPlan.policy,
     intents: config.intents,
+    serviceKeys: config.serviceKeys,
     cooldown,
     catalogSource,
     keystore,
@@ -950,7 +967,7 @@ async function runBridge(): Promise<void> {
         // keep stale values (e.g. a catalog block the UI just unchecked).
         // A key belongs in this list once the settings page can turn it off —
         // `intents` joined it with the intent editor.
-        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'defaultWorkspaceTarget', 'cooldown', 'imageGeneration', 'cloudAgent', 'opencodeByok', 'customLanes', 'chatgptPlan', 'intents'] as const) {
+        for (const k of ['catalog', 'defaultProviderId', 'defaultModel', 'defaultWorkspaceTarget', 'cooldown', 'imageGeneration', 'cloudAgent', 'opencodeByok', 'customLanes', 'chatgptPlan', 'intents', 'serviceKeys'] as const) {
           delete (config as unknown as Record<string, unknown>)[k];
         }
         Object.assign(config, asConfig);
@@ -979,6 +996,7 @@ async function runBridge(): Promise<void> {
             openCodeState: () => openCodeStateLazy(),
             policy: plan.chatgptPlan.policy,
             intents: config.intents,
+            serviceKeys: config.serviceKeys,
             apiKeys: { ...config.keys, ...openCodeByokApiKeys(config, { state }), ...customLaneApiKeys(config) },
           };
           if (wantsCatalog && !catalogSource) {
@@ -1244,6 +1262,288 @@ async function runConfig(args: string[]): Promise<void> {
     return;
   }
   console.log(JSON.stringify(serializeConfig(existing, { maskSecrets: true }), null, 2));
+}
+
+// ---------------------------------------------------------------------------
+// Service keys (`modelhitch key …`)
+//
+// The bridge's commercial face: the owner mints keys for customers, each with
+// honest rolling-24h limit gates. All mutations funnel through
+// `mutateServiceKeys`, which validates + writes the config file and hot-reloads
+// a live background bridge by PUTting the (already validated) doc to its
+// `/v1/config` — the same sync surface the settings page Apply uses, so a
+// mint/rotate/revoke takes effect immediately without a restart.
+//
+// Key material is printed ONCE here and stored nowhere: the config file keeps
+// only the sha256 hash + a display prefix, so these commands are the only way
+// a key ever exists in full. Every secret print is guarded by re-reading the
+// file and matching the hash — a refused write never leaks material.
+// ---------------------------------------------------------------------------
+
+/** A two-digit-column simple table helper for `key list`. */
+function keyTable(rows: string[][]): string[] {
+  const widths = rows[0]!.map((_, col) => Math.max(...rows.map((row) => row[col]!.length)));
+  return rows.map((row) => row.map((cell, col) => cell.padEnd(widths[col]!)).join('  '));
+}
+
+/** Short relative age for the list table (falls back to the ISO string). */
+function keyStamp(iso: string | undefined): string {
+  if (!iso) return '—';
+  const ageMs = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ageMs)) return iso;
+  const days = Math.floor(ageMs / 86_400_000);
+  if (days >= 30) return `${Math.floor(days / 30)}mo ago`;
+  if (days >= 1) return `${days}d ago`;
+  const hours = Math.floor(ageMs / 3_600_000);
+  if (hours >= 1) return `${hours}h ago`;
+  return `${Math.max(1, Math.floor(ageMs / 60_000))}m ago`;
+}
+
+/** A slug the key id can default to when none is given. */
+function slugifyKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function serviceKeyLimits(key: ServiceKey): string {
+  const bits: string[] = [];
+  if (key.dailyRequests !== undefined) bits.push(`req≤${key.dailyRequests}/day`);
+  if (key.dailyTokens !== undefined) bits.push(`tok≤${key.dailyTokens}/day`);
+  if (key.dailyCostUsd !== undefined) bits.push(`$≤${key.dailyCostUsd}/day`);
+  return bits.length ? bits.join(' ') : 'unlimited';
+}
+
+/** The keys array in the file config, tolerating an absent doc and block. */
+function storedServiceKeys(path: string): ServiceKey[] {
+  const config = readConfigFile(path);
+  return Array.isArray(config?.serviceKeys) ? (config.serviceKeys as ServiceKey[]) : [];
+}
+
+/**
+ * One shared mutation path for every `key …` write: read the file config
+ * (tolerating none yet — a fresh `{version:1}` doc is created), let the caller
+ * transform the keys array, validate the WHOLE document (so a key edit cannot
+ * be persisted into a config that no longer validates), write it back, and
+ * hot-reload a live background bridge through its settings surface. Everything
+ * else in the document — lanes, intents, BYOK blocks, plaintext provider keys
+ * — is passed through untouched; only the keys array changes.
+ *
+ * Returns false when the caller refused the mutation WITHOUT erroring, so
+ * secret-printing callers can hold the material. Structural invalidity (bad
+ * limits, duplicate id) is the caller's check before minting anything.
+ */
+async function mutateServiceKeys(
+  path: string,
+  mutate: (keys: ServiceKey[]) => ServiceKey[] | false,
+): Promise<void> {
+  const config = readConfigFile(path) ?? { version: CONFIG_VERSION };
+  const current = Array.isArray(config.serviceKeys) ? (config.serviceKeys as ServiceKey[]) : [];
+  const next = mutate([...current]);
+  if (next === false) return;
+  const candidate = { ...config, ...(next.length ? { serviceKeys: next } : {}) };
+  const { errors } = validateConfig(candidate);
+  if (errors.length) {
+    console.error('Refusing to write an invalid config:');
+    for (const error of errors) console.error(`  ! ${error}`);
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    writeConfigFile(path, candidate);
+  } catch (err) {
+    console.error(`Failed to write ${path}: ${(err as Error).message}`);
+    process.exitCode = 1;
+    return;
+  }
+  // Hot reload a live background bridge, exactly how the daemon applies a
+  // settings Apply: PUT the full document to /v1/config (the daemon validates,
+  // persists, and reconfigures its gate by reference). No bridge = nothing to
+  // reload here; the next `modelhitch bridge` start picks the keys up from file.
+  const port = Number(process.env.MODELHITCH_PORT ?? 3939);
+  const host = process.env.MODELHITCH_HOST ?? '127.0.0.1';
+  const probe = await probeBridge(port, host);
+  if (!probe.responding) return;
+  try {
+    const res = await fetch(`${probe.url}/v1/config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(candidate),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+      console.error(`warning: the live bridge at ${probe.url} refused the reload (HTTP ${res.status}) — restart it to apply.`);
+      if (body.error?.message) console.error(`  ${body.error.message}`);
+    } else {
+      console.log(`Live bridge at ${probe.url} reloaded the key set.`);
+    }
+  } catch {
+    console.error('warning: could not reach the live bridge to hot-reload — restart it to apply.');
+  }
+}
+
+/** Print the minted material — but only once the hash is verifiably stored. */
+function printMintedKeyMaterial(
+  path: string,
+  minted: { key: string; prefix: string; hash: string },
+  label: string,
+): void {
+  const stored = storedServiceKeys(path);
+  const match = stored.find((k) => k.keyHash === minted.hash);
+  if (!match) {
+    console.error('The key material was NOT stored (the config write was refused), so it prints nothing here.');
+    process.exitCode = 1;
+    return;
+  }
+  console.log('');
+  console.log(`  ${label}`);
+  console.log(`    ${minted.key}`);
+  console.log('    shown once — only its sha256 hash is stored. Copy it now.');
+  console.log('');
+}
+
+async function runKeyCommand(args: string[]): Promise<void> {
+  const sub = args[0] ?? '';
+  const path = argValue(args, '--path') ?? defaultConfigPath();
+  const subArgs = args.slice(1);
+
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(`modelhitch key new --plan free|product [--name <name>] [--id <id>]
+            [--daily-requests N] [--daily-tokens N] [--daily-cost N] [--path <file>]
+modelhitch key list [--path <file>]
+modelhitch key rotate <id> [--path <file>]   new material, same id + limits
+modelhitch key revoke <id> [--path <file>]   stops the key after reload`);
+    return;
+  }
+
+  if (sub === 'new') {
+    const plan = argValue(subArgs, '--plan');
+    if (plan !== 'free' && plan !== 'product') {
+      console.error('Usage: modelhitch key new --plan free|product [--name <name>] [--id <id>] [--daily-requests N] [--daily-tokens N] [--daily-cost N]');
+      process.exitCode = 1;
+      return;
+    }
+    const name = argValue(subArgs, '--name');
+    const limits: Partial<ServiceKey> = {};
+    for (const [flag, field] of [
+      ['--daily-requests', 'dailyRequests'],
+      ['--daily-tokens', 'dailyTokens'],
+      ['--daily-cost', 'dailyCostUsd'],
+    ] as const) {
+      const raw = argValue(subArgs, flag);
+      if (raw === undefined) continue;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) {
+        console.error(`${flag} must be a positive number (got "${raw}").`);
+        process.exitCode = 1;
+        return;
+      }
+      limits[field] = n;
+    }
+    // Resolve the id BEFORE minting, and refuse early on a collision: minting
+    // into a config that then rejects the entry would waste material and (in
+    // a hard-to-debug way) surface as "duplicate id" AFTER printing a secret.
+    const id = argValue(subArgs, '--id') ?? slugifyKey(name ?? '') ?? `${plan}-key`;
+    const existing = storedServiceKeys(path);
+    if (!id) {
+      console.error('Either --id or --name must give at least one usable character.');
+      process.exitCode = 1;
+      return;
+    }
+    if (existing.some((k) => k.id === id)) {
+      console.error(`A service key with id "${id}" already exists. Use a different --id, or rotate: modelhitch key rotate ${id}`);
+      process.exitCode = 1;
+      return;
+    }
+    const entry: ServiceKey = {
+      id,
+      ...(name ? { name } : {}),
+      plan,
+      ...limits,
+      createdAt: new Date().toISOString(),
+      keyPrefix: '',
+      keyHash: '',
+    };
+    const minted = generateServiceKey();
+    entry.keyPrefix = minted.prefix;
+    entry.keyHash = minted.hash;
+    await mutateServiceKeys(path, (keys) => {
+      if (keys.some((k) => k.id === id)) return false; // raced with another write — refuse silently
+      keys.push(entry);
+      return keys;
+    });
+    printMintedKeyMaterial(path, minted, `service key "${id}" · plan ${plan}`);
+    return;
+  }
+
+  if (sub === 'list') {
+    const keys = storedServiceKeys(path);
+    console.log(`service keys in ${path}`);
+    if (!keys.length) {
+      console.log('  none yet — mint one: modelhitch key new --plan free --id free-starter');
+      return;
+    }
+    const header = ['id', 'plan', 'name', 'limits', 'created', 'status'];
+    const rows = [
+      header,
+      ...keys.map((k) => [
+        k.id,
+        k.plan,
+        k.name ?? '—',
+        serviceKeyLimits(k),
+        keyStamp(k.createdAt),
+        k.revoked ? 'REVOKED' : k.rotatedAt ? 'rotated' : 'active',
+      ]),
+    ];
+    for (const line of keyTable(rows)) console.log(`  ${line}`);
+    return;
+  }
+
+  if (sub === 'rotate' || sub === 'revoke') {
+    const id = subArgs[0];
+    if (!id) {
+      console.error(`Usage: modelhitch key ${sub} <id> [--path <file>]`);
+      process.exitCode = 1;
+      return;
+    }
+    const existing = storedServiceKeys(path).find((k) => k.id === id);
+    if (!existing) {
+      console.error(`No service key with id "${id}". List them: modelhitch key list`);
+      process.exitCode = 1;
+      return;
+    }
+    if (sub === 'rotate') {
+      // Mint fresh material for the SAME id and limits: old sessions keep
+      // working until their client updates (rotation revokes nothing else).
+      // Noise change only — the id, gate, and usage history stay continuous.
+      const minted = generateServiceKey();
+      const mutated = await mutateServiceKeys(path, (keys) => {
+        const entry = keys.find((k) => k.id === id);
+        if (!entry) return false;
+        entry.keyHash = minted.hash;
+        entry.keyPrefix = minted.prefix;
+        entry.rotatedAt = new Date().toISOString();
+        return keys;
+      });
+      void mutated;
+      printMintedKeyMaterial(path, minted, `rotated "${id}"`);
+      return;
+    }
+    await mutateServiceKeys(path, (keys) => {
+      const entry = keys.find((k) => k.id === id);
+      if (!entry) return false;
+      if (entry.revoked) console.log(`Key "${id}" is already revoked.`);
+      else {
+        entry.revoked = true;
+        console.log(`Key "${id}" revoked — it stops authenticating as soon as the bridge reloads (live bridge: immediate).`);
+      }
+      return keys;
+    });
+    return;
+  }
+
+  console.error(`Unknown key subcommand: ${sub || '(none)'}`);
+  console.error('  new | list | rotate | revoke');
+  process.exitCode = 1;
 }
 
 function runSettings(args: string[]): void {
@@ -1672,6 +1972,9 @@ async function main(): Promise<void> {
       break;
     case 'config':
       await runConfig(args.slice(1));
+      break;
+    case 'key':
+      await runKeyCommand(args.slice(1));
       break;
     case 'settings':
       if (args.includes('--web')) await runWebSettings();

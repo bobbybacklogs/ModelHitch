@@ -70,6 +70,8 @@ interface UsageRow {
   latencyMs: number;
   /** Added after the first release — null on rows written before it. */
   intent: string | null;
+  /** Added with service keys — null on rows written before they existed. */
+  serviceKeyId: string | null;
 }
 
 interface FailoverRow {
@@ -117,7 +119,8 @@ export class SqliteUsageStorage implements UsageStorage {
       totalTokens INTEGER NOT NULL DEFAULT 0,
       costUsd REAL NOT NULL DEFAULT 0,
       latencyMs REAL NOT NULL DEFAULT 0,
-      intent TEXT
+      intent TEXT,
+      serviceKeyId TEXT
     )`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS failover_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,9 +146,14 @@ export class SqliteUsageStorage implements UsageStorage {
     if (!columns.some((column) => column.name === 'intent')) {
       this.db.exec('ALTER TABLE usage_events ADD COLUMN intent TEXT');
     }
+    // Same story for `serviceKeyId` (service keys postdate intents): an old
+    // database keeps rows without it, so a plain ALTER with a NULL default.
+    if (!columns.some((column) => column.name === 'serviceKeyId')) {
+      this.db.exec('ALTER TABLE usage_events ADD COLUMN serviceKeyId TEXT');
+    }
     this.insertEvent = this.db.prepare(
-      `INSERT INTO usage_events (at, providerId, model, wire, streamed, inputTokens, outputTokens, totalTokens, costUsd, latencyMs, intent)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO usage_events (at, providerId, model, wire, streamed, inputTokens, outputTokens, totalTokens, costUsd, latencyMs, intent, serviceKeyId)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.insertFailover = this.db.prepare(
       `INSERT INTO failover_events (at, fromProviderId, fromModel, toProviderId, toModel, code, message, status, attempt)
@@ -166,6 +174,7 @@ export class SqliteUsageStorage implements UsageStorage {
       costUsd: r.costUsd,
       latencyMs: r.latencyMs,
       ...(r.intent ? { intent: r.intent as UsageEvent['intent'] } : {}),
+      ...(r.serviceKeyId ? { serviceKeyId: r.serviceKeyId } : {}),
       at: r.at,
     }));
     const frows = this.db
@@ -199,6 +208,7 @@ export class SqliteUsageStorage implements UsageStorage {
       event.costUsd ?? 0,
       event.latencyMs ?? 0,
       event.intent ?? null,
+      event.serviceKeyId ?? null,
     );
   }
 

@@ -1,5 +1,6 @@
 import type { FailoverEvent } from './failover.js';
 import { DEFAULT_INTENT, type IntentKey } from './intent.js';
+import type { ServiceKeyUsageWindow } from './key-gate.js';
 import type { UsageStorage } from './usage-storage.js';
 
 /**
@@ -34,6 +35,13 @@ export interface UsageEvent {
    * intents existed, and by callers that construct their own.
    */
   intent?: IntentKey;
+  /**
+   * The service key the request came in on, when the bridge gates with service
+   * keys and the request carried one. Zero-usage events ARE recorded for keyed
+   * requests that fail upstream — the dailyRequests gate is an honest
+   * "even failed attempts count" reservation, so admission needs a row here.
+   */
+  serviceKeyId?: string;
   /** ISO timestamp. */
   at: string;
 }
@@ -57,6 +65,8 @@ export interface UsageSlice {
   perWire: Record<string, UsageTotals>;
   /** Keyed by intent name; `default` is the base policy. */
   perIntent: Record<string, UsageTotals>;
+  /** Keyed by service-key id. Only keys that carried traffic appear. */
+  perServiceKey: Record<string, UsageTotals>;
 }
 
 export interface UsageSnapshot {
@@ -71,6 +81,8 @@ export interface UsageSnapshot {
   perWire: Record<string, UsageTotals>;
   /** Keyed by intent name; `default` is the base policy. */
   perIntent: Record<string, UsageTotals>;
+  /** Keyed by service-key id. Only keys that carried traffic appear. */
+  perServiceKey: Record<string, UsageTotals>;
   /** Most recent events, newest first. */
   recent: UsageEvent[];
   failovers: { total: number; recent: FailoverEvent[] };
@@ -177,12 +189,42 @@ export class UsageTracker {
       // An event with no intent routed on the base plan, which is what `default`
       // names — so the breakdown is total rather than having a silent bucket.
       perIntent: this.group(events, (e) => e.intent ?? DEFAULT_INTENT),
+      // Only keyed traffic lands in this breakdown: events recorded before
+      // service keys existed (or that arrived while no gate was live) have no
+      // id, and inventing a bucket for "the ungated era" would suggest it is a
+      // key. So the record lists exactly the keys that carried traffic.
+      perServiceKey: this.group(events.filter((e) => e.serviceKeyId !== undefined), (e) => e.serviceKeyId ?? ''),
     };
   }
 
   private sinceHours(hours: number): UsageEvent[] {
     const cutoff = Date.now() - hours * 3_600_000;
     return this.events.filter((e) => Date.parse(e.at) >= cutoff);
+  }
+
+  /**
+   * A service key's recorded use inside a rolling window (`hours`, default 24).
+   *
+   * This is the usage source the service-key gate reads: the gate counts the
+   * same recorded events the dashboard shows for "Last 24 hours", including
+   * zero-usage events for failed attempts (a keyed request always records a
+   * row — the requests gate reserves a slot at admission). The returned
+   * `oldestAt` powers the 429 Retry-After math: a slot reopens when the oldest
+   * event in the window ages out.
+   */
+  serviceKeyWindow(keyId: string, hours = 24): ServiceKeyUsageWindow {
+    const cutoff = Date.now() - hours * 3_600_000;
+    const events = this.events.filter((e) => e.serviceKeyId === keyId && Date.parse(e.at) >= cutoff);
+    const oldest = events.reduce<string | undefined>(
+      (min, e) => (min === undefined || Date.parse(e.at) < Date.parse(min) ? e.at : min),
+      undefined,
+    );
+    return {
+      requests: events.length,
+      totalTokens: events.reduce((n, e) => n + (e.totalTokens ?? 0), 0),
+      costUsd: events.reduce((n, e) => n + (e.costUsd ?? 0), 0),
+      ...(oldest !== undefined ? { oldestAt: oldest } : {}),
+    };
   }
 
   snapshot(): UsageSnapshot {
@@ -195,6 +237,7 @@ export class UsageTracker {
       perModel: all.perModel,
       perWire: all.perWire,
       perIntent: all.perIntent,
+      perServiceKey: all.perServiceKey,
       recent: this.events.slice(-50).reverse(),
       failovers: {
         total: this.failoverEvents.length,
